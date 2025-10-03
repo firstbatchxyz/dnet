@@ -1,0 +1,21 @@
+[project]
+name = "dnet"
+version = "0.1.0"
+description = "Distributed Inference"
+readme = "README.md"
+license = { text = "MIT AND (Apache-2.0 OR BSD-2-Clause)" }
+authors = [
+  { name = "andthattoo", email = "omer@dria.co" },
+  { name = "erhant", email = "erhan@dria.co" },
+  { name = "Mehmet Uzunosmanoğlu", email = "mehmet@dria.co" },
+  { name = "Shashank Jaiswal", email = "shashank@dria.co" },
+]
+keywords = [
+  "Artificial Intelligence",
+  "Large Language Models",
+  "Apple Silicon",
+  "MLX",
+]
+requires-python = ">=3.12"
+dependencies = []
+

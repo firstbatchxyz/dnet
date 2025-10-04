@@ -3,7 +3,7 @@ name = "dnet"
 version = "0.1.0"
 description = "Distributed Inference"
 readme = "README.md"
-license = { text = "MIT AND (Apache-2.0 OR BSD-2-Clause)" }
+license = { file = "LICENSE" }
 authors = [
   { name = "andthattoo", email = "omer@dria.co" },
   { name = "erhant", email = "erhan@dria.co" },
@@ -17,5 +17,27 @@ keywords = [
   "MLX",
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+  "dperf @ file://${PROJECT_ROOT}/lib/dperf",
+  "dsolver @ file://${PROJECT_ROOT}/lib/dsolver",
+  "dnet-p2p @ file://${PROJECT_ROOT}/lib/dnet-p2p/bindings/py",
+]
 
+[project.scripts]
+dnet-api = "cli.api:main"
+dnet-shard = "cli.shard:main"
+
+[dependency-groups]
+dev = ["pytest>=8.4.2"]
+
+[build-system]
+requires = ["uv_build>=0.8.17,<0.9.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+python_files = ["dnet/**/*_test.py", "tests/*.py"]
+python_functions = ["test_"]
+log_cli = true
+
+[tool.ruff]
+exclude = [".git", ".venv", "__pycache__", "build", "dist", "lib"]

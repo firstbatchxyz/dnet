@@ -1,0 +1,41 @@
+# Python crud
+*.pyc
+*.pyo
+
+# Distfiles related goo
+MANIFEST
+dist/
+build/
+*.egg-info/
+uv.lock
+src/protos/*_pb2.py
+src/protos/*_pb2_grpc.py
+src/protos/*_pb2.pyi
+src/protos/*_pb2_grpc.pyi
+digest.txt
+
+# Documentation
+doc/build/
+
+# Temporary files
+*.h5*
+*.gz
+*.txt
+*.lpk
+*.png
+*.log
+*.dat
+
+# output directory
+output/
+__pycache__
+docker-compose.yaml
+piped_mlx.egg-info/
+
+# Coverage
+.coverage
+
+.idea/
+.vscode/
+.DS_Store
+.ruff_cache/

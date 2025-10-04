@@ -1,0 +1,9 @@
+[submodule "lib/dnet-p2p"]
+	path = lib/dnet-p2p
+	url = https://github.com/firstbatchxyz/dnet-p2p
+[submodule "lib/dperf"]
+	path = lib/dperf
+	url = https://github.com/firstbatchxyz/py-dperf
+[submodule "lib/dsolver"]
+	path = lib/dsolver
+	url = https://github.com/firstbatchxyz/dsolver

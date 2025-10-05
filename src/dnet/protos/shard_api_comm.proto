@@ -1,0 +1,52 @@
+syntax = "proto3";
+
+package shardapi;
+
+// Service for communication between shards and API node
+service ShardApiService {
+    // Send final activation from shard to API for token generation
+    rpc SendFinalActivation(FinalActivationRequest) returns (FinalActivationResponse);
+    
+    // Send generated token back from API to first shard
+    rpc SendToken(TokenRequest) returns (TokenResponse);
+}
+
+// Final activation data from last layer
+message FinalActivationRequest {
+    string nonce = 1;              // Unique request identifier
+    bytes data = 2;                 // Tensor data (activations)
+    int32 batch_size = 3;           // Number of activations
+    repeated int32 shape = 4;      // Shape of tensor
+    string dtype = 5;               // Data type of tensor
+    int32 layer_id = 6;             // Layer that produced these activations
+    int64 timestamp = 7;            // Timestamp for debugging/metrics
+    string node_origin = 8;         // Originating node ID for tracing
+}
+
+// Response after processing final activation
+message FinalActivationResponse {
+    bool success = 1;               // Whether the activation was processed
+    string message = 2;             // Optional error message or status
+    int32 token_id = 3;             // Generated token ID (if successful)
+}
+
+// Token to send back to first shard for next iteration
+message TokenRequest {
+    string nonce = 1;               // Request identifier
+    int32 token_id = 2;             // The generated token
+    int64 timestamp = 3;            // Timestamp
+}
+
+// Response for token reception
+message TokenResponse {
+    bool success = 1;               // Whether token was received
+    string message = 2;             // Optional status message
+}
+
+// Error message for ring inference failures
+message RingError {
+    string nonce = 1;               // Request identifier
+    string failed_node = 2;         // Node that failed
+    string error_code = 3;          // Error code
+    string error = 4;               // Error description
+}

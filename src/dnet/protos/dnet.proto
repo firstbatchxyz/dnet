@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package dnet;
+
+service DnetService {
+  rpc SendTensor (Tensor) returns (TensorResponse) {}
+  rpc ResetCache (ResetCacheRequest) returns (ResetCacheResponse) {}
+}
+
+message Tensor {
+  bytes tensor_data = 1;
+  repeated int32 shape = 2;
+  string dtype = 3;
+}
+
+message TensorResponse {
+  bool success = 1;
+  string message = 2;
+  Tensor tensor = 3;
+}
+
+message ResetCacheRequest {
+}
+
+message ResetCacheResponse {
+  bool success = 1;
+  string message = 2;
+}

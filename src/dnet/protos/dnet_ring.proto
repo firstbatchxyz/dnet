@@ -1,0 +1,88 @@
+syntax = "proto3";
+
+package dnetring;
+
+// The service for running distributed inference over a ring
+service DnetRingService {
+    // Send activation data to the next node in the ring
+    rpc SendActivation(ActivationRequest) returns (ActivationResponse);
+
+    // Health check for node status
+    rpc HealthCheck(HealthRequest) returns (HealthResponse);
+
+    // Reset LLM Cache
+    rpc ResetCache (ResetCacheRequest) returns (ResetCacheResponse) {}
+
+    // Measure latency between nodes
+    rpc MeasureLatency (LatencyMeasureRequest) returns (LatencyMeasureResponse) {}
+}
+
+// Activation
+message Activation {
+  bytes data = 1;            // Tensor data
+  int32 batch_size = 2;      // Number of activations (multiple request batching)
+  repeated int32 shape = 3;  // Shape of each tensor
+  string dtype = 4;          // Data type of each tensor
+  int32 layer_id = 5;        // Layer that produced these activations (-1 for input)
+}
+
+// Request message for sending activations
+message ActivationRequest {
+    string nonce = 1;             // Unique request identifier
+    Activation activation = 2;    // Activation data
+    int64 timestamp = 3;          // Timestamp for debugging/metrics
+    string node_origin = 4;       // Originating node ID for tracing
+    string callback_url = 5;      // Callback URL for API node
+}
+
+// Response message for activation sending
+message ActivationResponse {
+    bool success = 1;             // Whether the activation was processed successfully
+    string message = 2;           // Optional error message or status info
+    string node_id = 3;           // Responding node identifier
+}
+
+// Health check request
+message HealthRequest {
+    string requester_id = 1;      // ID of the requesting node
+}
+
+// Health check response
+message HealthResponse {
+    bool healthy = 1;             // Node health status
+    string node_id = 2;           // Responding node ID
+    repeated int32 assigned_layers = 3;  // Layers assigned to this node
+    int32 queue_size = 4;         // Current queue size
+    int32 active_requests = 5;    // Number of active requests being processed
+}
+
+// Weight prefetch message (for internal use)
+message WeightRequest {
+    string weight_id = 1;         // Weight identifier
+    int32 layer_id = 2;           // Associated layer
+    int32 priority = 3;           // Prefetch priority
+}
+
+message ResetCacheRequest {
+}
+
+message ResetCacheResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// Latency measurement request
+message LatencyMeasureRequest {
+  string requester_id = 1;          // ID of the requesting node
+  int32 payload_size = 2;           // Size of dummy data to send (bytes)
+  bytes dummy_data = 3;             // Dummy payload data
+  int64 timestamp = 4;              // Timestamp when request was sent
+}
+
+// Latency measurement response
+message LatencyMeasureResponse {
+  bool success = 1;                 // Whether measurement succeeded
+  string message = 2;               // Optional error message
+  string node_id = 3;               // Responding node ID
+  int64 timestamp = 4;              // Timestamp when response was sent
+}

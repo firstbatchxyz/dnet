@@ -1,7 +1,10 @@
 """Asynchronous iteration utilities for dnet."""
 
 import asyncio
-from typing import Any, AsyncIterator, Self, Union, final, overload
+from typing import TYPE_CHECKING, Any, AsyncIterator, Self, Union, final, overload
+
+if TYPE_CHECKING:
+    from ..ring.model import BaseRingModel
 
 
 @final
@@ -146,3 +149,17 @@ async def azip(*aiters: AsyncIterator[Any]) -> AsyncIterator[tuple]:
             yield tuple(values)
         except (StopAsyncIteration, asyncio.CancelledError):
             return
+
+
+def make_cache(model: "BaseRingModel") -> Any:
+    """Create a prompt cache for the model.
+
+    Args:
+        model: Ring model instance
+
+    Returns:
+        Prompt cache for the model
+    """
+    from mlx_lm import cache
+
+    return cache.make_prompt_cache(model)

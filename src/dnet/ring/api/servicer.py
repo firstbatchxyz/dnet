@@ -43,9 +43,7 @@ class ApiServicer(pb2_grpc.ShardApiServiceServicer):
             # Transport metrics (timestamps are in ms)
             coarse_transport_ms = (time.time() * 1000.0) - float(request.timestamp)
 
-            payload_kb = (
-                len(request.data) / 1024.0 if request.data is not None else 0.0
-            )
+            payload_kb = len(request.data) / 1024.0 if request.data is not None else 0.0
             logger.info(
                 f"[PROFILE][API-RX] nonce={request.nonce} "
                 f"payload_kb={payload_kb:.1f} "

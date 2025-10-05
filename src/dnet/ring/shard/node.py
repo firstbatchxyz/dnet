@@ -37,13 +37,13 @@ from ...utils.latency import (
     LatencyResults,
     calculate_median_latency_seconds,
 )
-from ...utils.loader import dtype_map, mlx_dtype_map, tensor_to_bytes
 from ...utils.logger import logger
-from ...utils.model import ModelMetadata
+from ...utils.model import ModelMetadata, get_model_metadata
+from ...utils.serialization import dtype_map, mlx_dtype_map, tensor_to_bytes
 from ..api_models import RecieveResultRequest
 from ..data_types import ActivationMessage
 from ..memory_pool import LayerAwareMemoryPool
-from ..models import get_ring_model
+from ..model import get_ring_model
 from ..weight_cache import WeightCache
 from .servicer import ShardServicer
 
@@ -174,9 +174,7 @@ class RingShardNode:
                 await self.unload_model()
 
             # Load model metadata
-            from ...utils.loader import load_model_metadata
-
-            self.model_metadata = load_model_metadata(model_path)
+            self.model_metadata = get_model_metadata(model_path)
             self.assigned_layers = layers
             self.model_path = model_path
 

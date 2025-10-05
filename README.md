@@ -37,6 +37,12 @@ After cloning the repository, simply run the following to setup everything:
 uv sync
 ```
 
+Finally, generate protos:
+
+```sh
+uv run ./scripts/generate_protos.py
+```
+
 ## Usage
 
 dnet uses a **dynamic topology** approach where nodes start without models, then the API discovers devices and distributes layers optimally.
@@ -50,6 +56,7 @@ dnet uses a **dynamic topology** approach where nodes start without models, then
 5. **Inference**: Use `/v1/chat/completions` endpoint for generation
 
 Supported models:
+
 - Qwen3
 - DeepSeek V2
 - MLX formats: fp16, bf16, 4-bit, 8-bit quantized
@@ -63,12 +70,14 @@ uv run dnet-shard -p 6060 --http-port 7070
 ```
 
 **Arguments:**
+
 - `-p, --grpc-port`: gRPC server port (required)
 - `--http-port`: HTTP server port (required)
 - `-q, --queue-size`: Activation queue size (default: 10)
 - `-w, --prefetch-window`: Number of layers to prefetch (default: 2)
 
 The shard will:
+
 - Register itself via mDNS discovery
 - Wait for LoadModel commands from the API
 - Process activations through assigned layers
@@ -82,6 +91,7 @@ uv run dnet-api -p 8080
 ```
 
 **Arguments:**
+
 - `-p, --http-port`: HTTP server port (default: 8080)
 - `-g, --grpc-port`: gRPC callback port (default: http-port + 1)
 
@@ -101,6 +111,7 @@ curl -X POST http://localhost:8080/v1/prepare_topology \
 ```
 
 **Response:**
+
 ```json
 {
   "model": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
@@ -131,6 +142,7 @@ curl -X POST http://localhost:8080/v1/load_model \
 ```
 
 **Response:**
+
 ```json
 {
   "model": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",

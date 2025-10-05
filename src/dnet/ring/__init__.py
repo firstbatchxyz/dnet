@@ -35,10 +35,9 @@ from .memory_pool import (
 )
 from .model import (
     BaseRingModel,
-    DeepseekV2,
-    DeepseekV2Args,
-    Qwen3,
-    Qwen3Args,
+    DeepseekV2RingModel,
+    Qwen3RingModel,
+    get_ring_model,
 )
 from .weight_cache import WeightCache
 
@@ -75,10 +74,9 @@ __all__ = [
     "LayerAwareMemoryPool",
     # model
     "BaseRingModel",
-    "DeepseekV2",
-    "DeepseekV2Args",
-    "Qwen3",
-    "Qwen3Args",
+    "DeepseekV2RingModel",
+    "Qwen3RingModel",
+    "get_ring_model",
     # weight_cache
     "WeightCache",
 ]

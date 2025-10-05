@@ -31,7 +31,7 @@ from ...protos.shard_api_comm_pb2_grpc import (
 )
 from ...utils.loader import create_generate_step_for_ring_with_grpc, load_api_layer_weights
 from ...utils.logger import logger
-from ...utils.model import ModelMetadata
+from ...utils.model import ModelMetadata, get_model_metadata
 from ..api_models import (
     ChatBaseParams,
     ChatChoice,
@@ -53,7 +53,7 @@ from ..api_models import (
     ShardLoadStatus,
 )
 from ..data_types import StopCondition
-from ..models import get_ring_model
+from ..model import get_ring_model
 from .servicer import ApiServicer
 
 
@@ -296,9 +296,7 @@ class RingApiNode:
             await asyncio.sleep(2.0)
 
         # Load model metadata
-        from ...utils.loader import load_model_metadata
-
-        model_metadata = load_model_metadata(req.model)
+        model_metadata = get_model_metadata(req.model)
 
         # Calculate embedding size
         embedding_size = await self._get_embedding_size(model_metadata, req.model)
@@ -469,9 +467,7 @@ class RingApiNode:
         # If successful, load API-side model components
         if all_success:
             try:
-                from ...utils.loader import load_model_metadata
-
-                self.model_metadata = load_model_metadata(req.model)
+                self.model_metadata = get_model_metadata(req.model)
                 self.model_name = req.model
 
                 # Load tokenizer

@@ -19,13 +19,13 @@
 
 ## Installation
 
-dnet requires several submodules, which can all be cloned with the following command:
+**dnet** requires several submodules, which can all be cloned with the following command:
 
 ```sh
 git clone --recurse-submodules https://github.com/firstbatchxyz/dnet.git
 ```
 
-dnet uses `uv`, so make sure it is installed. You can check for uv with the command below, and follow the [installation guide](https://docs.astral.sh/uv/getting-started/installation/) if you do not have it.
+**dnet** uses `uv`, so make sure it is installed. You can check for uv with the command below, and follow the [installation guide](https://docs.astral.sh/uv/getting-started/installation/) if you do not have it.
 
 ```sh
 uv --version
@@ -45,7 +45,7 @@ uv run ./scripts/generate_protos.py
 
 ## Usage
 
-dnet uses a **dynamic topology** approach where nodes start without models, then the API discovers devices and distributes layers optimally.
+**dnet** uses a **dynamic topology** approach where nodes start without models, then the API discovers devices and distributes layers optimally.
 
 ### Workflow
 
@@ -120,8 +120,9 @@ Response will be in the form:
   ],
   "assignments": [
     {
-      "service_name": "shard-123456._dnet_p2p._tcp.local.",
-      "layers": [0, 1 /* ... */]
+      "service": "shard-123456._dnet_p2p._tcp.local.",
+      "layers": [[0, 1, 2], [3, 4, 5]],
+      "next_services": ["shard-123456._dnet_p2p._tcp.local.", null]
     }
   ]
 }
@@ -139,8 +140,16 @@ curl -X POST http://localhost:8080/v1/load_model \
   -d '{
     "model": "Qwen/Qwen3-4B-MLX-4bit",
     "assignments": [
-      {"service_name": "shard-123456._dnet_p2p._tcp.local.", "layers": [0, 1, 8, 9, 16, 17]},
-      {"service_name": "shard-987654._dnet_p2p._tcp.local.", "layers": [2, 3, 10, 11, 18, 19]}
+      {
+        "service": "shard-123456._dnet_p2p._tcp.local.",
+        "layers": [[0, 1, 2], [3, 4, 5]],
+        "next_services": ["shard-987654._dnet_p2p._tcp.local.", null]
+      },
+      {
+        "service": "shard-987654._dnet_p2p._tcp.local.",
+        "layers": [[6, 7, 8], [9, 10, 11]],
+        "next_services": ["shard-123456._dnet_p2p._tcp.local.", null]
+      }
     ]
   }'
 ```

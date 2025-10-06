@@ -154,7 +154,7 @@ class RingApiNode:
             is_manager=True,  # API is a manager
         )
         self.discovery.start()
-        logger.info(f"Discovery service started for API node")
+        logger.info("Discovery service started for API node")
 
     async def _start_grpc_server(self) -> None:
         """Start gRPC server for receiving callbacks from shards."""
@@ -322,9 +322,9 @@ class RingApiNode:
         # Run solver
         device_names, solution = await self._run_solver(shard_profiles, model_profile)
 
-        # Compute layer assignments, next node mapping, and prefetch windows
-        layer_assignments, next_node_map, prefetch_windows = self._compute_layer_assignments(
-            device_names, solution, shards
+        # Compute layer assignments, next services mapping, and prefetch windows
+        layer_assignments, next_services_map, prefetch_windows = (
+            self._compute_layer_assignments(device_names, solution, shards)
         )
 
         # Store topology
@@ -333,7 +333,7 @@ class RingApiNode:
             "num_layers": model_metadata.num_layers,
             "devices": device_names,
             "assignments": layer_assignments,
-            "next_node_map": next_node_map,
+            "next_services_map": next_services_map,
             "prefetch_windows": prefetch_windows,
             "solution": asdict(solution),
         }
@@ -351,11 +351,11 @@ class RingApiNode:
 
         assignments_info = [
             LayerAssignment(
-                service_name=name,
-                layers=layers,
-                next_node_service_name=next_node_map.get(name),
+                service=name,
+                layers=layer_assignments[name],
+                next_services=next_services_map[name],
             )
-            for name, layers in layer_assignments.items()
+            for name in device_names
         ]
 
         logger.info(
@@ -386,9 +386,12 @@ class RingApiNode:
         logger.info(f"Loading model: {req.model}")
         start_time = time.perf_counter()
 
-        # Create layer assignment map
+        # Create layer assignment map - flatten layers for internal use
         layer_assignments = {
-            assignment.service_name: assignment.layers for assignment in req.assignments
+            assignment.service: [
+                layer for round_layers in assignment.layers for layer in round_layers
+            ]
+            for assignment in req.assignments
         }
 
         # Get prefetch windows from stored topology
@@ -400,12 +403,15 @@ class RingApiNode:
         # Get shards
         shards = self._get_shards_from_discovery()
 
-        # Notify each shard to load their layers via gRPC
+        # Notify each shard to load their layers via HTTP
         shard_statuses: List[ShardLoadStatus] = []
         async with httpx.AsyncClient() as http_client:
             for assignment in req.assignments:
-                service_name = assignment.service_name
-                layers = assignment.layers
+                service_name = assignment.service
+                # Flatten layers for shard loading
+                layers = [
+                    layer for round_layers in assignment.layers for layer in round_layers
+                ]
 
                 if service_name not in shards:
                     logger.warning(f"Shard {service_name} not found in discovery")
@@ -421,21 +427,20 @@ class RingApiNode:
 
                 shard_props = shards[service_name]
 
-                # Get next node address from assignment
+                # Get next node address from first round's next service
+                # The shard will handle all rounds internally
                 next_node_address = ""
-                if (
-                    assignment.next_node_service_name
-                    and assignment.next_node_service_name in shards
-                ):
-                    next_shard = shards[assignment.next_node_service_name]
+                first_round_next = assignment.next_services[0] if assignment.next_services else None
+                if first_round_next and first_round_next in shards:
+                    next_shard = shards[first_round_next]
                     next_node_address = f"{next_shard.local_ip}:{next_shard.shard_port}"
                     logger.info(
-                        f"Shard {service_name} next node: {assignment.next_node_service_name} "
+                        f"Shard {service_name} first round next node: {first_round_next} "
                         f"at {next_node_address}"
                     )
                 else:
                     logger.info(
-                        f"Shard {service_name} is final shard (connects to API)"
+                        f"Shard {service_name} first round connects to API"
                     )
 
                 try:
@@ -803,8 +808,8 @@ class RingApiNode:
         device_names: List[str],
         solution: HALDAResult,
         shards: Dict[str, DnetDeviceProperties],
-    ) -> Tuple[Dict[str, List[int]], Dict[str, Optional[str]], Dict[str, int]]:
-        """Compute layer assignments, next node mapping, and prefetch windows from solver output.
+    ) -> Tuple[Dict[str, List[List[int]]], Dict[str, List[Optional[str]]], Dict[str, int]]:
+        """Compute round-aware layer assignments, next node mapping, and prefetch windows from solver output.
 
         Args:
             device_names: Device names in solver order
@@ -812,7 +817,7 @@ class RingApiNode:
             shards: Discovered shards
 
         Returns:
-            Tuple of (layer assignments per device, next node service name per device, prefetch window per device)
+            Tuple of (layer assignments per device per round, next services per device per round, prefetch window per device)
         """
         if len(solution.w) != len(shards) or len(device_names) != len(shards):
             raise ValueError(
@@ -821,64 +826,80 @@ class RingApiNode:
             )
 
         num_layers = sum(solution.w) * solution.k
-        logger.info(f"Distributing {num_layers} layers to {len(shards)} devices")
+        logger.info(f"Distributing {num_layers} layers to {len(shards)} devices in {solution.k} rounds")
 
-        # Assign layers in round-robin fashion
-        # assuming first device has `is_head=True`
-        layer_assignments: Dict[str, List[int]] = {name: [] for name in device_names}
+        # Assign layers in round-robin fashion, grouped by rounds
+        # Each device gets k sublists (one per round)
+        layer_assignments: Dict[str, List[List[int]]] = {name: [[] for _ in range(solution.k)] for name in device_names}
         current_layer = 0
-        for _ in range(solution.k):
+
+        for round_idx in range(solution.k):
             for device_idx, device_name in enumerate(device_names):
                 for _ in range(solution.w[device_idx]):
-                    layer_assignments[device_name].append(current_layer)
+                    layer_assignments[device_name][round_idx].append(current_layer)
                     current_layer += 1
 
         assert current_layer == num_layers, (
             f"Assigned {current_layer} layers, expected {num_layers}"
         )
 
-        # Compute next node for each device based on ring order
-        # In a ring topology with k>1, each device forwards to the next device in round-robin order
-        # Special case: with a single device and k>1, it forwards to itself
-        next_node_map: Dict[str, Optional[str]] = {}
+        # Compute next node for each device per round
+        # In k rounds, data flows: dev1 -> dev2 -> ... -> devN -> dev1 (repeat k times)
+        next_services_map: Dict[str, List[Optional[str]]] = {name: [] for name in device_names}
 
-        if len(device_names) == 1 and solution.k > 1:
-            # Single device with k>1: forward to itself for multiple rounds
-            next_node_map[device_names[0]] = device_names[0]
+        if len(device_names) == 1:
+            # Single device: forward to itself for k-1 rounds, then to API
+            for round_idx in range(solution.k):
+                if round_idx < solution.k - 1:
+                    next_services_map[device_names[0]].append(device_names[0])  # Self-loop
+                else:
+                    next_services_map[device_names[0]].append(None)  # Final round -> API
+
             logger.info(
-                f"Ring: {device_names[0]} (layers {layer_assignments[device_names[0]]}) -> "
-                f"SELF (k={solution.k} rounds)"
+                f"Ring (single device): {device_names[0]} -> "
+                f"SELF for {solution.k-1} rounds, then API"
             )
         else:
-            # Multiple devices or k=1: standard ring topology
-            for i, service_name in enumerate(device_names):
-                if i < len(device_names) - 1:
-                    # Forward to next device in ring
-                    next_node_map[service_name] = device_names[i + 1]
-                else:
-                    # Last device sends to API
-                    next_node_map[service_name] = None
+            # Multiple devices: round-robin for k rounds
+            for round_idx in range(solution.k):
+                for i, service_name in enumerate(device_names):
+                    # In each round, forward to next device
+                    # Last device in last round sends to API, otherwise wraps to first device
+                    if i < len(device_names) - 1:
+                        # Forward to next device
+                        next_services_map[service_name].append(device_names[i + 1])
+                    else:
+                        # Last device
+                        if round_idx < solution.k - 1:
+                            # Not final round: wrap to first device
+                            next_services_map[service_name].append(device_names[0])
+                        else:
+                            # Final round: send to API
+                            next_services_map[service_name].append(None)
 
+            # Log topology for each device
+            for service_name in device_names:
                 logger.info(
-                    f"Ring: {service_name} (layers {layer_assignments[service_name]}) -> "
-                    f"{next_node_map[service_name] or 'API (final)'}"
+                    f"Ring: {service_name} rounds={solution.k} -> {next_services_map[service_name]}"
                 )
 
-        # Compute prefetch window for each device: num_layers / k
+        # Compute prefetch window for each device: total_layers_per_device / k
         prefetch_windows: Dict[str, int] = {}
-        for service_name, layers in layer_assignments.items():
-            if layers:
-                prefetch_window = max(1, len(layers) // solution.k)
+        for service_name, rounds_layers in layer_assignments.items():
+            # Flatten to count total layers
+            total_layers = sum(len(round_layers) for round_layers in rounds_layers)
+            if total_layers > 0:
+                prefetch_window = max(1, total_layers // solution.k)
                 prefetch_windows[service_name] = prefetch_window
                 logger.info(
                     f"Prefetch window for {service_name}: {prefetch_window} "
-                    f"(layers={len(layers)}, k={solution.k})"
+                    f"(total_layers={total_layers}, k={solution.k})"
                 )
             else:
                 prefetch_windows[service_name] = 1
 
-        logger.info(f"Layer assignments: {layer_assignments}")
-        return layer_assignments, next_node_map, prefetch_windows
+        logger.info(f"Layer assignments (by rounds): {layer_assignments}")
+        return layer_assignments, next_services_map, prefetch_windows
 
     async def _handle_chat_completion(self, req: ChatRequestModel) -> ChatResponseModel:
         """Handle chat completion request.

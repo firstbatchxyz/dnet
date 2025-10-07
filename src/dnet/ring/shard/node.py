@@ -87,6 +87,8 @@ class RingShardNode:
 
         # Topology (configured later)
         self.next_node_address: Optional[str] = None
+        self.total_layers: int = 0  # Total layers in model
+        self.api_callback_address: Optional[str] = None  # API callback address for final layer
 
         # HTTP server
         self.app = FastAPI()
@@ -135,6 +137,8 @@ class RingShardNode:
         warmup: bool = False,
         next_node_address: str = "",
         prefetch_window: Optional[int] = None,
+        total_layers: Optional[int] = None,
+        api_callback_address: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Load model with specified layers.
 
@@ -142,8 +146,10 @@ class RingShardNode:
             model_path: Path to model (HF repo ID or local path)
             layers: Layer indices to load
             warmup: Whether to perform warmup after loading
-            next_node_address: Address of next shard in ring (empty if last)
+            next_node_address: Address of next shard in ring
             prefetch_window: Number of layers to prefetch (computed from k if not provided)
+            total_layers: Total number of layers in the model
+            api_callback_address: API callback address for final layer completion
 
         Returns:
             Dict with success, message, layers_loaded, load_time_ms
@@ -215,13 +221,24 @@ class RingShardNode:
             self._prefetch_scheduled = set()
             self._bound_versions = {}
 
-            # Set next node address and connect
+            # Set topology information
             self.next_node_address = next_node_address
+            self.total_layers = total_layers or 0
+            self.api_callback_address = api_callback_address
+
             if next_node_address:
                 await self._connect_next_node()
+                logger.info(
+                    f"Node {self.node_id}: Next node in ring at {next_node_address}"
+                )
             else:
                 logger.info(
-                    f"Node {self.node_id}: This is the last shard (no next node)"
+                    f"Node {self.node_id}: No next node configured"
+                )
+
+            if api_callback_address:
+                logger.info(
+                    f"Node {self.node_id}: API callback at {api_callback_address} for final layer"
                 )
 
             # Warmup if requested
@@ -507,6 +524,8 @@ class RingShardNode:
                 warmup = body.get("warmup", False)
                 next_node_address = body.get("next_node_address", "")
                 prefetch_window = body.get("prefetch_window")
+                total_layers = body.get("total_layers")
+                api_callback_address = body.get("api_callback_address")
 
                 if not model_path:
                     return JSONResponse(
@@ -521,7 +540,8 @@ class RingShardNode:
 
                 logger.info(
                     f"HTTP /load_model: model={model_path}, layers={layers}, "
-                    f"next_node={next_node_address or 'none'}, prefetch_window={prefetch_window}"
+                    f"next_node={next_node_address or 'none'}, prefetch_window={prefetch_window}, "
+                    f"total_layers={total_layers}, api_callback={api_callback_address or 'none'}"
                 )
 
                 result = await self.load_model(
@@ -530,6 +550,8 @@ class RingShardNode:
                     warmup=warmup,
                     next_node_address=next_node_address,
                     prefetch_window=prefetch_window,
+                    total_layers=total_layers,
+                    api_callback_address=api_callback_address,
                 )
 
                 return JSONResponse(content=result)
@@ -1157,16 +1179,21 @@ class RingShardNode:
             ser_ms = (time.perf_counter() - t_ser) * 1000.0
 
             # Send to next node or complete
-            assert self.model_metadata is not None
             next_layer = activation_msg.layer_id + 1
+
+            # Use total_layers if available, otherwise fall back to model_metadata
+            total_layers = self.total_layers if self.total_layers > 0 else (
+                self.model_metadata.num_layers if self.model_metadata else 0
+            )
+
             logger.info(
                 f"Node {self.node_id}: Processed layer {activation_msg.layer_id}, "
-                f"next_layer={next_layer}, total_layers={self.model_metadata.num_layers}, "
+                f"next_layer={next_layer}, total_layers={total_layers}, "
                 f"has_next_stub={self.next_node_stub is not None}, "
                 f"next_address={self.next_node_address}"
             )
 
-            if next_layer < self.model_metadata.num_layers:
+            if next_layer < total_layers:
                 # More layers to process - forward to next shard
                 if self.next_node_stub:
                     logger.info(
@@ -1203,7 +1230,7 @@ class RingShardNode:
                         f"next_node_address={self.next_node_address}"
                     )
             else:
-                # Final node - send to API
+                # Final layer - send to API callback
                 logger.info(
                     f"FINAL OUTPUT - Nonce: {activation_msg.nonce}, "
                     f"Shape: {activation_msg.shape}, Layer: {activation_msg.layer_id}"
@@ -1212,55 +1239,54 @@ class RingShardNode:
                 serialized = tensor_to_bytes(output_buffer)
                 final_ser_ms = (time.perf_counter() - t_final_ser) * 1000.0
 
-                # Prefer gRPC callback
-                if activation_msg.callback_url.startswith("grpc://"):
+                # Use API callback address if provided, otherwise use callback_url from activation
+                api_addr = self.api_callback_address
+                if not api_addr and activation_msg.callback_url.startswith("grpc://"):
                     parsed = urlparse(activation_msg.callback_url)
-                    addr = parsed.netloc  # host:port
-                    if not addr:
-                        logger.error(
-                            f"Invalid gRPC callback URL: {activation_msg.callback_url}"
-                        )
-                    else:
-                        if (self.api_channel is None) or (addr != self.api_address):
-                            # Reconnect if address changed
-                            if self.api_channel is not None:
-                                try:
-                                    await self.api_channel.close()
-                                except Exception:
-                                    pass
-                            self.api_address = addr
-                            self.api_channel = aio_grpc.insecure_channel(addr)
-                            self.api_stub = ShardApiServiceStub(self.api_channel)
+                    api_addr = parsed.netloc  # host:port
 
-                        try:
-                            t_rpc = time.perf_counter()
-                            req = shard_api_comm_pb2.FinalActivationRequest(
-                                nonce=activation_msg.nonce,
-                                data=serialized,
-                                batch_size=activation_msg.batch_size,
-                                shape=list(activation_msg.shape),
-                                dtype=str(output_buffer.dtype),
-                                layer_id=activation_msg.layer_id,
-                                timestamp=utc_epoch_now(),
-                                node_origin=activation_msg.node_origin,
+                # Send via gRPC to API
+                if api_addr:
+                    if (self.api_channel is None) or (api_addr != self.api_address):
+                        # Reconnect if address changed
+                        if self.api_channel is not None:
+                            try:
+                                await self.api_channel.close()
+                            except Exception:
+                                pass
+                        self.api_address = api_addr
+                        self.api_channel = aio_grpc.insecure_channel(api_addr)
+                        self.api_stub = ShardApiServiceStub(self.api_channel)
+
+                    try:
+                        t_rpc = time.perf_counter()
+                        req = shard_api_comm_pb2.FinalActivationRequest(
+                            nonce=activation_msg.nonce,
+                            data=serialized,
+                            batch_size=activation_msg.batch_size,
+                            shape=list(activation_msg.shape),
+                            dtype=str(output_buffer.dtype),
+                            layer_id=activation_msg.layer_id,
+                            timestamp=utc_epoch_now(),
+                            node_origin=activation_msg.node_origin,
+                        )
+                        resp = await self.api_stub.SendFinalActivation(req)  # type: ignore
+                        rpc_ms = (time.perf_counter() - t_rpc) * 1000.0
+                        if not resp.success:
+                            logger.error(
+                                f"API gRPC callback failed for {activation_msg.nonce}: "
+                                f"{resp.message}"
                             )
-                            resp = await self.api_stub.SendFinalActivation(req)  # type: ignore
-                            rpc_ms = (time.perf_counter() - t_rpc) * 1000.0
-                            if not resp.success:
-                                logger.error(
-                                    f"API gRPC callback failed for {activation_msg.nonce}: "
-                                    f"{resp.message}"
-                                )
-                            logger.info(
-                                f"[PROFILE][TX-FINAL][gRPC] node={self.node_id} "
-                                f"nonce={activation_msg.nonce} "
-                                f"payload_kb={(len(serialized) / 1024):.1f} "
-                                f"serialize_ms={final_ser_ms:.3f} rpc_ms={rpc_ms:.2f}"
-                            )
-                        except Exception as e:
-                            logger.exception(
-                                f"Error sending final activation via gRPC: {e}"
-                            )
+                        logger.info(
+                            f"[PROFILE][TX-FINAL][gRPC] node={self.node_id} "
+                            f"nonce={activation_msg.nonce} "
+                            f"payload_kb={(len(serialized) / 1024):.1f} "
+                            f"serialize_ms={final_ser_ms:.3f} rpc_ms={rpc_ms:.2f}"
+                        )
+                    except Exception as e:
+                        logger.exception(
+                            f"Error sending final activation via gRPC: {e}"
+                        )
                 else:
                     # Fallback to HTTP callback
                     t_rpc = time.perf_counter()

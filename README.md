@@ -121,7 +121,7 @@ Response will be in the form:
         [0, 1, 2],
         [3, 4, 5]
       ],
-      "next_services": ["shard-123456._dnet_p2p._tcp.local.", null]
+      "next_service": "shard-123456._dnet_p2p._tcp.local."
     }
   ]
 }
@@ -142,12 +142,12 @@ curl -X POST http://localhost:8080/v1/load_model \
       {
         "service": "shard-123456._dnet_p2p._tcp.local.",
         "layers": [[0, 1, 2], [3, 4, 5]],
-        "next_services": ["shard-987654._dnet_p2p._tcp.local.", null]
+        "next_service": "shard-987654._dnet_p2p._tcp.local."
       },
       {
         "service": "shard-987654._dnet_p2p._tcp.local.",
         "layers": [[6, 7, 8], [9, 10, 11]],
-        "next_services": ["shard-123456._dnet_p2p._tcp.local.", null]
+        "next_service": "shard-123456._dnet_p2p._tcp.local."
       }
     ]
   }'

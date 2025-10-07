@@ -212,11 +212,11 @@ class DeviceInfo(BaseModel):
 
 
 class LayerAssignment(BaseModel):
-    """Layer assignment for a single device with round-aware structure."""
+    """Layer assignment for a single device in ring topology."""
 
     service: str = Field(..., description="Target device service name")
     layers: List[List[int]] = Field(..., description="Layer indices per round (k sublists)")
-    next_services: List[Optional[str]] = Field(..., description="Next node service name per round (k entries, null if last)")
+    next_service: Optional[str] = Field(None, description="Next node service name in ring (null if connects to API)")
 
 
 class PrepareTopologyResponse(BaseModel):

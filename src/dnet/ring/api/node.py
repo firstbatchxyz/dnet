@@ -217,7 +217,11 @@ class RingApiNode:
                 }
             )
 
-        @self.app.get("/devices")
+        @self.app.get("/v1/topology")
+        async def topology() -> JSONResponse:
+            return JSONResponse(content=self.topology)
+
+        @self.app.get("/v1/devices")
         async def get_devices() -> JSONResponse:
             """Get all discovered devices from mDNS."""
             devices = self.discovery.get_properties()
@@ -410,7 +414,9 @@ class RingApiNode:
                 service_name = assignment.service
                 # Flatten layers for shard loading
                 layers = [
-                    layer for round_layers in assignment.layers for layer in round_layers
+                    layer
+                    for round_layers in assignment.layers
+                    for layer in round_layers
                 ]
 
                 if service_name not in shards:
@@ -832,11 +838,15 @@ class RingApiNode:
             )
 
         num_layers = sum(solution.w) * solution.k
-        logger.info(f"Distributing {num_layers} layers to {len(shards)} devices in {solution.k} rounds")
+        logger.info(
+            f"Distributing {num_layers} layers to {len(shards)} devices in {solution.k} rounds"
+        )
 
         # Assign layers in round-robin fashion, grouped by rounds
         # Each device gets k sublists (one per round)
-        layer_assignments: Dict[str, List[List[int]]] = {name: [[] for _ in range(solution.k)] for name in device_names}
+        layer_assignments: Dict[str, List[List[int]]] = {
+            name: [[] for _ in range(solution.k)] for name in device_names
+        }
         current_layer = 0
 
         for round_idx in range(solution.k):
@@ -870,9 +880,7 @@ class RingApiNode:
 
             # Log ring topology
             for service_name in device_names:
-                logger.info(
-                    f"Ring: {service_name} -> {next_service_map[service_name]}"
-                )
+                logger.info(f"Ring: {service_name} -> {next_service_map[service_name]}")
 
         # Compute prefetch window for each device: total_layers_per_device / k
         prefetch_windows: Dict[str, int] = {}

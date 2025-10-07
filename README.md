@@ -69,19 +69,6 @@ Start a shard node with gRPC and HTTP ports:
 uv run dnet-shard --http-port 8081 --grpc-port 58081
 ```
 
-**Arguments:**
-
-- `-p, --grpc-port`: gRPC server port (required)
-- `--http-port`: HTTP server port (required)
-- `-q, --queue-size`: Activation queue size (default: 10)
-- `-w, --prefetch-window`: Number of layers to prefetch (default: 2)
-
-The shard will:
-
-- Register itself via mDNS discovery
-- Wait for LoadModel commands from the API
-- Process activations through assigned layers
-
 ### Running an API
 
 Start the API node:
@@ -90,7 +77,16 @@ Start the API node:
 uv run dnet-api --http-port 8080 --grpc-port 58080
 ```
 
-It has the following endpoints:
+To do inference, first, we must [prepare the topology](#prepare-topology) (discover nodes) and then [load the model](#load-model) itself.
+After that, we can call the [completions](#chat-completions) endpoint as usual.
+
+> [!TIP]
+>
+> We have a script that can prepare the model and load it at once:
+>
+> ```sh
+> uv run ./scripts/prepare_model.py -m Qwen/Qwen3-4B-MLX-4bit
+> ```
 
 #### Prepare Topology
 
@@ -121,7 +117,10 @@ Response will be in the form:
   "assignments": [
     {
       "service": "shard-123456._dnet_p2p._tcp.local.",
-      "layers": [[0, 1, 2], [3, 4, 5]],
+      "layers": [
+        [0, 1, 2],
+        [3, 4, 5]
+      ],
       "next_services": ["shard-123456._dnet_p2p._tcp.local.", null]
     }
   ]

@@ -11,7 +11,6 @@ from socket import gethostname
 from typing import Any, Dict, List, Mapping, Optional, Tuple, cast
 from urllib.parse import urlparse
 
-import grpc
 import httpx
 import mlx.core as mx
 import numpy as np
@@ -75,8 +74,8 @@ class RingShardNode:
         self.listen_port = listen_port
         self.http_port = http_port
         self.queue_size = queue_size
-        self.prefetch_window_size: Optional[int] = (
-            None  # Set dynamically during load_model
+        self.prefetch_window_size = (
+            0  # Set dynamically during load_model, zero'ed for types
         )
 
         # Model state (loaded dynamically)
@@ -191,7 +190,6 @@ class RingShardNode:
                 raise ValueError(
                     "prefetch_window must be provided during model loading"
                 )
-
             self.prefetch_window_size = prefetch_window
             logger.info(
                 f"Node {self.node_id}: Using prefetch window size: {self.prefetch_window_size}"
@@ -397,7 +395,7 @@ class RingShardNode:
         self.server = aio_grpc.server()
 
         # Add the servicer (handles both ring and shard API services)
-        servicer = ShardServicer(self)
+        servicer = ShardServicer(self)  # type: ignore # FIXME: !!!
         add_DnetRingServiceServicer_to_server(servicer, self.server)
         add_ShardApiServiceServicer_to_server(servicer, self.server)
 
@@ -742,7 +740,7 @@ class RingShardNode:
             return
 
         try:
-            self.cache = make_cache(self.model)
+            self.cache = make_cache(self.model)  # type: ignore # model is checked
             logger.info(f"Node {self.node_id}: Cache reset successfully")
         except Exception as e:
             logger.error(f"Node {self.node_id}: Error resetting cache: {e}")

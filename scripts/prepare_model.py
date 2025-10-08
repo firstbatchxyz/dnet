@@ -1,15 +1,17 @@
+#!/usr/bin/env python3
 import argparse
 import requests
 import json
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Prepare model for dnet serving")
+    parser = argparse.ArgumentParser(
+        description="Prepare model for dnet serving",
+        epilog="Example: uv run prepare_model.py Qwen/Qwen3-4B-MLX-4bit",
+    )
     parser.add_argument(
-        "-m",
-        "--model",
+        "model",
         type=str,
-        required=True,
-        help="Model name (e.g., Qwen/Qwen3-4B-MLX-4bit)",
+        help="Model name or HuggingFace repo ID (e.g., Qwen/Qwen3-4B-MLX-4bit)",
     )
     args = parser.parse_args()
 

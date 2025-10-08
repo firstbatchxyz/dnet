@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 """Generate protobuf files for dnet."""
 
 import glob

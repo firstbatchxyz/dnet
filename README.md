@@ -47,19 +47,17 @@ uv run ./scripts/generate_protos.py
 
 **dnet** uses a **dynamic topology** approach where nodes start without models, then the API discovers devices and distributes layers optimally.
 
-### Workflow
+1. [**Start Shards**](#running-a-shard): Launch shard nodes on each device.
+2. [**Start API**](#running-an-api): Launch the API node, one of the shards SHOULD reside in the same device.
+3. [**Prepare Topology**](#prepare-topology): API discovers devices and solves for optimal layer distribution.
+4. [**Load Model**](#load-model): API instructs shards to load their assigned layers.
+5. [**Inference**](#chat-completions): Use `/v1/chat/completions` endpoint for generation.
 
-1. **Start Shards**: Launch shard nodes on each device (only need to specify ports)
-2. **Start API**: Launch the API node
-3. **Prepare Topology**: API discovers devices and solves for optimal layer distribution
-4. **Load Model**: API instructs shards to load their assigned layers
-5. **Inference**: Use `/v1/chat/completions` endpoint for generation
-
-Supported models:
+Supported models are given below:
 
 - Qwen3
 - DeepSeek V2
-- MLX formats: fp16, bf16, 4-bit, 8-bit quantized
+- MLX formats: `fp16`, `bf16`, 4-bit, 8-bit quantized
 
 ### Running a Shard
 
@@ -100,32 +98,16 @@ curl -X POST http://localhost:8080/v1/prepare_topology \
   }'
 ```
 
-Response will be in the form:
+Response will be the otpimal topology (as given by the solver) for the discovered devices.
 
-```json
-{
-  "model": "Qwen/Qwen3-4B-MLX-4bit",
-  "num_layers": 36,
-  "devices": [
-    {
-      "service_name": "shard-123456._dnet_p2p._tcp.local.",
-      "local_ip": "192.168.1.2",
-      "http_port": 8081,
-      "grpc_port": 58081
-    }
-  ],
-  "assignments": [
-    {
-      "service": "shard-123456._dnet_p2p._tcp.local.",
-      "layers": [
-        [0, 1, 2],
-        [3, 4, 5]
-      ],
-      "next_service": "shard-123456._dnet_p2p._tcp.local."
-    }
-  ]
-}
-```
+> [!NOTE]
+>
+> Once the topology is prepared, you can fetch it after via the `/topology` endpoint:
+>
+> ```sh
+> curl http://localhost:8080/v1/topology \
+>  -H "Content-Type: application/json" \
+> ```
 
 #### Load Model
 
@@ -136,40 +118,7 @@ Load the model on shards with prepared topology:
 ```sh
 curl -X POST http://localhost:8080/v1/load_model \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen3-4B-MLX-4bit",
-    "assignments": [
-      {
-        "service": "shard-123456._dnet_p2p._tcp.local.",
-        "layers": [[0, 1, 2], [3, 4, 5]],
-        "next_service": "shard-987654._dnet_p2p._tcp.local."
-      },
-      {
-        "service": "shard-987654._dnet_p2p._tcp.local.",
-        "layers": [[6, 7, 8], [9, 10, 11]],
-        "next_service": "shard-123456._dnet_p2p._tcp.local."
-      }
-    ]
-  }'
-```
-
-**Response:**
-
-```json
-{
-  "model": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
-  "success": true,
-  "shard_statuses": [
-    {
-      "service_name": "shard-abc-hostname",
-      "success": true,
-      "message": "Model loaded successfully",
-      "layers_loaded": [0, 1, 8, 9, 16, 17],
-      "load_time_ms": 1234.5
-    }
-  ],
-  "total_load_time_ms": 2500.0
-}
+  -d $OUTPUT_FROM_PREPARE_TOPOLOGY
 ```
 
 #### Chat Completions
@@ -199,7 +148,7 @@ curl http://localhost:8080/v1/devices \
 
 > [!TIP]
 >
-> You can use `dns-sd` to check out devices over mDNS:
+> You can use `dns-sd` in MacOS to check out devices over mDNS:
 >
 > ```sh
 > dns-sd -Q _dnet_p2p._tcp.local. PTR

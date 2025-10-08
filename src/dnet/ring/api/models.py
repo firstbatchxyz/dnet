@@ -3,54 +3,10 @@
 import base64
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Union
-
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
-
-# ------------------------
-# Topology Info
-# FIXME: move elsewhere
-# ------------------------
-
-
-class DeviceInfo(BaseModel):
-    """Information about a discovered device."""
-
-    name: str = Field(..., description="mDNS service name")
-    local_ip: str = Field(..., description="Local IP address")
-    http_port: int = Field(..., description="HTTP server port")
-    grpc_port: int = Field(..., description="gRPC server port")
-
-
-class LayerAssignment(BaseModel):
-    """Layer assignment for a single device in ring topology."""
-
-    service: str = Field(..., description="Target device service name")
-    layers: List[List[int]] = Field(
-        ..., description="Layer indices per round (k sublists)"
-    )
-    next_service: Optional[str] = Field(
-        None, description="Next node service name in ring (null if connects to API)"
-    )
-
-
-class TopologyInfo(BaseModel):
-    """Stored topology information for the current model."""
-
-    model: str = Field(..., description="Model name or HuggingFace repo ID")
-    num_layers: int = Field(..., description="Total number of layers in model")
-    devices: List[DeviceInfo] = Field(..., description="Devices (in solver order)")
-    assignments: List[LayerAssignment] = Field(
-        ..., description="Layer assignments per device"
-    )
-    next_service_map: Dict[str, Optional[str]] = Field(
-        ..., description="Next service mapping for ring topology"
-    )
-    prefetch_windows: Dict[str, int] = Field(
-        ..., description="Prefetch window size per device"
-    )
-    solution: Dict[str, Any] = Field(..., description="Solver result details")
+from ..common import TopologyInfo, LayerAssignment
 
 
 class RoleMapping(BaseModel):
@@ -227,6 +183,7 @@ class RecieveResultResponseModel(JSONResponse):
     pass
 
 
+# FIXME: can we do better?
 RecieveResultRequestModel = Union[RecieveResultRequest, RingInferenceError]
 
 

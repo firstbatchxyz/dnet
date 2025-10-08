@@ -8,7 +8,7 @@ import grpc
 from ...protos import shard_api_comm_pb2 as pb2
 from ...protos import shard_api_comm_pb2_grpc as pb2_grpc
 from ...utils.logger import logger
-from ..api_models import RecieveResultRequest
+from .models import RecieveResultRequest
 
 if TYPE_CHECKING:
     from .node import RingApiNode

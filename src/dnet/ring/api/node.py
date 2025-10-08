@@ -31,7 +31,7 @@ from ...protos.shard_api_comm_pb2_grpc import (
 from ...utils.logger import logger
 from ...utils.model import ModelMetadata, get_model_metadata, load_api_layer_weights
 from .utils import create_generate_step_for_ring_with_grpc
-from ..api_models import (
+from .models import (
     ChatBaseParams,
     ChatChoice,
     ChatCompletionReason,
@@ -40,18 +40,16 @@ from ..api_models import (
     ChatRequestModel,
     ChatResponseModel,
     CompletionRequestModel,
-    DeviceInfo,
-    LayerAssignment,
     LoadModelRequest,
     LoadModelResponse,
     PrepareTopologyRequest,
     RoleMapping,
     ShardLoadStatus,
-    TopologyInfo,
 )
 from ..data_types import StopCondition
 from ..model import get_ring_model
 from .servicer import ApiServicer
+from ..common import TopologyInfo, LayerAssignment
 
 
 async def arange(count: int):
@@ -329,23 +327,16 @@ class RingApiNode:
         )
 
         # Run solver
+        # FIXME: rfk device-names and devices logic
         device_names, solution = await self._run_solver(shard_profiles, model_profile)
+        shards_list = [
+            shards[name] for name in device_names
+        ]  # shard names to dnet properties
 
         # Compute layer assignments, next service mapping, and prefetch windows
         layer_assignments, next_service_map, prefetch_windows = (
             self._compute_layer_assignments(device_names, solution, shards)
         )
-
-        # Build response
-        devices_info = [
-            DeviceInfo(
-                name=name,
-                local_ip=shards[name].local_ip,
-                http_port=shards[name].server_port,
-                grpc_port=shards[name].shard_port,
-            )
-            for name in device_names
-        ]
 
         assignments_info = [
             LayerAssignment(
@@ -360,7 +351,7 @@ class RingApiNode:
         self.topology = TopologyInfo(
             model=req.model,
             num_layers=model_metadata.num_layers,
-            devices=devices_info,
+            devices=shards_list,
             assignments=assignments_info,
             next_service_map=next_service_map,
             prefetch_windows=prefetch_windows,

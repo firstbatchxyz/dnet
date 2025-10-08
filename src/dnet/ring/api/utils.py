@@ -7,13 +7,13 @@ from typing import AsyncGenerator, Dict, Optional, Tuple, cast
 import mlx.core as mx
 from mlx_lm.sample_utils import make_logits_processors, make_sampler
 
+from ..model import BaseRingModel
 from ...protos import dnet_ring_pb2
 from ...protos.dnet_ring_pb2_grpc import DnetRingServiceStub
 from ...utils.async_utils import make_cache
 from ...utils.logger import logger
 from ...utils.serialization import bytes_to_tensor, tensor_to_bytes
-from ..api_models import ChatBaseParams, RecieveResultRequest
-from ..model import BaseRingModel
+from .models import ChatBaseParams, RecieveResultRequest
 
 
 def utc_epoch_now() -> int:

@@ -42,7 +42,7 @@ from ...utils.logger import logger
 from ...utils.model import ModelMetadata, get_model_metadata
 from ...utils.time import utc_epoch_now
 from ...utils.serialization import dtype_map, mlx_dtype_map, tensor_to_bytes
-from ..api_models import RecieveResultRequest
+from ..api.models import RecieveResultRequest
 from ..data_types import ActivationMessage
 from ..memory_pool import LayerAwareMemoryPool
 from ..model import get_ring_model
@@ -1036,7 +1036,7 @@ class RingShardNode:
                     self._bound_versions[wl] = version
 
             if to_bind:
-                self.model.load_weights(list(to_bind.items()), strict=False)
+                self.model.load_weights(list(to_bind.items()), strict=False)  # type: ignore # FIXME: !!!
 
             # Run window compute
             processed = 0
@@ -1046,7 +1046,7 @@ class RingShardNode:
                     f"Computing layer {current_layer} for nonce {activation_msg.nonce}"
                 )
                 t_l = time.perf_counter()
-                x = self.model.apply_single_layer(current_layer, x, cache=self.cache)
+                x = self.model.apply_single_layer(current_layer, x, cache=self.cache)  # type: ignore # FIXME: !!!
                 t_l_done = time.perf_counter()
                 logger.info(
                     f"[PROFILE][LAYER] node={self.node_id} nonce={activation_msg.nonce} "

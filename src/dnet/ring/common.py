@@ -13,6 +13,7 @@ class LayerAssignment(BaseModel):
     next_service: Optional[str] = Field(
         None, description="Next node service name in ring (null if connects to API)"
     )
+    prefetch_window: int = Field(..., description="Prefetch window size for this device")
 
 
 class TopologyInfo(BaseModel):
@@ -28,8 +29,5 @@ class TopologyInfo(BaseModel):
     )
     next_service_map: Dict[str, Optional[str]] = Field(
         ..., description="Next service mapping for ring topology"
-    )
-    prefetch_windows: Dict[str, int] = Field(
-        ..., description="Prefetch window size per device"
     )
     solution: Dict[str, Any] = Field(..., description="Solver result details")

@@ -17,10 +17,21 @@ from hypercorn import Config
 import hypercorn.asyncio as aio_hypercorn
 from mlx_lm.tokenizer_utils import load_tokenizer
 
-from dnet_p2p import DnetDeviceProperties, DnetP2P, discover_thunderbolt_connections
+from dnet_p2p import (
+    DnetDeviceProperties,
+    DnetP2P,
+    discover_all_thunderbolt_connections,
+)
+from dnet_p2p.thunderbolt import ThunderboltConnection
 from dperf import profile_model
 from dperf.profiler import ModelProfileSplit
-from dsolver import DeviceProfile, halda_solve
+from dsolver import (
+    DeviceProfile,
+    halda_solve,
+    ModelProfile,
+    load_model_profile_from_dict,
+    load_device_profile_from_dict,
+)
 from dsolver.gurobi_solver import HALDAResult
 
 from ...protos.dnet_ring_pb2_grpc import DnetRingServiceStub
@@ -40,11 +51,16 @@ from .models import (
     ChatRequestModel,
     ChatResponseModel,
     CompletionRequestModel,
-    LoadModelRequest,
-    LoadModelResponse,
+    APILoadModelRequest,
+    APILoadModelResponse,
     PrepareTopologyRequest,
     RoleMapping,
     ShardLoadStatus,
+)
+from ..shard.models import (
+    ShardProfileRequest,
+    ShardLoadModelRequest,
+    ShardProfileResponse,
 )
 from ..data_types import StopCondition
 from ..model import get_ring_model
@@ -249,7 +265,7 @@ class RingApiNode:
                 )
 
         @self.app.post("/v1/load_model")
-        async def load_model(req: LoadModelRequest) -> LoadModelResponse:
+        async def load_model(req: APILoadModelRequest) -> APILoadModelResponse:
             """Load model on shards with prepared topology."""
             try:
                 return await self._handle_load_model(req)
@@ -321,21 +337,29 @@ class RingApiNode:
 
         logger.info(f"Discovered {len(shards)} shards: {list(shards.keys())}")
 
-        # Collect shard profiles
-        shard_profiles = await self._collect_shard_profiles(
-            shards, req.model, embedding_size, max_batch_exp=2
+        # Collect shard profiles and thunderbolt connections
+        shard_profiles, thunderbolt_conns = await self._collect_shard_profiles(
+            shards, req.model, embedding_size, req.max_batch_exp, batch_sizes
         )
 
-        # Run solver
-        # FIXME: rfk device-names and devices logic
-        device_names, solution = await self._run_solver(shard_profiles, model_profile)
+        # Optimize device ordering to place Thunderbolt-connected devices adjacently
+        optimized_device_name_order = self._optimize_device_ordering(
+            shard_profiles, thunderbolt_conns
+        )
+
+        # Run solver with optimized device ordering
+        solution = await self._run_solver(
+            shard_profiles, model_profile, optimized_device_name_order
+        )
         shards_list = [
-            shards[name] for name in device_names
+            shards[name] for name in optimized_device_name_order
         ]  # shard names to dnet properties
 
         # Compute layer assignments, next service mapping, and prefetch windows
         layer_assignments, next_service_map, prefetch_windows = (
-            self._compute_layer_assignments(device_names, solution, shards)
+            self._compute_layer_assignments(
+                optimized_device_name_order, solution, shards
+            )
         )
 
         assignments_info = [
@@ -343,8 +367,9 @@ class RingApiNode:
                 service=name,
                 layers=layer_assignments[name],
                 next_service=next_service_map[name],
+                prefetch_window=prefetch_windows[name],
             )
-            for name in device_names
+            for name in optimized_device_name_order
         ]
 
         # Store topology (can be GET'ed later)
@@ -354,18 +379,18 @@ class RingApiNode:
             devices=shards_list,
             assignments=assignments_info,
             next_service_map=next_service_map,
-            prefetch_windows=prefetch_windows,
             solution=asdict(solution),
         )
 
         logger.info(
-            f"Topology prepared: {len(device_names)} devices, {model_metadata.num_layers} layers"
+            f"Topology prepared: {len(shards_list)} devices, {model_metadata.num_layers} layers"
         )
 
-        # FIXME: can be TopologyInfo itself
         return self.topology
 
-    async def _handle_load_model(self, req: LoadModelRequest) -> LoadModelResponse:
+    async def _handle_load_model(
+        self, req: APILoadModelRequest
+    ) -> APILoadModelResponse:
         """Handle load model request.
 
         Args:
@@ -384,13 +409,6 @@ class RingApiNode:
             ]
             for assignment in req.assignments
         }
-
-        # Get prefetch windows from stored topology
-        if self.topology:
-            prefetch_windows = self.topology.prefetch_windows
-        else:
-            logger.warning("No topology found, using default prefetch window of 1")
-            prefetch_windows = {name: 1 for name in layer_assignments.keys()}
 
         # FIXME: this should be populated when discovery first starts
         api_properties = self.discovery.get_own_properties()
@@ -425,13 +443,10 @@ class RingApiNode:
                 shard_props = shards[service_name]
 
                 # Get next node address from next_service in ring
-                next_node_address = ""
                 if assignment.next_service and assignment.next_service in shards:
                     next_shard = shards[assignment.next_service]
-                    next_node_address = f"{next_shard.local_ip}:{next_shard.shard_port}"
                     logger.info(
                         f"Shard {service_name} next node in ring: {assignment.next_service} "
-                        f"at {next_node_address}"
                     )
                 else:
                     logger.info(
@@ -439,9 +454,6 @@ class RingApiNode:
                     )
 
                 try:
-                    # Get prefetch window for this shard
-                    prefetch_window = prefetch_windows.get(service_name, 1)
-
                     # Get total layers from stored topology
                     total_layers = self.topology.num_layers if self.topology else 0
 
@@ -449,19 +461,16 @@ class RingApiNode:
                     api_callback_address = f"{api_properties.local_ip}:{self.grpc_port}"
 
                     # Call load_model via HTTP
-                    # FIXME: use thunderbolt?
-
                     url = f"http://{shard_props.local_ip}:{shard_props.server_port}/load_model"
-                    # TODO: add shared type for this
-                    payload = {
-                        "model_path": req.model,
-                        "layers": layers,
-                        "warmup": True,
-                        "next_node_address": next_node_address,
-                        "prefetch_window": prefetch_window,
-                        "total_layers": total_layers,
-                        "api_callback_address": api_callback_address,
-                    }
+                    payload = ShardLoadModelRequest(
+                        model_path=req.model,
+                        layers=layers,
+                        warmup=True,
+                        next_node=next_shard,
+                        prefetch_window=assignment.prefetch_window,
+                        total_layers=total_layers,
+                        api_callback_address=api_callback_address,
+                    )
 
                     # timeout is `None` because shards may actually be downloading weights for the first time
                     response = await http_client.post(url, json=payload, timeout=None)
@@ -556,7 +565,7 @@ class RingApiNode:
 
         total_load_time_ms = (time.perf_counter() - start_time) * 1000.0
 
-        return LoadModelResponse(
+        return APILoadModelResponse(
             model=req.model,
             success=all_success,
             shard_statuses=shard_statuses,
@@ -641,7 +650,7 @@ class RingApiNode:
 
     async def _profile_model(
         self, repo_id: str, batch_sizes: List[int], sequence_length: int
-    ) -> ModelProfileSplit:
+    ) -> ModelProfile:
         """Profile model using dperf.
 
         Args:
@@ -652,21 +661,22 @@ class RingApiNode:
         Returns:
             Model profile
         """
-        model_profile: ModelProfileSplit = profile_model(
+        model_profile_split: ModelProfileSplit = profile_model(
             repo_id=repo_id,
             batch_sizes=batch_sizes,
             sequence_length=sequence_length,
         )
-        logger.info(f"Model profiling completed: L = {model_profile.L}")
-        return model_profile
+        logger.info("Model profiling completed.")
+        return load_model_profile_from_dict(asdict(model_profile_split))
 
     async def _collect_shard_profiles(
         self,
         shards: Dict[str, DnetDeviceProperties],
         repo_id: str,
         embedding_size: int,
-        max_batch_exp: int = 1,  # very small default for speed
-    ) -> Dict[str, Any]:
+        max_batch_exp: int,
+        batch_sizes: List[int],
+    ) -> Tuple[Dict[str, DeviceProfile], Dict[str, Dict[str, ThunderboltConnection]]]:
         """Collect profile data from all shards.
 
         Args:
@@ -676,11 +686,11 @@ class RingApiNode:
             max_batch_exp: Maximum batch size exponent
 
         Returns:
-            Collected shard profiles
+            Tuple of (collected shard profiles, thunderbolt connections)
         """
         # Calculate payload sizes
-        base_size = embedding_size * 4
-        payload_sizes = [base_size * batch_size for batch_size in [1, 2, 4, 8]]
+        base_size = embedding_size * 4  # 4*e due to paper
+        payload_sizes = [base_size * batch_size for batch_size in batch_sizes]
 
         this_device = self.discovery.get_own_properties()
 
@@ -690,116 +700,163 @@ class RingApiNode:
         )
 
         # Find Thunderbolt connections
-        thunderbolt_conns = discover_thunderbolt_connections(shards)
+        all_thunderbolts = discover_all_thunderbolt_connections(shards)
 
         # Call each shard's /profile endpoint
         # FIXME: do this in parallel
-        shard_profiles: Dict[str, Any] = {}
+        shard_profiles: Dict[str, DeviceProfile] = {}
         async with httpx.AsyncClient() as client:
-            for service_name, shard_props in shards.items():
+            for shard_name, shard_props in shards.items():
                 if shard_props.is_manager:
                     logger.warning(
-                        f"Skipping manager node {service_name} in profile collection"
+                        f"Skipping manager node {shard_name} in profile collection"
                     )
                     continue
 
                 server_port, server_ip = shard_props.server_port, shard_props.local_ip
 
-                # Serialize Thunderbolt connections for this shard
-                thunderbolt_for_shard = thunderbolt_conns.get(service_name, {})
-                thunderbolt_conns_json = {
-                    k: {"ip": v[0], "instance": v[1].model_dump()}
-                    for k, v in thunderbolt_for_shard.items()
-                }
-
                 try:
-                    url = f"http://{server_ip}:{server_port}/profile"
+                    shard_url = f"http://{server_ip}:{server_port}/profile"
                     logger.info(
-                        f"Calling /profile endpoint for shard {service_name} at {url}"
+                        f"Calling /profile endpoint for shard {shard_name} at {shard_url}"
                     )
 
                     response = await client.post(
-                        url,
-                        json={
-                            "devices": {
-                                name: props.model_dump(
-                                    include={
-                                        "local_ip",
-                                        "server_port",
-                                        "shard_port",
-                                        "is_manager",
-                                    }
-                                )
-                                for name, props in shards.items()
-                            },
-                            "payload_sizes": payload_sizes,
-                            "thunderbolts": thunderbolt_conns_json,
-                            "max_batch_exp": max_batch_exp,
-                            "repo_id": repo_id,
-                        },
+                        shard_url,
+                        json=ShardProfileRequest(
+                            repo_id=repo_id,
+                            thunderbolts=all_thunderbolts.get(shard_name, {}),
+                            payload_sizes=payload_sizes,
+                            max_batch_exp=max_batch_exp,
+                            devices=shards,
+                        ).model_dump(),
                         timeout=1000.0,
                     )
 
                     if response.status_code == 200:
-                        profile_data = response.json()
-                        logger.info(
-                            f"Successfully collected profile from {service_name}"
+                        profile_data = ShardProfileResponse.model_validate(
+                            response.json()
                         )
+                        logger.info(f"Successfully collected profile from {shard_name}")
 
                         # Mark head device (same local IP as API)
                         if shard_props.local_ip == this_device.local_ip:
-                            profile_data["profile"]["is_head"] = True
+                            profile_data.profile["is_head"] = True
 
-                        shard_profiles[service_name] = profile_data
+                        shard_profiles[shard_name] = load_device_profile_from_dict(
+                            profile_data.profile
+                        )
                     else:
                         logger.error(
-                            f"Failed to get profile from {service_name}: "
+                            f"Failed to get profile from {shard_name}: "
                             f"{response.status_code}"
                         )
 
                 except Exception as e:
-                    logger.exception(f"Error calling /profile for {service_name}: {e}")
+                    logger.exception(f"Error calling /profile for {shard_name}: {e}")
 
         logger.info(f"Collected profiles from {len(shard_profiles)} shards")
-        return shard_profiles
+        return shard_profiles, all_thunderbolts
+
+    def _optimize_device_ordering(
+        self,
+        shard_profiles: Dict[str, DeviceProfile],
+        thunderbolt_conns: Dict[str, Dict[str, ThunderboltConnection]],
+    ) -> List[str]:
+        """Optimize device ordering to place Thunderbolt-connected devices adjacently.
+
+        Args:
+            shard_profiles: Collected shard profiles
+            thunderbolt_conns: Thunderbolt connections mapping (device -> {neighbor -> connection_info})
+
+        Returns:
+            Optimized list of device names with head devices first and Thunderbolt neighbors adjacent
+        """
+        device_names = list(shard_profiles.keys())
+
+        # Find all head devices (multiple shards can run on same machine as API)
+        head_devices = []
+        for device_name, profile_data in shard_profiles.items():
+            if profile_data.is_head:
+                head_devices.append(device_name)
+
+        if not head_devices:
+            logger.warning("No head device found in profiles, using first device")
+            head_devices = [device_names[0]] if device_names else []
+
+        logger.info(f"Found {len(head_devices)} head device(s): {head_devices}")
+
+        # Build adjacency graph of Thunderbolt connections
+        # Graph: device_name -> set of connected device names
+        tb_graph: Dict[str, set[str]] = {name: set() for name in device_names}
+        for device_name, neighbors in thunderbolt_conns.items():
+            if device_name in tb_graph:
+                for neighbor_name in neighbors.keys():
+                    if neighbor_name in tb_graph:
+                        tb_graph[device_name].add(neighbor_name)
+                        tb_graph[neighbor_name].add(device_name)
+
+        # Greedy ordering: Start with all head devices, then pick neighbors with most TB connections
+        ordered = head_devices.copy()
+        remaining = set(device_names) - set(head_devices)
+
+        while remaining:
+            best_candidate = None
+            best_score = -1
+
+            # For each remaining device, calculate connection score to already-ordered devices
+            for candidate in remaining:
+                # Count Thunderbolt connections to devices already in the order
+                score = sum(
+                    1 for ordered_dev in ordered if ordered_dev in tb_graph[candidate]
+                )
+
+                # Prioritize devices with TB connections, otherwise any device is fine
+                if score > best_score:
+                    best_score = score
+                    best_candidate = candidate
+
+            # Add best candidate (or any remaining if no TB connections exist)
+            if best_candidate:
+                ordered.append(best_candidate)
+                remaining.remove(best_candidate)
+            else:
+                # Fallback: just pick any remaining device
+                next_device = remaining.pop()
+                ordered.append(next_device)
+
+        logger.info(f"Optimized device ordering: {ordered}")
+        logger.info(f"Thunderbolt graph: {tb_graph}")
+
+        return ordered
 
     async def _run_solver(
-        self, shard_profiles: Dict[str, Any], model_profile_split: ModelProfileSplit
-    ) -> Tuple[List[str], HALDAResult]:
+        self,
+        shard_profiles: Dict[str, DeviceProfile],
+        model_profile: ModelProfile,
+        device_order: List[str],
+    ) -> HALDAResult:
         """Run dsolver with model and device profiles.
 
         Args:
             shard_profiles: Collected shard profiles
-            model_profile_split: Model profile from dperf
+            model_profile: Model profile from dperf
+            device_order: Optimized device ordering (head first, TB-connected adjacent)
 
         Returns:
             Tuple of (device names in solver order, solver result)
         """
-        from dsolver.components.gurobi_loader import (
-            load_device_profile_from_dict,
-            load_model_profile_from_dict,
-        )
 
-        # Convert shard profiles to device profiles
-        device_profiles: List[DeviceProfile] = []
-        device_names: List[str] = []
-        for shard_name, profile_data in shard_profiles.items():
-            device_profile_data = profile_data["profile"]
-            device_profile = load_device_profile_from_dict(device_profile_data)
-            device_profiles.append(device_profile)
-            device_names.append(shard_name)
+        sorted_shard_profiles = [
+            shard_profiles[name] for name in device_order if name in shard_profiles
+        ]
+        if not sorted_shard_profiles:
+            raise ValueError("No valid shard profiles found")
 
-        # Sort so head device is first
-        device_profiles.sort(key=lambda x: x.is_head, reverse=True)
+        logger.info(f"Running solver with {len(sorted_shard_profiles)} shard profiles")
 
-        if not device_profiles:
-            raise ValueError("No valid device profiles found")
-
-        logger.info(f"Running solver with {len(device_profiles)} device profiles")
-
-        model_profile = load_model_profile_from_dict(asdict(model_profile_split))
         solution = halda_solve(
-            device_profiles,
+            sorted_shard_profiles,
             model_profile,
             time_limit_per_k=5.0,
             mip_gap=1e-4,
@@ -809,7 +866,7 @@ class RingApiNode:
 
         logger.info(f"Solver completed: k={solution.k}, objective={solution.obj_value}")
 
-        return (device_names, solution)
+        return solution
 
     def _compute_layer_assignments(
         self,
@@ -844,13 +901,11 @@ class RingApiNode:
             name: [[] for _ in range(solution.k)] for name in device_names
         }
         current_layer = 0
-
         for round_idx in range(solution.k):
             for device_idx, device_name in enumerate(device_names):
                 for _ in range(solution.w[device_idx]):
                     layer_assignments[device_name][round_idx].append(current_layer)
                     current_layer += 1
-
         assert current_layer == num_layers, (
             f"Assigned {current_layer} layers, expected {num_layers}"
         )
@@ -891,6 +946,10 @@ class RingApiNode:
                     f"(total_layers={total_layers}, k={solution.k})"
                 )
             else:
+                # FIXME: how to handle?
+                logger.error(
+                    f"No layers assigned to {service_name}, setting prefetch to 1"
+                )
                 prefetch_windows[service_name] = 1
 
         logger.info(f"Layer assignments (by rounds): {layer_assignments}")

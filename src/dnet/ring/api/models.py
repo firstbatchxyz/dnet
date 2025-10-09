@@ -202,6 +202,9 @@ class PrepareTopologyRequest(BaseModel):
     force_rediscover: Optional[bool] = Field(
         default=False, description="Force device rediscovery even if cached"
     )
+    max_batch_exp: int = Field(
+        default=2, description="Max batch size as power of 2 exponent"
+    )
 
 
 class PrepareTopologyResponse(TopologyInfo):
@@ -213,7 +216,7 @@ class PrepareTopologyResponse(TopologyInfo):
 # ------------------------
 
 
-class LoadModelRequest(BaseModel):
+class APILoadModelRequest(BaseModel):
     """Request to load model with prepared topology.
 
     Uses the assignment data from TopologyInfo.
@@ -225,6 +228,7 @@ class LoadModelRequest(BaseModel):
     )
 
 
+# FIXME: move elsewhere
 class ShardLoadStatus(BaseModel):
     """Load status for a single shard."""
 
@@ -236,7 +240,7 @@ class ShardLoadStatus(BaseModel):
     message: Optional[str] = Field(None, description="Status or error message")
 
 
-class LoadModelResponse(BaseModel):
+class APILoadModelResponse(BaseModel):
     """Response from model loading operation."""
 
     model: str = Field(..., description="Model name")

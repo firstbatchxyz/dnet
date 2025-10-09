@@ -14,13 +14,17 @@ from urllib.parse import urlparse
 import httpx
 import mlx.core as mx
 import numpy as np
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI
 from grpc import aio as aio_grpc
 from hypercorn import Config
 import hypercorn.asyncio as aio_hypercorn
 
-from dnet_p2p import DnetP2P, ThunderboltInstance
+from dnet_p2p import (
+    DnetP2P,
+    ThunderboltInstance,
+    DnetDeviceProperties,
+    discover_thunderbolt_connection,
+)
 from dperf import DeviceProfileInfo, profile_device
 
 
@@ -48,6 +52,14 @@ from ..memory_pool import LayerAwareMemoryPool
 from ..model import get_ring_model
 from ..weight_cache import WeightCache
 from .servicer import ShardServicer
+from .models import (
+    HealthResponse,
+    ShardLoadModelRequest,
+    ShardLoadModelResponse,
+    ShardProfileRequest,
+    ShardProfileResponse,
+    ShardUnloadModelResponse,
+)
 
 
 class RingShardNode:
@@ -84,7 +96,7 @@ class RingShardNode:
         self.model_path: Optional[str] = None  # Track currently loaded model path
 
         # Topology (configured later)
-        self.next_node_address: Optional[str] = None
+        self.next_node: Optional[DnetDeviceProperties] = None
         self.total_layers: int = 0  # Total layers in model
         self.api_callback_address: Optional[str] = (
             None  # API callback address for final layer
@@ -130,16 +142,7 @@ class RingShardNode:
 
         logger.info(f"Shard node {node_id} initialized with queue_size={queue_size}")
 
-    async def load_model(
-        self,
-        model_path: str,
-        layers: List[int],
-        warmup: bool = False,
-        next_node_address: str = "",
-        prefetch_window: Optional[int] = None,
-        total_layers: Optional[int] = None,
-        api_callback_address: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    async def load_model(self, req: ShardLoadModelRequest) -> ShardLoadModelResponse:
         """Load model with specified layers.
 
         Args:
@@ -152,7 +155,7 @@ class RingShardNode:
             api_callback_address: API callback address for final layer completion
 
         Returns:
-            Dict with success, message, layers_loaded, load_time_ms
+            LoadModelResponse with success, message, layers_loaded, load_time_ms
         """
         try:
             start_time = time.perf_counter()
@@ -160,22 +163,22 @@ class RingShardNode:
             # Check if already loaded with same configuration
             if (
                 self.model is not None
-                and self.model_path == model_path
-                and self.assigned_layers == layers
+                and self.model_path == req.model_path
+                and self.assigned_layers == req.layers
             ):
                 logger.info(
                     f"Node {self.node_id}: Model already loaded with same configuration"
                 )
-                return {
-                    "success": True,
-                    "message": "Model already loaded",
-                    "layers_loaded": layers,
-                    "load_time_ms": 0.0,
-                }
+                return ShardLoadModelResponse(
+                    success=True,
+                    message="Model already loaded",
+                    layers_loaded=req.layers,
+                    load_time_ms=0.0,
+                )
 
             # If model loaded with different config, unload first
             if self.model is not None and (
-                self.model_path != model_path or self.assigned_layers != layers
+                self.model_path != req.model_path or self.assigned_layers != req.layers
             ):
                 logger.info(
                     f"Node {self.node_id}: Unloading current model to load new configuration"
@@ -183,20 +186,16 @@ class RingShardNode:
                 await self.unload_model()
 
             # Load model metadata
-            self.model_metadata = get_model_metadata(model_path)
-            self.assigned_layers = layers
-            self.model_path = model_path
+            self.model_metadata = get_model_metadata(req.model_path)
+            self.assigned_layers = req.layers
+            self.model_path = req.model_path
 
             # Initialize memory pools
             self.input_pool = LayerAwareMemoryPool(total_memory_mb=512)
             self.output_pool = LayerAwareMemoryPool(total_memory_mb=512)
 
             # Set prefetch window size (must be provided by API)
-            if prefetch_window is None:
-                raise ValueError(
-                    "prefetch_window must be provided during model loading"
-                )
-            self.prefetch_window_size = prefetch_window
+            self.prefetch_window_size = req.prefetch_window
             logger.info(
                 f"Node {self.node_id}: Using prefetch window size: {self.prefetch_window_size}"
             )
@@ -222,61 +221,53 @@ class RingShardNode:
             self._bound_versions = {}
 
             # Set topology information
-            self.next_node_address = next_node_address
-            self.total_layers = total_layers or 0
-            self.api_callback_address = api_callback_address
+            self.next_node = req.next_node
+            self.total_layers = req.total_layers
+            self.api_callback_address = req.api_callback_address
 
-            if next_node_address:
+            if self.next_node:
                 await self._connect_next_node()
-                logger.info(
-                    f"Node {self.node_id}: Next node in ring at {next_node_address}"
-                )
             else:
                 logger.info(f"Node {self.node_id}: No next node configured")
 
-            if api_callback_address:
-                logger.info(
-                    f"Node {self.node_id}: API callback at {api_callback_address} for final layer"
-                )
-
             # Warmup if requested
-            if warmup:
+            if req.warmup:
                 await self._warmup_model()
 
             load_time_ms = (time.perf_counter() - start_time) * 1000.0
             logger.info(
-                f"Node {self.node_id}: Successfully loaded model {model_path} "
-                f"with layers {layers} in {load_time_ms:.2f}ms"
+                f"Node {self.node_id}: Successfully loaded model {req.model_path} "
+                f"with layers {req.layers} in {load_time_ms:.2f}ms"
             )
 
-            return {
-                "success": True,
-                "message": "Model loaded successfully",
-                "layers_loaded": layers,
-                "load_time_ms": load_time_ms,
-            }
+            return ShardLoadModelResponse(
+                success=True,
+                message="Model loaded successfully",
+                layers_loaded=req.layers,
+                load_time_ms=load_time_ms,
+            )
 
         except Exception as e:
             logger.exception(f"Node {self.node_id}: Error loading model: {e}")
-            return {
-                "success": False,
-                "message": f"Error loading model: {str(e)}",
-                "layers_loaded": [],
-                "load_time_ms": 0.0,
-            }
+            return ShardLoadModelResponse(
+                success=False,
+                message=f"Error loading model: {str(e)}",
+                layers_loaded=[],
+                load_time_ms=0.0,
+            )
 
-    async def unload_model(self) -> Dict[str, Any]:
+    async def unload_model(self) -> ShardUnloadModelResponse:
         """Unload current model and free resources.
 
         Returns:
-            Dict with success and message
+            UnloadModelResponse with success and message
         """
         try:
             if self.model is None:
-                return {
-                    "success": True,
-                    "message": "No model loaded",
-                }
+                return ShardUnloadModelResponse(
+                    success=True,
+                    message="No model loaded",
+                )
 
             logger.info(f"Node {self.node_id}: Unloading model")
 
@@ -306,20 +297,19 @@ class RingShardNode:
             import gc
 
             gc.collect()
-
             logger.info(f"Node {self.node_id}: Model unloaded successfully")
 
-            return {
-                "success": True,
-                "message": "Model unloaded successfully",
-            }
+            return ShardUnloadModelResponse(
+                success=True,
+                message="Model unloaded successfully",
+            )
 
         except Exception as e:
             logger.exception(f"Node {self.node_id}: Error unloading model: {e}")
-            return {
-                "success": False,
-                "message": f"Error unloading model: {str(e)}",
-            }
+            return ShardUnloadModelResponse(
+                success=False,
+                message=f"Error unloading model: {str(e)}",
+            )
 
     async def _warmup_model(self) -> None:
         """Warmup model by prefetching initial layers."""
@@ -365,10 +355,6 @@ class RingShardNode:
         # Allow brief startup settling
         await asyncio.sleep(0.2)
 
-        # Connect to next node if configured
-        if self.next_node_address:
-            await self._connect_next_node()
-
         # Start background coroutines
         self.background_tasks = [
             asyncio.create_task(self._prefetch_worker()),
@@ -390,7 +376,7 @@ class RingShardNode:
     def _start_discovery(self) -> None:
         """Start mDNS discovery service."""
         hostname = gethostname()
-        # TODO: optionally take shard name
+        # TODO: optionally take shard name from CLI
         instance = f"shard-{token_hex(4)}-{hostname}"
         self.discovery.create_instance(
             instance,
@@ -448,42 +434,33 @@ class RingShardNode:
         """Setup HTTP routes."""
 
         @self.app.get("/health")
-        async def health() -> JSONResponse:
-            return JSONResponse(
-                content={
-                    "status": "ok",
-                    "node_id": self.node_id,
-                    "running": self.running,
-                    "model_loaded": self._check_model_loaded(),
-                    "model_path": self.model_path,
-                    "assigned_layers": self.assigned_layers,
-                    "queue_size": self.activation_recv_queue.qsize(),
-                    "grpc_port": self.grpc_port,
-                    "http_port": self.http_port,
-                }
+        async def health() -> HealthResponse:
+            return HealthResponse(
+                status="ok",
+                node_id=self.node_id,
+                running=self.running,
+                model_loaded=self._check_model_loaded(),
+                model_path=self.model_path,
+                assigned_layers=self.assigned_layers,
+                queue_size=self.activation_recv_queue.qsize(),
+                grpc_port=self.grpc_port,
+                http_port=self.http_port,
             )
 
         @self.app.post("/profile")
-        async def profile(request: Request) -> JSONResponse:
+        async def profile(req: ShardProfileRequest) -> ShardProfileResponse:
             logger.info("Received /profile request")
             try:
-                body = await request.json()
-                devices: Dict[str, Any] = body.get("devices", {})
-                payload_sizes: List[int] = body.get("payload_sizes", [1024])
-                max_batch_exp: int = body.get("max_batch_exp", 2)
-                repo_id: str = body.get("repo_id")
-                thunderbolts: Dict[str, Any] = body.get(
-                    "thunderbolts", {}
-                )  # Thunderbolt connections FROM this device
-
                 # Measure latencies
                 latency_results = await self._measure_latency_to_devices(
-                    devices, thunderbolts, payload_sizes
+                    req.devices, req.thunderbolts, req.payload_sizes
                 )
 
                 # Profile device using dperf
                 try:
-                    device_profile = await self._profile_device(repo_id, max_batch_exp)
+                    device_profile = await self._profile_device(
+                        req.repo_id, req.max_batch_exp
+                    )
 
                     # Overwrite t_comm with median latency
                     median_latency = calculate_median_latency_seconds(latency_results)
@@ -502,86 +479,50 @@ class RingShardNode:
                     logger.error(f"Failed to profile device: {e}")
                     device_profile_dict = {"error": f"Device profiling failed: {e}"}
 
-                return JSONResponse(
-                    content={
-                        "profile": device_profile_dict,
-                        "latency": latency_results.model_dump(),
-                    }
+                return ShardProfileResponse(
+                    profile=device_profile_dict,
+                    latency=latency_results.model_dump(),
                 )
             except Exception as e:
                 logger.error(f"Error in /profile endpoint: {e}")
-                return JSONResponse(status_code=500, content={"error": str(e)})
+                raise
 
         @self.app.post("/load_model")
-        async def load_model_endpoint(request: Request) -> JSONResponse:
+        async def load_model_endpoint(
+            req: ShardLoadModelRequest,
+        ) -> ShardLoadModelResponse:
             """Load model with specified layers."""
             try:
-                body = await request.json()
-                model_path = body.get("model_path")
-                layers = body.get("layers", [])
-                warmup = body.get("warmup", False)
-                next_node_address = body.get("next_node_address", "")
-                prefetch_window = body.get("prefetch_window")
-                total_layers = body.get("total_layers")
-                api_callback_address = body.get("api_callback_address")
-
-                if not model_path:
-                    return JSONResponse(
-                        status_code=400, content={"error": "model_path is required"}
-                    )
-
-                if prefetch_window is None:
-                    return JSONResponse(
-                        status_code=400,
-                        content={"error": "prefetch_window is required"},
-                    )
-
                 logger.info(
-                    f"HTTP /load_model: model={model_path}, layers={layers}, "
-                    f"next_node={next_node_address or 'none'}, prefetch_window={prefetch_window}, "
-                    f"total_layers={total_layers}, api_callback={api_callback_address or 'none'}"
+                    f"HTTP /load_model: model={req.model_path}, layers={req.layers}, "
+                    f"next_node={req.next_node or 'none'}, prefetch_window={req.prefetch_window}, "
+                    f"total_layers={req.total_layers}, api_callback={req.api_callback_address or 'none'}"
                 )
-
-                result = await self.load_model(
-                    model_path=model_path,
-                    layers=layers,
-                    warmup=warmup,
-                    next_node_address=next_node_address,
-                    prefetch_window=prefetch_window,
-                    total_layers=total_layers,
-                    api_callback_address=api_callback_address,
-                )
-
-                return JSONResponse(content=result)
+                result = await self.load_model(req)
+                return result
 
             except Exception as e:
                 logger.error(f"Error in /load_model endpoint: {e}")
-                return JSONResponse(
-                    status_code=500,
-                    content={
-                        "success": False,
-                        "message": f"Error: {str(e)}",
-                        "layers_loaded": [],
-                        "load_time_ms": 0.0,
-                    },
+                return ShardLoadModelResponse(
+                    success=False,
+                    message=f"Error: {str(e)}",
+                    layers_loaded=[],
+                    load_time_ms=0.0,
                 )
 
         @self.app.post("/unload_model")
-        async def unload_model_endpoint(request: Request) -> JSONResponse:
+        async def unload_model_endpoint() -> ShardUnloadModelResponse:
             """Unload current model."""
             try:
                 logger.info("HTTP /unload_model")
                 result = await self.unload_model()
-                return JSONResponse(content=result)
+                return result
 
             except Exception as e:
                 logger.error(f"Error in /unload_model endpoint: {e}")
-                return JSONResponse(
-                    status_code=500,
-                    content={
-                        "success": False,
-                        "message": f"Error: {str(e)}",
-                    },
+                return ShardUnloadModelResponse(
+                    success=False,
+                    message=f"Error: {str(e)}",
                 )
 
     async def _measure_latency_to_devices(
@@ -731,23 +672,39 @@ class RingShardNode:
         Returns:
             True if connected or no next node, False on failure
         """
-        if not self.next_node_address:
+        if not self.next_node:
             logger.info(f"Shard node {self.node_id} is the final shard (no next node)")
             return True
 
         if self.next_node_channel:
+            logger.debug(f"Shard node {self.node_id} already connected to next node.")
             return True
 
         try:
-            self.next_node_channel = aio_grpc.insecure_channel(self.next_node_address)
+            # use thunderbolt here if available
+            this_properties = self.discovery.get_own_properties()
+            thunderbolt_conn = discover_thunderbolt_connection(
+                this_properties,
+                self.next_node,
+            )
+            next_ip = (
+                thunderbolt_conn.ip_addr
+                if thunderbolt_conn
+                else self.next_node.local_ip
+            )
+            address = f"{next_ip}:{self.next_node.shard_port}"
+            logger.info(
+                f"Shard node {this_properties.instance} connecting to next node {self.next_node.instance} at {address}"
+            )
+
+            self.next_node_channel = aio_grpc.insecure_channel(address)
             from ...protos.dnet_ring_pb2_grpc import DnetRingServiceStub
 
             self.next_node_stub = DnetRingServiceStub(self.next_node_channel)
             return True
         except Exception as e:
             logger.warning(
-                f"Shard node {self.node_id} failed to connect to next node "
-                f"{self.next_node_address}: {e}"
+                f"Shard node {self.node_id} failed to connect to next node {address}: {e}"
             )
             self.next_node_channel = None
             self.next_node_stub = None
@@ -768,7 +725,7 @@ class RingShardNode:
     async def receive_activation(
         self, request: dnet_ring_pb2.ActivationRequest
     ) -> None:
-        """Receive activation from previous node.
+        """Receive activation from previous node (coming via gRPC).
 
         Args:
             request: Activation request from previous node
@@ -781,9 +738,9 @@ class RingShardNode:
             return
 
         if not (await self._connect_next_node()):
+            next_instance = "unknown" if not self.next_node else self.next_node.instance
             logger.error(
-                f"Node {self.node_id}: Not connected to next node "
-                f"{self.next_node_address}. Dropping activation {request.nonce}"
+                f"Node {self.node_id}: Not connected to next node {next_instance}, Dropping activation {request.nonce}."
             )
             return
 
@@ -1190,7 +1147,7 @@ class RingShardNode:
                 f"Node {self.node_id}: Processed layer {activation_msg.layer_id}, "
                 f"next_layer={next_layer}, total_layers={total_layers}, "
                 f"has_next_stub={self.next_node_stub is not None}, "
-                f"next_address={self.next_node_address}"
+                f"next_node={self.next_node.instance if self.next_node else 'none'}"
             )
 
             if next_layer < total_layers:
@@ -1225,9 +1182,7 @@ class RingShardNode:
                 else:
                     logger.error(
                         f"Node {self.node_id}: Cannot forward activation - no next node configured. "
-                        f"Layer {next_layer} needs processing but "
-                        f"this is the final shard. "
-                        f"next_node_address={self.next_node_address}"
+                        f"Layer {next_layer} needs processing but this is the final shard."
                     )
             else:
                 # Final layer - send to API callback
@@ -1241,6 +1196,7 @@ class RingShardNode:
 
                 # Use API callback address if provided, otherwise use callback_url from activation
                 api_addr = self.api_callback_address
+                # FIXME: we kinda expect api_addr here?
                 if not api_addr and activation_msg.callback_url.startswith("grpc://"):
                     parsed = urlparse(activation_msg.callback_url)
                     api_addr = parsed.netloc  # host:port

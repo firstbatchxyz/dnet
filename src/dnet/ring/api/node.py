@@ -351,29 +351,16 @@ class RingApiNode:
         ]  # shards ordered w.r.t to the solver
 
         # Compute layer assignments, next service mapping, and prefetch windows
-        layer_assignments, next_service_map, prefetch_windows = (
-            self._compute_layer_assignments(
-                optimized_device_name_order, solution, shards
-            )
+        layer_assignments = self._compute_layer_assignments(
+            optimized_device_name_order, solution, shards
         )
-
-        assignments_info = [
-            LayerAssignment(
-                service=name,
-                layers=layer_assignments[name],
-                next_service=next_service_map[name],
-                prefetch_window=prefetch_windows[name],
-            )
-            for name in optimized_device_name_order
-        ]
 
         # Store topology (can be GET'ed later)
         self.topology = TopologyInfo(
             model=req.model,
             num_layers=model_metadata.num_layers,
             devices=shards_list,
-            assignments=assignments_info,
-            next_service_map=next_service_map,
+            assignments=layer_assignments,
             solution=asdict(solution),
         )
 
@@ -692,6 +679,7 @@ class RingApiNode:
         logger.info(f"Collected profiles from {len(shard_profiles)} shards")
         return shard_profiles, all_thunderbolts
 
+    # FIXME: move this to elsewhere
     def _optimize_device_ordering(
         self,
         shard_profiles: Dict[str, DeviceProfile],
@@ -719,6 +707,8 @@ class RingApiNode:
             head_devices = [device_names[0]] if device_names else []
 
         logger.info(f"Found {len(head_devices)} head device(s): {head_devices}")
+
+        # FIXME: shards on the same machine should be adjacent too!
 
         # Build adjacency graph of Thunderbolt connections
         # Graph: device_name -> set of connected device names
@@ -764,6 +754,7 @@ class RingApiNode:
 
         return ordered
 
+    # FIXME: move this to elsewhere
     async def _run_solver(
         self,
         shard_profiles: Dict[str, DeviceProfile],
@@ -802,12 +793,13 @@ class RingApiNode:
 
         return solution
 
+    # FIXME: move this to elsewhere
     def _compute_layer_assignments(
         self,
         device_names: List[str],
         solution: HALDAResult,
         shards: Dict[str, DnetDeviceProperties],
-    ) -> Tuple[Dict[str, List[List[int]]], Dict[str, Optional[str]], Dict[str, int]]:
+    ) -> List[LayerAssignment]:
         """Compute round-aware layer assignments, next node mapping, and prefetch windows from solver output.
 
         Args:
@@ -887,7 +879,17 @@ class RingApiNode:
                 prefetch_windows[service_name] = 1
 
         logger.info(f"Layer assignments (by rounds): {layer_assignments}")
-        return layer_assignments, next_service_map, prefetch_windows
+        # return layer_assignments, next_service_map, prefetch_windows
+
+        return [
+            LayerAssignment(
+                service=name,
+                layers=layer_assignments[name],
+                next_service=next_service_map[name],
+                prefetch_window=prefetch_windows[name],
+            )
+            for name in device_names
+        ]
 
     async def _handle_chat_completion(self, req: ChatRequestModel) -> ChatResponseModel:
         """Handle chat completion request.

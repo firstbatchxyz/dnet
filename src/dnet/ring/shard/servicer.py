@@ -1,8 +1,3 @@
-"""gRPC servicer for shard node."""
-
-import time
-from typing import TYPE_CHECKING
-
 import grpc
 
 from ...protos.dnet_ring_pb2 import (
@@ -16,22 +11,14 @@ from ...protos.dnet_ring_pb2 import (
     ResetCacheResponse,
 )
 from ...protos.dnet_ring_pb2_grpc import DnetRingServiceServicer
-from ...protos.shard_api_comm_pb2_grpc import ShardApiServiceServicer
+from ...protos import dnet_ring_pb2 as pb2
 from ...utils.logger import logger
 
-if TYPE_CHECKING:
-    from .node import RingShardNode
 
+class ShardServicer(DnetRingServiceServicer):
+    """gRPC servicer implementation"""
 
-class ShardServicer(DnetRingServiceServicer, ShardApiServiceServicer):
-    """gRPC servicer implementation for shard node."""
-
-    def __init__(self, node: "RingShardNode") -> None:
-        """Initialize shard servicer.
-
-        Args:
-            node: The shard node instance
-        """
+    def __init__(self, node):
         self.node = node
 
     async def SendActivation(
@@ -39,19 +26,13 @@ class ShardServicer(DnetRingServiceServicer, ShardApiServiceServicer):
         request: ActivationRequest,
         context: grpc.aio.ServicerContext,
     ) -> ActivationResponse:
-        """Handle incoming activation requests.
-
-        Args:
-            request: Activation request from previous node
-            context: gRPC context
-
-        Returns:
-            Activation response
-        """
+        """Handle incoming activation requests"""
         try:
             logger.debug(
-                f"Node {self.node.node_id} received activation: "
-                f"nonce={request.nonce}, layer={request.activation.layer_id}"
+                "Node %s received activation: nonce=%s, layer=%s",
+                self.node.node_id,
+                request.nonce,
+                request.activation.layer_id,
             )
 
             # Process the activation
@@ -63,7 +44,7 @@ class ShardServicer(DnetRingServiceServicer, ShardApiServiceServicer):
                 node_id=str(self.node.node_id),
             )
         except Exception as e:
-            logger.error(f"Error processing activation request: {e}")
+            logger.error("Error processing activation request: %s", e)
             return ActivationResponse(
                 success=False,
                 message=f"Error: {str(e)}",
@@ -75,18 +56,11 @@ class ShardServicer(DnetRingServiceServicer, ShardApiServiceServicer):
         request: HealthRequest,
         context: grpc.aio.ServicerContext,
     ) -> HealthResponse:
-        """Handle health check requests.
-
-        Args:
-            request: Health check request
-            context: gRPC context
-
-        Returns:
-            Health status response
-        """
+        """Handle health check requests"""
         logger.debug(
-            f"Node {self.node.node_id} received health request from "
-            f"{request.requester_id}"
+            "Node %s received health request from %s",
+            self.node.node_id,
+            request.requester_id,
         )
 
         return HealthResponse(
@@ -94,7 +68,7 @@ class ShardServicer(DnetRingServiceServicer, ShardApiServiceServicer):
             node_id=str(self.node.node_id),
             assigned_layers=self.node.assigned_layers,
             queue_size=self.node.activation_recv_queue.qsize(),
-            active_requests=0,  # TODO: implement proper tracking
+            active_requests=0,
         )
 
     async def ResetCache(
@@ -102,27 +76,20 @@ class ShardServicer(DnetRingServiceServicer, ShardApiServiceServicer):
         request: ResetCacheRequest,
         context: grpc.aio.ServicerContext,
     ) -> ResetCacheResponse:
-        """Handle reset cache requests.
+        """Handle reset cache requests"""
 
-        Args:
-            request: Reset cache request
-            context: gRPC context
-
-        Returns:
-            Reset cache response
-        """
         try:
-            logger.debug(f"Node {self.node.node_id} received reset cache request")
+            logger.debug("Node %s received reset cache request", self.node.node_id)
 
             # Reset the cache
             await self.node.reset_cache()
 
             return ResetCacheResponse(
                 success=True,
-                message="Cache reset successfully",
+                message="Activation processed successfully",
             )
         except Exception as e:
-            logger.error(f"Error processing reset-cache request: {e}")
+            logger.error("Error processing reset-cache request: %s", e)
             return ResetCacheResponse(
                 success=False,
                 message=f"Error: {str(e)}",
@@ -133,22 +100,18 @@ class ShardServicer(DnetRingServiceServicer, ShardApiServiceServicer):
         request: LatencyMeasureRequest,
         context: grpc.aio.ServicerContext,
     ) -> LatencyMeasureResponse:
-        """Handle latency measurement requests.
-
-        Args:
-            request: Latency measurement request
-            context: gRPC context
-
-        Returns:
-            Latency measurement response
-        """
+        """Handle latency measurement requests"""
         try:
             logger.debug(
-                f"Node {self.node.node_id} received latency measurement request from "
-                f"{request.requester_id}, payload size: {request.payload_size}"
+                "Node %s received latency measurement request from %s, payload size: %s",
+                self.node.node_id,
+                request.requester_id,
+                request.payload_size,
             )
 
             # Simply respond with success - the latency is measured by the requester
+            import time
+
             return LatencyMeasureResponse(
                 success=True,
                 message="Latency measurement response",
@@ -156,10 +119,39 @@ class ShardServicer(DnetRingServiceServicer, ShardApiServiceServicer):
                 timestamp=int(time.time() * 1000),  # Current timestamp in ms
             )
         except Exception as e:
-            logger.error(f"Error processing latency measurement request: {e}")
+            logger.error("Error processing latency measurement request: %s", e)
             return LatencyMeasureResponse(
                 success=False,
                 message=f"Error: {str(e)}",
                 node_id=str(self.node.node_id),
                 timestamp=int(time.time() * 1000),
             )
+
+    async def StreamActivations(self, request_iterator, context):
+        try:
+            async for frame in request_iterator:
+                if frame.end_of_request:
+                    # Acknowledge end-of-request with the last seen nonce (if any)
+                    try:
+                        yield pb2.StreamAck(nonce=frame.request.nonce, seq=frame.seq, accepted=True, message="eor")
+                    except Exception:
+                        pass
+                    # You can choose break (close stream) or continue (keep stream alive)
+                    break
+
+                # Expect a full ActivationRequest in the frame
+                req = frame.request  # pb2.ActivationRequest
+                if not req.nonce:
+                    # If the client sent a frame without a nonce, reject
+                    yield pb2.StreamAck(nonce="", seq=frame.seq, accepted=False, message="missing nonce")
+                    continue
+
+                last_nonce = req.nonce
+
+                # Lossless server-side flow control: admit to ingress, then ACK
+                await self.node.admit_frame(req)
+                yield pb2.StreamAck(nonce=req.nonce, seq=frame.seq, accepted=True)
+
+        except Exception as e:
+            logger.error("[STREAM][RX] error: %s", e)
+            await context.abort(grpc.StatusCode.INTERNAL, str(e))

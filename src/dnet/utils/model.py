@@ -100,6 +100,34 @@ class ModelMetadata:
     config: Any  # configurations stored in safetensor block
 
     @cached_property
+    def embedding_size(self) -> int:
+        """Get embedding size from model metadata.
+
+        Args:
+            model_metadata: Model metadata
+
+        Returns:
+            Embedding size
+        """
+
+        # try to get embedding_size first, fallback to hidden_size
+        embedding_size = self.model_config.get("embedding_size")
+        if embedding_size is None:
+            # try to infer from embed_tokens tensor dimensions
+            if self.embed_tokens and "weight" in self.embed_tokens:
+                embedding_size = self.embed_tokens["weight"].shape[1]
+            else:
+                # fallback to hidden_size
+                embedding_size = self.model_config.get("hidden_size")
+
+        if embedding_size is None:
+            raise ValueError(
+                "Could not find embedding_size or hidden_size in model metadata"
+            )
+
+        return embedding_size
+
+    @cached_property
     def num_layers(self) -> int:
         """Number of layers (global).
 
@@ -197,7 +225,7 @@ def load_weight(wt: TensorInfo, mapped_files: Dict[str, MappedFile]) -> mx.array
     # Special handling for BF16
     if wt.dtype == "BF16":
         # BF16 needs special handling - read as uint16 and convert
-        uint16_data = np.frombuffer(layer_data, dtype=np.uint16)
+        uint16_data = np.frombuffer(layer_data, dtype=np.uint16) # FIXME: reference before assignment
         float32_data = (uint16_data.astype(np.uint32) << 16).view(np.float32)
         return mx.array(float32_data).reshape(wt.shape).astype(mx.bfloat16)
     else:

@@ -19,8 +19,8 @@ keywords = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-  "mlx>=0.24.0",
-  "mlx-lm>=0.24.0",
+  "mlx",
+  "mlx-lm==0.28.2",
   "numpy>=1.24.0",
   "grpcio>=1.50.0",
   "grpcio-tools>=1.50.0",

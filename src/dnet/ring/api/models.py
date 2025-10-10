@@ -248,3 +248,29 @@ class APILoadModelResponse(BaseModel):
     message: Optional[str] = Field(
         default=None, description="Overall status or error message"
     )
+
+
+# ------------------------
+# Model Unloading API
+# ------------------------
+
+
+# FIXME: move elsewhere
+class ShardUnloadStatus(BaseModel):
+    """Unload status for a single shard."""
+
+    service_name: str = Field(..., description="Shard service name")
+    success: bool = Field(..., description="Whether unloading succeeded")
+    message: Optional[str] = Field(None, description="Status or error message")
+
+
+class UnloadModelResponse(BaseModel):
+    """Response from model unloading operation."""
+
+    success: bool = Field(..., description="Whether all shards unloaded successfully")
+    shard_statuses: List[ShardUnloadStatus] = Field(
+        ..., description="Status of each shard"
+    )
+    message: Optional[str] = Field(
+        default=None, description="Overall status or error message"
+    )

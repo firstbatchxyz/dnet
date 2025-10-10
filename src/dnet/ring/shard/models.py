@@ -16,6 +16,7 @@ class ShardLoadModelRequest(BaseModel):
     """Request to load model with specified layers on shard."""
 
     model_path: str = Field(..., description="Model path or HuggingFace repo ID")
+    total_layers: int = Field(..., description="Total number of layers in the model")
     layers: List[int] = Field(..., description="Layer indices to load on this shard")
     warmup: bool = Field(
         default=False, description="Whether to perform warmup after loading"
@@ -26,7 +27,6 @@ class ShardLoadModelRequest(BaseModel):
     prefetch_window: int = Field(
         ..., description="Number of layers to prefetch (computed from k)"
     )
-    total_layers: int = Field(..., description="Total number of layers in the model")
     api_callback_address: str = Field(
         ...,
         description="API callback address for final layer completion (gRPC host:port)",

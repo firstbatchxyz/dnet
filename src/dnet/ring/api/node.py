@@ -56,6 +56,8 @@ from .models import (
     PrepareTopologyRequest,
     RoleMapping,
     ShardLoadStatus,
+    ShardUnloadStatus,
+    UnloadModelResponse,
 )
 from ..shard.models import (
     ShardProfileRequest,
@@ -231,12 +233,13 @@ class RingApiNode:
             )
 
         @self.app.get("/v1/topology")
-        async def topology() -> JSONResponse:
+        async def topology() -> TopologyInfo:
             if self.topology:
-                return JSONResponse(content=self.topology.model_dump())
+                return self.topology
             else:
-                return JSONResponse(
-                    content={"error": "No topology configured"}, status_code=404
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="No topology configured. Call /v1/prepare_topology first.",
                 )
 
         @self.app.get("/v1/devices")
@@ -270,6 +273,18 @@ class RingApiNode:
                 return await self._handle_load_model(req)
             except Exception as e:
                 logger.exception(f"Error in /v1/load_model: {e}")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=str(e),
+                )
+
+        @self.app.post("/v1/unload_model")
+        async def unload_model() -> UnloadModelResponse:
+            """Unload model from all shards."""
+            try:
+                return await self._handle_unload_model()
+            except Exception as e:
+                logger.exception(f"Error in /v1/unload_model: {e}")
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=str(e),
@@ -385,6 +400,7 @@ class RingApiNode:
 
         # Get shards
         api_properties = self.discovery.get_own_properties()
+        # FIXME: use topology here, not a new discovery
         shards = self._get_shards_from_discovery()
 
         # Notify each shard to load their layers via HTTP
@@ -517,6 +533,103 @@ class RingApiNode:
                 success=False,
                 shard_statuses=shard_statuses,
             )
+
+    async def _handle_unload_model(self) -> UnloadModelResponse:
+        """Handle unload model request by unloading from all shards.
+
+        Returns:
+            Unload model response
+        """
+        logger.info("Unloading model from all shards")
+
+        if not self.topology:
+            logger.warning("No topology configured, nothing to unload")
+            return UnloadModelResponse(
+                success=True,
+                shard_statuses=[],
+                message="No topology configured, nothing to unload",
+            )
+
+        # Get shards from topology
+
+        # Call unload_model on each shard via HTTP
+        shard_statuses: List[ShardUnloadStatus] = []
+        async with httpx.AsyncClient() as http_client:
+            for shard in self.topology.devices:
+                try:
+                    # Call unload_model via HTTP
+                    url = f"http://{shard.local_ip}:{shard.server_port}/unload_model"
+                    response = await http_client.post(url, timeout=30.0)
+                    result = response.json()
+
+                    shard_statuses.append(
+                        ShardUnloadStatus(
+                            service_name=shard.instance,
+                            success=result.get("success", False),
+                            message=result.get("message", ""),
+                        )
+                    )
+
+                    logger.info(
+                        f"Shard {shard.instance} unload result: success={result.get('success')}, "
+                        f"message={result.get('message')}"
+                    )
+
+                except Exception as e:
+                    logger.exception(
+                        f"Error unloading model on shard {shard.instance}: {e}"
+                    )
+                    shard_statuses.append(
+                        ShardUnloadStatus(
+                            service_name=shard.instance,
+                            success=False,
+                            message=f"Error: {str(e)}",
+                        )
+                    )
+
+        # Check if all shards unloaded successfully
+        all_success = all(status.success for status in shard_statuses)
+        if not all_success:
+            failed_shards = [
+                status.service_name for status in shard_statuses if not status.success
+            ]
+            logger.error(f"Failed to unload model on shards: {failed_shards}")
+
+        # Unload API-side model components
+        try:
+            self.model = None
+            self.tokenizer = None
+            self.model_metadata = None
+            self.model_name = None
+            self.generate_step = None
+
+            # Close first shard connection
+            if self.first_shard_channel:
+                await self.first_shard_channel.close()
+                self.first_shard_channel = None
+                self.first_shard_stub = None
+                self.first_shard_address = None
+
+            logger.info("API-side model unloaded successfully")
+
+        except Exception as e:
+            logger.exception(f"Error unloading API-side model: {e}")
+            all_success = False
+            shard_statuses.append(
+                ShardUnloadStatus(
+                    service_name="api",
+                    success=False,
+                    message=f"API model unload error: {str(e)}",
+                )
+            )
+
+        return UnloadModelResponse(
+            success=all_success,
+            shard_statuses=shard_statuses,
+            message="Model unloaded successfully"
+            if all_success
+            else "Some shards failed to unload",
+        )
 
     async def _connect_first_shard(self) -> bool:
         """Connect to first shard in ring.

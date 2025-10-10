@@ -14,6 +14,10 @@ format:
 protos:
 		uv run ./scripts/generate_protos.py
 
+.PHONY: update #         | Update git submodules
+update:
+		git submodule update --init --recursive
+
 .PHONY: help #         | List targets
 help:                                                                                                                    
 		@grep '^.PHONY: .* #' Makefile | sed 's/\.PHONY: \(.*\) # \(.*\)/\1 \2/' | expand -t20

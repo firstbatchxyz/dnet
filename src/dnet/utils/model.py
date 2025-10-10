@@ -1,23 +1,25 @@
 """Model metadata and weight loading utilities for dnet."""
-
+import os
 import ctypes
 import glob
 import json
 import mmap
 import re
 import struct
+import fcntl
 from collections import defaultdict
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Tuple
 
 import mlx.core as mx
 import numpy as np
 from mlx_lm.utils import get_model_path
 
 from .serialization import safetensor_dtype_map
-
+from ..ring.model.base import BaseRingModel
+from .logger import logger
 
 # REGEX associated with LLM
 EMBED_TOKENS_RE = re.compile(r"^model\.embed_tokens\.(.+)$")  # Embedding
@@ -88,7 +90,7 @@ class TensorInfo:
 
 @dataclass(frozen=True)
 class ModelMetadata:
-    """LLM model metadata."""
+    """LLM model metadata"""
 
     path: Path  # Path to the model on local disk
     weight_info: Dict[int, Dict[str, TensorInfo]]  # Weights of each layer
@@ -99,94 +101,103 @@ class ModelMetadata:
 
     @cached_property
     def num_layers(self) -> int:
-        """Number of layers in the model."""
+        """Number of layers (global).
+
+        Prefer explicit value from config (num_hidden_layers) when present so
+        that repacked/partial weight sets (e.g., per-shard) still report the
+        correct global layer count.
+        """
+        try:
+            n = int(self.config.get("num_hidden_layers"))
+            if n > 0:
+                return n
+        except Exception:
+            pass
         return max(self.weight_info.keys()) + 1
 
     @cached_property
     def model_type(self) -> str:
-        """Model type (e.g., 'qwen3', 'deepseek_v2')."""
+        """# Model type e.g., llama"""
         return self.config["model_type"]
 
     @property
     def model_config(self) -> Any:
-        """Model configuration dict."""
         return self.config
-
-    @cached_property
-    def embedding_size(self) -> int:
-        """Get embedding size from model metadata.
-
-        Args:
-            model_metadata: Model metadata
-
-        Returns:
-            Embedding size
-        """
-
-        # try to get embedding_size first, fallback to hidden_size
-        embedding_size = self.model_config.get("embedding_size")
-        if embedding_size is None:
-            # try to infer from embed_tokens tensor dimensions
-            if self.embed_tokens and "weight" in self.embed_tokens:
-                embedding_size = self.embed_tokens["weight"].shape[1]
-            else:
-                # fallback to hidden_size
-                embedding_size = self.model_config.get("hidden_size")
-
-        if embedding_size is None:
-            raise ValueError(
-                "Could not find embedding_size or hidden_size in model metadata"
-            )
-
-        return embedding_size
 
 
 class MappedFile:
-    """Maps a file to memory for efficient weight loading."""
+    """Maps a file to memory."""
 
-    def __init__(self, file_path: str, access=mmap.ACCESS_WRITE):
-        """Initialize memory-mapped file.
-
+    def __init__(self, file_path: str, access=mmap.ACCESS_COPY):
+        """
         Args:
             file_path: Path to file
-            access: mmap access mode
         """
         self.file_path = file_path
-        self.file = open(file_path, "r+b")
+        # Prefer private copy-on-write mapping so the buffer is writable from
+        # Python's perspective (needed for ctypes.from_buffer) without touching disk
+        if access == mmap.ACCESS_COPY:
+            self.file = open(file_path, "rb")
+        else:
+            # Fallback path
+            self.file = open(file_path, "r+b")
 
         # Memory map the file
-        self.mmap = mmap.mmap(self.file.fileno(), 0, access=access)
+        try:
+            self.mmap = mmap.mmap(self.file.fileno(), 0, access=access)
+        except Exception:
+            # Fallback to copy-on-write if requested access fails
+            self.mmap = mmap.mmap(self.file.fileno(), 0, access=mmap.ACCESS_COPY)
 
         # Get memory address for madvise
+        # from_buffer requires a writable view; ACCESS_COPY satisfies this
         self.base_addr = ctypes.addressof(ctypes.c_char.from_buffer(self.mmap))
 
 
 def load_weight(wt: TensorInfo, mapped_files: Dict[str, MappedFile]) -> mx.array:
-    """Load a single weight tensor from memory-mapped file.
-
-    Args:
-        wt: Tensor information
-        mapped_files: Dictionary of already-mapped files
-
-    Returns:
-        Loaded MLX array
-    """
     offset, size = wt.offset, wt.size_bytes
 
-    if wt.filename not in mapped_files:
-        mapped_files[wt.filename] = MappedFile(wt.filename)
+    # Optional direct-I/O mode (macOS friendly): avoid populating page cache.
+    try:
+        direct = os.getenv("RING_FILE_IO", "").strip().lower() == "direct"
+    except Exception:
+        direct = False
 
-    mapped_file = mapped_files[wt.filename]
-    layer_data = mapped_file.mmap[offset : offset + size]
+    if direct:
+        try:
+            fd = os.open(wt.filename, os.O_RDONLY)
+        except Exception:
+            fd = -1
+        layer_bytes = None
+        if fd >= 0:
+            try:
+                try:
+                    fcntl.fcntl(fd, fcntl.F_NOCACHE, 1)  # macOS advisory: don't add to cache
+                except Exception:
+                    pass
+                try:
+                    layer_bytes = os.pread(fd, int(size), int(offset))
+                except OSError:
+                    layer_bytes = None
+            finally:
+                os.close(fd)
+        if layer_bytes is not None and len(layer_bytes) == size:
+            layer_data = memoryview(layer_bytes)
+        else:
+            # Fallback to mmap path if direct read fails
+            direct = False
+    if not direct:
+        if wt.filename not in mapped_files:
+            mapped_files[wt.filename] = MappedFile(wt.filename)
+        mapped_file = mapped_files[wt.filename]
+        # Use a memoryview into the mmap to avoid an intermediate bytes copy
+        mv = memoryview(mapped_file.mmap)
+        layer_data = mv[offset : offset + size]
 
     # Special handling for BF16
     if wt.dtype == "BF16":
         # BF16 needs special handling - read as uint16 and convert
-        # BF16 is stored as 16-bit values
         uint16_data = np.frombuffer(layer_data, dtype=np.uint16)
-        # Convert uint16 to float32 by interpreting as bfloat16
-        # BF16: sign(1) + exponent(8) + mantissa(7)
-        # Move the bits to the upper 16 bits of float32
         float32_data = (uint16_data.astype(np.uint32) << 16).view(np.float32)
         return mx.array(float32_data).reshape(wt.shape).astype(mx.bfloat16)
     else:
@@ -194,27 +205,68 @@ def load_weight(wt: TensorInfo, mapped_files: Dict[str, MappedFile]) -> mx.array
         return mx.array(np_data).reshape(wt.shape)
 
 
-def load_api_layer_weights(model_metadata: ModelMetadata, model: Any) -> None:
-    """Load API layer weights (embeddings, norm, lm_head) into model.
+def load_api_layer_weights(model_metadata: ModelMetadata, model: BaseRingModel):
+    """Load API-layer weights (embed, norm, and head).
 
-    Args:
-        model_metadata: Model metadata containing weight information
-        model: Model instance to load weights into
+    - Always load embed_tokens and norm.
+    - For lm_head:
+        - If quantized params present (e.g., lm_head.scales), load all lm_head.* keys
+          and model will convert lm_head to QuantizedLinear before assignment.
+        - Else, if dense weight present and matches expected shape (in,out) or transposed,
+          load it; otherwise, skip and allow tied embedding projection as a fallback.
     """
     weights: Dict[str, mx.array] = {}
     mapped_files: Dict[str, MappedFile] = {}
 
     try:
+        # Always load embeddings and norm
         for k, wt in model_metadata.embed_tokens.items():
             weights[get_model_embed_tokens_name(k)] = load_weight(wt, mapped_files)
-
-        for k, wt in model_metadata.lm_head.items():
-            weights[get_lm_head_name(k)] = load_weight(wt, mapped_files)
-
         for k, wt in model_metadata.norm.items():
             weights[get_model_norm_name(k)] = load_weight(wt, mapped_files)
 
-        model.load_weights(list(weights.items()))
+        hidden_size = getattr(getattr(model, "config", {}), "hidden_size", None)
+        vocab_size = getattr(getattr(model, "config", {}), "vocab_size", None)
+
+        lm_keys = set(model_metadata.lm_head.keys())
+        has_quant_head = any(k.startswith("scales") for k in lm_keys)
+
+        loaded_head = False
+        if has_quant_head:
+            for k, wt in model_metadata.lm_head.items():
+                weights[get_lm_head_name(k)] = load_weight(wt, mapped_files)
+            logger.info("Loaded quantized lm_head params for API")
+            loaded_head = True
+        else:
+            # Dense path: only load if shape matches or transpose
+            w_info = model_metadata.lm_head.get("weight")
+            if w_info is not None and hidden_size is not None and vocab_size is not None:
+                w_arr = load_weight(w_info, mapped_files)
+                shp = tuple(w_arr.shape)
+                if shp == (hidden_size, vocab_size):
+                    weights[get_lm_head_name("weight")] = w_arr
+                    logger.info("Loaded dense lm_head.weight for API")
+                    loaded_head = True
+                elif shp == (vocab_size, hidden_size):
+                    weights[get_lm_head_name("weight")] = w_arr.T
+                    logger.info("Loaded transposed dense lm_head.weight for API")
+                    loaded_head = True
+                else:
+                    logger.warning("Skipping lm_head.weight with incompatible shape %s; will use tied projection if configured.", shp)
+            else:
+                if w_info is None:
+                    logger.info("No lm_head.weight found; will use tied projection if applicable")
+
+        # If we couldn't load any head and model supports fallback, force tied projection
+        if not loaded_head and hasattr(model, "force_tied_head"):
+            try:
+                setattr(model, "force_tied_head", True)
+                logger.info("Falling back to tied embedding projection for API head")
+            except Exception:
+                pass
+
+        # Load with strict=False to allow partial sets (e.g., no head) without failure
+        model.load_weights(list(weights.items()), strict=False)
         model.eval()
     finally:
         for mapped_file in mapped_files.values():
@@ -222,15 +274,7 @@ def load_api_layer_weights(model_metadata: ModelMetadata, model: Any) -> None:
             mapped_file.file.close()
 
 
-def get_safetensor_details(path: str) -> Dict[str, TensorInfo]:
-    """Extract tensor details from a safetensor file.
-
-    Args:
-        path: Path to safetensor file
-
-    Returns:
-        Dictionary mapping tensor names to TensorInfo
-    """
+def get_safetensor_details(path) -> Dict[str, TensorInfo]:
     with open(path, "rb") as f:
         # Memory-map file
         mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
@@ -245,7 +289,7 @@ def get_safetensor_details(path: str) -> Dict[str, TensorInfo]:
         # Compute base offset for tensor data
         data_base = 8 + header_len
 
-        details: Dict[str, TensorInfo] = {}
+        details = {}
         for name, info in header.items():
             if name == "__metadata__":
                 continue
@@ -253,7 +297,7 @@ def get_safetensor_details(path: str) -> Dict[str, TensorInfo]:
             start, end = info["data_offsets"]
             details[name] = TensorInfo(
                 dtype=info["dtype"],
-                shape=tuple(info["shape"]),
+                shape=info["shape"],
                 size_bytes=end - start,
                 offset=data_base + start,
                 filename=path,
@@ -262,64 +306,24 @@ def get_safetensor_details(path: str) -> Dict[str, TensorInfo]:
         return details
 
 
-def get_model_metadata(model_path: str) -> ModelMetadata:
-    """Load model metadata from a HuggingFace model path.
-
-    This function will automatically download the model from HuggingFace if it's not
-    available locally.
-
-    Args:
-        model_path: Path or HuggingFace repo ID
-
-    Returns:
-        ModelMetadata instance
-
-    Raises:
-        ValueError: If model path cannot be resolved
-        RuntimeError: If weights are inconsistent or model format is unsupported
-    """
-    from .logger import logger
-
-    # get_model_path will download from HuggingFace if not available locally
-    logger.info(f"Loading model metadata for {model_path}")
-    path_result = get_model_path(model_path)
+def get_model_metadata(model_path) -> ModelMetadata:
+    path = get_model_path(model_path)
 
     # Handle case where get_model_path returns a tuple (mlx-lm version compatibility)
-    if isinstance(path_result, tuple):
-        path = path_result[0] if path_result else None
-    else:
-        path = path_result
-
+    if isinstance(path, tuple):
+        path = path[0] if path else None
     if path is None:
         raise ValueError(f"Could not resolve model path for {model_path}")
 
-    # Ensure it's a Path object
     path = Path(path) if not isinstance(path, Path) else path
-    logger.info(f"Model path resolved to: {path}")
 
     # read model configurations
-    config_path = path / "config.json"
-    if not config_path.exists():
-        raise RuntimeError(
-            f"config.json not found in {path}. "
-            "The model may not be downloaded correctly."
-        )
-
-    with open(config_path, "r") as f:
+    with open(path / "config.json", "r") as f:
         config = json.load(f)
 
     weight_files = glob.glob(str(path / "*.safetensors"))
-
-    if not weight_files:
-        raise RuntimeError(
-            f"No safetensors files found in {path}. "
-            "Ensure the model is downloaded correctly and in the expected format."
-        )
-    weight_info: Dict[int, Dict[str, TensorInfo]] = defaultdict(dict)
-    embed_tokens: Dict[str, TensorInfo] = {}
-    lm_head: Dict[str, TensorInfo] = {}
-    norm: Dict[str, TensorInfo] = {}
-
+    weight_info: Dict[int, Dict[str, Any]] = defaultdict(dict)
+    embed_tokens, lm_head, norm = {}, {}, {}
     for weight in weight_files:
         details = get_safetensor_details(weight)
         for key, val in details.items():
@@ -334,38 +338,75 @@ def get_model_metadata(model_path: str) -> ModelMetadata:
                 weight_info[int(layer_idx)][suffix] = val
             else:
                 raise RuntimeError(f"Unexpected key {key}")
-
-    if not weight_info:
-        raise RuntimeError(
-            f"No layer weights found in model at {path}. "
-            f"Found {len(weight_files)} safetensors files but no keys matching 'model.layers.\\d+.*'. "
-            "The model may use an unsupported architecture or key format."
-        )
-
-    num_layers = max(weight_info.keys()) + 1
-    logger.info(f"Found {num_layers} layers in model")
-    if not (set(weight_info.keys()) == set(range(num_layers))):
-        raise RuntimeError("Inconsistent weights")
+    # Allow partial/repacked weight sets for shard-local models:
+    # - Do not require contiguous layer coverage [0..max].
+    # - If the global layer count is available in config (num_hidden_layers),
+    #   validate that any present layer indices fall within [0, num_hidden_layers).
+    try:
+        cfg_layers = int(config.get("num_hidden_layers", -1))
+    except Exception:
+        cfg_layers = -1
+    if cfg_layers > 0:
+        bad = [i for i in weight_info.keys() if i < 0 or i >= cfg_layers]
+        if bad:
+            raise RuntimeError(
+                f"Layer indices out of range for model (num_hidden_layers={cfg_layers}): {sorted(set(bad))}"
+            )
 
     return ModelMetadata(path, weight_info, embed_tokens, lm_head, norm, config)
 
+def make_cache(model: BaseRingModel):
+    """Create model KV cache with optional quantization.
 
-def get_layer_assignment_rr(
-    num_nodes: int, metadata: ModelMetadata
-) -> Dict[int, List[int]]:
-    """Get round-robin layer assignment across nodes.
-
-    Args:
-        num_nodes: Number of nodes
-        metadata: Model metadata
-
-    Returns:
-        Dictionary mapping node index to list of layer indices
+    Controls via env vars:
+      - RING_KV_CACHE: one of {"fp16", "int8", "int4"} (default: fp16)
+      - RING_KV_BITS: bits for quantized cache (default: 8)
+      - RING_KV_GROUP: group size for quantized cache (default: 64)
     """
-    from itertools import cycle
+    caches = cache.make_prompt_cache(model)
 
-    num_layers = metadata.num_layers
-    partitions: Dict[int, List[int]] = defaultdict(list)
-    for idx, x in zip(cycle(range(num_nodes)), range(num_layers)):
-        partitions[idx].append(x)
-    return dict(partitions)
+    try:
+        mode = (os.getenv("RING_KV_CACHE", "fp16") or "fp16").strip().lower()
+    except Exception:
+        mode = "fp16"
+
+    if mode in {"int8", "int4", "quant", "q"}:
+        try:
+            bits_env = int(os.getenv("RING_KV_BITS", "8"))
+        except Exception:
+            bits_env = 8
+        # Map mode shortcuts
+        if mode == "int4":
+            bits = 4
+        elif mode == "int8":
+            bits = 8
+        else:
+            bits = max(1, min(8, bits_env))
+        try:
+            group = int(os.getenv("RING_KV_GROUP", "64"))
+        except Exception:
+            group = 64
+
+        converted = []
+        converted_any = False
+        for c in caches:
+            if hasattr(c, "to_quantized"):
+                try:
+                    qc = c.to_quantized(group_size=group, bits=bits)  # type: ignore[attr-defined]
+                    converted.append(qc)
+                    converted_any = True
+                except Exception as e:
+                    logger.warning("KV quantization failed for one cache entry: %s; using fp16 entry", e)
+                    converted.append(c)
+            else:
+                converted.append(c)
+
+        if converted_any:
+            logger.info("Enabled quantized KV cache: bits=%s, group_size=%s", bits, group)
+            return converted
+        else:
+            logger.info("KV quantization requested but not supported by cache type; using fp16 KV cache")
+            return caches
+
+    # Default fp16/unquantized cache
+    return caches

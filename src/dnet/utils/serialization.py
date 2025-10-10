@@ -1,13 +1,11 @@
 """Tensor serialization utilities for dnet."""
 
-from typing import Dict
-
 import mlx.core as mx
 import numpy as np
 
 
 # Dtype mapping for numpy types (used for serialization)
-dtype_map: Dict[str, type[np.generic]] = {
+dtype_map = {
     "mlx.core.float32": np.float32,
     "mlx.core.int32": np.int32,
     "mlx.core.int64": np.int64,
@@ -18,11 +16,11 @@ dtype_map: Dict[str, type[np.generic]] = {
     "mlx.core.uint16": np.uint16,
     "mlx.core.uint32": np.uint32,
     "mlx.core.uint64": np.uint64,
-    "mlx.core.bfloat16": np.float32,  # BF16 is not directly supported by numpy, use float32
+    # Treat BF16 payload as float16 for NumPy buffer interpretation
+    "mlx.core.bfloat16": np.float16,
 }
 
-# Safetensor dtype mapping
-safetensor_dtype_map: Dict[str, type[np.generic]] = {
+safetensor_dtype_map = {
     "BOOL": np.bool_,
     "U8": np.uint8,
     "I8": np.int8,
@@ -33,13 +31,12 @@ safetensor_dtype_map: Dict[str, type[np.generic]] = {
     "U32": np.uint32,
     "U64": np.uint64,
     "F16": np.float16,
-    "BF16": np.float16,  # Map BF16 to F16 as numpy doesn't have native bfloat16
+    "BF16": np.float16,
     "F32": np.float32,
     "F64": np.float64,
 }
 
-# MLX dtype mapping
-mlx_dtype_map: Dict[str, mx.Dtype] = {
+mlx_dtype_map = {
     "mlx.core.float32": mx.float32,
     "mlx.core.int32": mx.int32,
     "mlx.core.int64": mx.int64,

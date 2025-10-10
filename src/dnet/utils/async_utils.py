@@ -149,17 +149,3 @@ async def azip(*aiters: AsyncIterator[Any]) -> AsyncIterator[tuple]:
             yield tuple(values)
         except (StopAsyncIteration, asyncio.CancelledError):
             return
-
-
-def make_cache(model: "BaseRingModel") -> Any:
-    """Create a prompt cache for the model.
-
-    Args:
-        model: Ring model instance
-
-    Returns:
-        Prompt cache for the model
-    """
-    from mlx_lm.models import cache
-
-    return cache.make_prompt_cache(model)

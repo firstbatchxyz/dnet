@@ -16,6 +16,7 @@ from typing import Any, Dict, Tuple
 import mlx.core as mx
 import numpy as np
 from mlx_lm.utils import get_model_path
+from mlx_lm.models import cache
 
 from .serialization import safetensor_dtype_map
 from ..ring.model.base import BaseRingModel
@@ -300,7 +301,7 @@ def load_api_layer_weights(model_metadata: ModelMetadata, model: BaseRingModel):
         for mapped_file in mapped_files.values():
             mapped_file.mmap.close()
             mapped_file.file.close()
-
+            
 
 def get_safetensor_details(path) -> Dict[str, TensorInfo]:
     with open(path, "rb") as f:

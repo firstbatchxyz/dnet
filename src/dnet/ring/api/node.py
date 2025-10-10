@@ -3,6 +3,7 @@
 import asyncio
 import time
 import uuid
+import json
 from dataclasses import asdict
 from io import StringIO
 from pathlib import Path
@@ -11,7 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import httpx
 import mlx.core as mx
 from fastapi import FastAPI, HTTPException, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from grpc import aio as aio_grpc
 from hypercorn import Config
 import hypercorn.asyncio as aio_hypercorn
@@ -95,6 +96,7 @@ class RingApiNode:
         self,
         http_port: int,
         grpc_port: int,
+        compression_pct: float = 0.0,
     ) -> None:
         """Initialize API node.
 
@@ -119,6 +121,12 @@ class RingApiNode:
         self.app = FastAPI()
         self.running = False
 
+        # Compression
+        try:
+            self._compression_pct = max(0.0, min(100.0, float(compression_pct)))
+        except ValueError:
+            self._compression_pct = 0.0
+
         # gRPC
         self.http_server: Optional[Any] = None
         self.api_grpc_server: Optional[aio_grpc.Server] = None
@@ -131,10 +139,7 @@ class RingApiNode:
         # Callback tracking
         self.pending_requests: Dict[str, asyncio.Future] = {}
 
-        logger.info(
-            f"API node initialized on HTTP port {self.http_port}, "
-            f"gRPC port {self.grpc_port}"
-        )
+        logger.info("API node initialized on HTTP port %s, gRPC port %s", self.http_port, self.grpc_port)
 
     async def start(self, shutdown_trigger: Any = lambda: asyncio.Future()) -> None:
         """Start the API node.
@@ -260,11 +265,11 @@ class RingApiNode:
             try:
                 return await self._handle_prepare_topology(req)
             except Exception as e:
-                logger.exception(f"Error in /v1/prepare_topology: {e}")
+                logger.exception("Error in /v1/prepare_topology: %s", e)
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=str(e),
-                )
+                ) from e
 
         @self.app.post("/v1/load_model")
         async def load_model(req: APILoadModelRequest) -> APILoadModelResponse:
@@ -272,11 +277,11 @@ class RingApiNode:
             try:
                 return await self._handle_load_model(req)
             except Exception as e:
-                logger.exception(f"Error in /v1/load_model: {e}")
+                logger.exception("Error in /v1/load_model: %s", e)
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=str(e),
-                )
+                ) from e
 
         @self.app.post("/v1/unload_model")
         async def unload_model() -> UnloadModelResponse:
@@ -284,11 +289,11 @@ class RingApiNode:
             try:
                 return await self._handle_unload_model()
             except Exception as e:
-                logger.exception(f"Error in /v1/unload_model: {e}")
+                logger.exception("Error in /v1/unload_model: %s", e)
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=str(e),
-                )
+                ) from e
 
         @self.app.post("/v1/chat/completions")
         async def chat_completions(req: ChatRequestModel) -> ChatResponseModel:  # type: ignore
@@ -303,15 +308,16 @@ class RingApiNode:
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail="Not connected to first shard",
                 )
+            if bool(getattr(req, "stream", False)):
+                return StreamingResponse(self._stream_chat(req), media_type="text/event-stream")
             return await self._handle_chat_completion(req)
 
         @self.app.post("/v1/completions")
         async def completions(req: CompletionRequestModel):  # type: ignore
             """Handle completion requests (not implemented)."""
-            raise HTTPException(
-                status_code=status.HTTP_501_NOT_IMPLEMENTED,
-                detail="Endpoint not implemented",
-            )
+            if bool(getattr(req, "stream", False)):
+                return StreamingResponse(self._stream_completion(req), media_type="text/event-stream")
+            return await self._handle_text_completion(req)
 
     async def _handle_prepare_topology(
         self, req: PrepareTopologyRequest
@@ -659,15 +665,14 @@ class RingApiNode:
                 self.first_shard_stub,
                 callback_protocol="grpc",
                 callback_addr=callback_addr,
+                compression=self._compression_pct
             )
 
-            logger.info(f"Connected to first shard at {first_shard_address}")
+            logger.info("Connected to first shard at %s", first_shard_address)
             return True
 
         except Exception as e:
-            logger.warning(
-                f"Failed to connect to first shard {first_shard_address}: {e}"
-            )
+            logger.warning("Failed to connect to first shard %s: %s", first_shard_address, e)
             self.first_shard_channel = None
             self.first_shard_stub = None
             self.generate_step = None
@@ -1050,12 +1055,13 @@ class RingApiNode:
                     tokenize=False,
                 )
                 logger.info(
-                    f"Using tokenizer chat template, prompt preview: {prompt[:100]}..."
+                    "Using tokenizer chat template, prompt preview: %s...",
+                    prompt[:50],
                 )
                 return prompt
             except Exception as e:
                 logger.warning(
-                    f"Failed to apply chat template: {e}, falling back to default"
+                    "Failed to apply chat template: %s, falling back to default", e
                 )
 
         # Fallback to default role mapping
@@ -1181,6 +1187,29 @@ class RingApiNode:
             metrics=metrics,
         )
 
+    async def _handle_text_completion(self, req: CompletionRequestModel):
+        prompt = mx.array(self.tokenizer.encode(req.prompt))  # type: ignore
+        stop_id_sequences: List[List[int]] = [
+            self.tokenizer.encode(stop_word, add_special_tokens=False)  # type: ignore
+            for stop_word in (req.stop or [])  # type: ignore
+        ]
+        chat_resp = await self._handle_completion(req, prompt, stop_id_sequences)  # type: ignore[arg-type]
+        text = chat_resp.choices[0].message.content
+        return {
+            "id": chat_resp.id,
+            "object": "text_completion",
+            "model": chat_resp.model,
+            "choices": [
+                {
+                    "index": 0,
+                    "text": text,
+                    "logprobs": None,
+                    "finish_reason": chat_resp.choices[0].finish_reason,
+                }
+            ],
+            "usage": chat_resp.usage,
+        }
+    
     async def _stopping_criteria(
         self,
         tokens: List[int],
@@ -1258,6 +1287,125 @@ class RingApiNode:
             },
             metrics=metrics,
         )
+    
+    def _stream_chat(self, req: ChatRequestModel):
+        created = int(time.time())
+        nonce = f"chatcmpl-{uuid.uuid4()}"
+
+        async def gen():
+            stop_id_sequences: List[List[int]] = [
+                self.tokenizer.encode(stop_word, add_special_tokens=False)  # type: ignore
+                for stop_word in (req.stop or [])  # type: ignore
+            ]
+            prompt_text = await self._convert_chat(req.messages)
+            prompt = mx.array(self.tokenizer.encode(prompt_text))  # type: ignore
+            detok = self.tokenizer.detokenizer
+            detok.reset()
+            # Initial role delta
+            chunk = {
+                "id": nonce,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": getattr(req, "model", None) or "default_model",
+                "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+            }
+            yield f"data: {json.dumps(chunk)}\n\n"
+
+            tokens: list[int] = []
+            async for (token, _), _ in azip(
+                self.generate_step(
+                    nonce=nonce,
+                    node_origin=f"0.0.0.0:{self.http_port}", # FIXME: Not sure of this, grpc-http port mix
+                    prompt=prompt,
+                    model=self.model,
+                    pending_requests=self.pending_requests,
+                    params=ChatBaseParams(
+                        model=req.model,
+                        temperature=req.temperature,
+                        top_p=req.top_p,
+                        repetition_penalty=req.repetition_penalty,
+                        repetition_context_size=req.repetition_context_size,
+                        logit_bias=req.logit_bias,
+                    ),
+                ),
+                arange(req.max_tokens or 0),
+            ):
+                tokens.append(token)
+                detok.add_token(token)
+                delta = detok.delta if hasattr(detok, "delta") else self.tokenizer.decode([token])
+                chunk = {
+                    "id": nonce,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": getattr(req, "model", None) or "default_model",
+                    "choices": [{"index": 0, "delta": {"content": delta}, "finish_reason": None}],
+                }
+                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+
+                stop = await self._stopping_criteria(tokens, stop_id_sequences, self.tokenizer.eos_token_id)  # type: ignore
+                if stop.stop_met:
+                    break
+
+            done = {
+                "id": nonce,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": getattr(req, "model", None) or "default_model",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            }
+            yield f"data: {json.dumps(done)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return gen()
+
+    def _stream_completion(self, req: CompletionRequestModel):
+        created = int(time.time())
+        nonce = f"cmpl-{uuid.uuid4()}"
+
+        async def gen():
+            prompt = mx.array(self.tokenizer.encode(req.prompt))  # type: ignore
+            detok = self.tokenizer.detokenizer
+            detok.reset()
+            async for (token, _), _ in azip(
+                self.generate_step(
+                    nonce=nonce,
+                    node_origin=f"0.0.0.0:{self.http_port}",  # FIXME: Not sure of this, grpc-http port mix
+                    prompt=prompt,
+                    model=self.model,
+                    pending_requests=self.pending_requests,
+                    params=ChatBaseParams(
+                        model=req.model,
+                        temperature=req.temperature,
+                        top_p=req.top_p,
+                        repetition_penalty=req.repetition_penalty,
+                        repetition_context_size=req.repetition_context_size,
+                        logit_bias=req.logit_bias,
+                    ),
+                ),
+                arange(req.max_tokens or 0),
+            ):
+                detok.add_token(token)
+                delta = detok.delta if hasattr(detok, "delta") else self.tokenizer.decode([token])
+                chunk = {
+                    "id": nonce,
+                    "object": "text_completion.chunk",
+                    "created": created,
+                    "model": getattr(req, "model", None) or "default_model",
+                    "choices": [{"index": 0, "text": delta, "finish_reason": None}],
+                }
+                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+
+            done = {
+                "id": nonce,
+                "object": "text_completion.chunk",
+                "created": created,
+                "model": getattr(req, "model", None) or "default_model",
+                "choices": [{"index": 0, "text": "", "finish_reason": "stop"}],
+            }
+            yield f"data: {json.dumps(done)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return gen()
 
     async def shutdown(self) -> None:
         """Shutdown the node."""

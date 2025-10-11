@@ -438,13 +438,9 @@ class RingApiNode:
                 # Get next node address from next_service in ring
                 if assignment.next_service and assignment.next_service in shards:
                     next_shard = shards[assignment.next_service]
-                    logger.info(
-                        f"Shard {service_name} next node in ring: {assignment.next_service} "
-                    )
+                    logger.info("Shard %s next node in ring: %s", service_name, assignment.next_service)
                 else:
-                    logger.info(
-                        f"Shard {service_name} has no valid next service in ring"
-                    )
+                    logger.info("Shard %s has no valid next service in ring", service_name)
 
                 try:
                     # Get total layers from stored topology
@@ -477,14 +473,9 @@ class RingApiNode:
                             layers_loaded=result.layers_loaded,
                         )
                     )
-                    logger.info(
-                        f"Shard {service_name} load result: success={result.success} ({result.message})"
-                    )
-
+                    logger.info("Shard %s load result: success=%s (%s)", service_name, result.success, result.message)
                 except Exception as e:
-                    logger.exception(
-                        f"Error loading model on shard {service_name}: {e}"
-                    )
+                    logger.exception("Error loading model on shard %s: %s", service_name, e)
                     shard_statuses.append(
                         ShardLoadStatus(
                             service_name=service_name,
@@ -509,31 +500,32 @@ class RingApiNode:
                     self.model_metadata.model_config,
                     is_api_layer=True,
                 )
-                load_api_layer_weights(self.model_metadata, self.model)
+                #load_api_layer_weights(self.model_metadata, self.model)
+                # FIXME: I think we don't need to load lm_head + embedding at API side
 
                 # Connect to first shard (head device)
                 # this should be the first device in `self.topology.devices`
                 await self._connect_first_shard()
 
-                logger.info(f"API-side model loaded successfully for {req.model}")
+                logger.info("API-side model loaded successfully for %s", req.model)
                 return APILoadModelResponse(
                     model=req.model,
                     success=True,
                     shard_statuses=shard_statuses,
                 )
             except Exception as e:
-                logger.exception(f"Error loading API-side model: {e}")
+                logger.exception("Error loading API-side model: %s", e)
                 return APILoadModelResponse(
                     model=req.model,
                     success=False,
                     shard_statuses=shard_statuses,
-                    message=f"Error loading API-side model: {e}",
+                    message=("Error loading API-side model: %s", e),
                 )
         else:
             failed_shards = [
                 status.service_name for status in shard_statuses if not status.success
             ]
-            logger.error(f"Failed to load model on shards: {failed_shards}")
+            logger.error("Failed to load model on shards: %s", failed_shards)
             return APILoadModelResponse(
                 model=req.model,
                 success=False,

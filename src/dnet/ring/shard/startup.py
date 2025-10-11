@@ -16,6 +16,7 @@ from grpc import aio as aio_grpc
 from hypercorn import Config
 import hypercorn.asyncio as aio_hypercorn
 from dperf import DeviceProfileInfo, profile_device
+from dataclasses import asdict
 from dnet_p2p.thunderbolt import ThunderboltConnection
 from dnet_p2p import (
     DnetDeviceProperties,
@@ -68,11 +69,9 @@ class StartupMixin:
     
         self.compute_thread = threading.Thread(target=self._compute_worker, daemon=True)
         self.compute_thread.start()
-        logger.info("sdadasdasdad")
-        #self._start_discovery()
-        logger.info("hey")
-        #logger.info("Shard node %s completed initialization on port %s", self.node_id, self.listen_port)
-        logger.info("hey!!")
+
+        self._start_discovery()
+        logger.info("Shard node %s started on gRPC port %s HTTP port %s", self.node_id, self.grpc_port, self.http_port)
 
     def _start_discovery(self) -> None:
         """Start mDNS discovery service."""
@@ -188,7 +187,7 @@ class StartupMixin:
             log_level="info",
             log_config=None,
             use_reloader=False,
-            h2c=True,
+            h2c=False,
         )
 
         # Start the server as a background task
@@ -257,7 +256,7 @@ class StartupMixin:
             try:
                 logger.info(
                     f"HTTP /load_model: model={req.model_path}, layers={req.layers}, "
-                    f"next_node={req.next_node or 'none'}, prefetch_window={req.prefetch_window}, "
+                    f"next_node={req.next_node or 'none'}, prefetch_window={req.window_size}, "
                     f"total_layers={req.total_layers}, api_callback={req.api_callback_address or 'none'}"
                 )
                 result = await self.load_model(req)

@@ -121,7 +121,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
         # Queues for async processing
         self.activation_recv_queue: Queue[ActivationMessage] = Queue(maxsize=queue_size)
         self.weight_prefetch_queue: Queue[int] = Queue(maxsize=50)
-        self.activation_computed_queue: Queue[ActivationMessage] = Queue(
+        self.activation_computed_queue: asyncio.Queue[ActivationMessage] = asyncio.Queue(
             maxsize=queue_size
         )
         self.ingress_q: asyncio.Queue[dnet_ring_pb2.ActivationRequest] = asyncio.Queue(maxsize=queue_size)
@@ -132,6 +132,16 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
         self.executor = ThreadPoolExecutor(max_workers=int(self._device_prefetch_workers or 4))
         self._active_nonce: Optional[str] = None
         self._bound_versions: Dict[int, int] = {}
+        
+        try:
+            _wd = (os.getenv("RING_WIRE_DTYPE", "fp16") or "fp16").strip().lower()
+        except Exception:
+            _wd = "fp16"
+        if _wd in {"bf16", "bfloat16"}:
+            self._wire_mx_dtype = mx.bfloat16
+        else:
+            self._wire_mx_dtype = mx.float16
+        self._wire_dtype_str = str(self._wire_mx_dtype)
 
         # Compute serialization and MLX lock
         self._compute_busy = threading.Event()
@@ -851,6 +861,11 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
         # Terminate compute thread
         if self.compute_thread:
             self.compute_thread.join(timeout=5)
+        
+        try:
+            self.executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
 
         # Stop discovery service
         if self.discovery.is_running():

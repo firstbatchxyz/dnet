@@ -5,21 +5,21 @@ import os
 import time
 from dataclasses import dataclass
 from typing import Callable, Optional, Any
+from urllib.parse import urlparse
 
 import grpc
 from grpc import aio as aio_grpc
 import numpy as np
-from urllib.parse import urlparse
+from mlx.core import Dtype
 
 from dnet.ring.memory_pool import LayerAwareMemoryPool
-
+from ...utils.grpc_config import GRPC_AIO_OPTIONS
 from ...utils.logger import logger
 from ...utils.time import utc_epoch_now
 from ...utils.serialization import dtype_map, tensor_to_bytes
 from ...utils.model import ModelMetadata
 from ...protos import shard_api_comm_pb2, shard_api_comm_pb2_grpc, dnet_ring_pb2
 from ..data_types import ActivationMessage
-from mlx.core import Dtype
 
 
 class SendMixin:
@@ -208,6 +208,10 @@ class SendMixin:
                 logger.error("Send worker error: %s", e)
 
     async def _send_activation(self, activation_msg: ActivationMessage):
+
+        if not self._check_model_loaded() or not self.output_pool:
+            logger.error("Node %s: Cannot send activation - model not loaded", self.node_id)
+            return
         try:
             # Handle final token path (end-shard sampling)
             if getattr(activation_msg, "is_final", False):
@@ -458,7 +462,11 @@ class SendMixin:
                         flushed += 1
                     if self._profile:
                         logger.info(
-                            f"[PROFILE][SER-END] node={self.node_id} nonce={activation_msg.nonce} flushed={flushed} flush_ms={(time.perf_counter() - t_flush) * 1000.0:.2f}"
+                            "[PROFILE][SER-END] node=%s nonce=%s flushed=%s flush_ms=%.2f",
+                            self.node_id,
+                            activation_msg.nonce,
+                            flushed,
+                            (time.perf_counter() - t_flush) * 1000.0,
                         )
                 except Exception:
                     pass
@@ -502,4 +510,4 @@ class SendMixin:
                 except Exception:
                     pass
         except Exception as e:
-            logger.exception(f"Error sending activation: {e}")
+            logger.exception("Error sending activation: %s", e)

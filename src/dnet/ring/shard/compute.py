@@ -15,19 +15,20 @@ from ..data_types import ActivationMessage
 
 
 class ComputeMixin:
-    """Split out the hot-path compute from RingShardNode for readability.
-
-    Expects the main class to provide the following attributes/methods:
-      - input_pool, output_pool, weight_cache, model, cache
-      - _assigned_set, _mlx_lock, _compute_busy
-      - _next_local_layers, _prefetch_to_ram, _enqueue_weight_prefetch
-      - _resident_windows, _recent_windows, _defer_unload, _bound_versions
-      - _prefetch_pause, _prefetch_pending, _prefetch_active
-      - _wire_mx_dtype, _wire_dtype_str, _stage_sync, _profile
-      - node_id, model_metadata, window_size
+    """Split out the hot-path compute from RingShardNode.
     """
 
     def _process_activation(self, activation_msg: ActivationMessage):
+
+        if (
+            not self._check_model_loaded()
+            or not self.weight_cache
+            or not self.input_pool
+            or not self.output_pool
+        ):
+            logger.error("Node %s: Cannot process activation - model not loaded", self.node_id)
+            return
+        
         try:
             # per-nonce kvcache for concurrent requests
             kv = self._get_or_make_kv(activation_msg.nonce)

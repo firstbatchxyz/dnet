@@ -1,68 +1,50 @@
 """Ring shard node implementation with dynamic model loading."""
-
+import os
 import asyncio
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from queue import Empty, Queue
-from secrets import token_hex
-from socket import gethostname
-from typing import Any, Dict, List, Mapping, Optional, Tuple, cast
-from urllib.parse import urlparse
-from dataclasses import asdict
+from queue import Empty, Queue, Full
+from typing import Any, Dict, List, Optional, Tuple, cast
 
-import httpx
 import mlx.core as mx
 import numpy as np
 from fastapi import FastAPI
 from grpc import aio as aio_grpc
-from hypercorn import Config
-import hypercorn.asyncio as aio_hypercorn
 
 from dnet_p2p import (
     DnetP2P,
-    DnetDeviceProperties,
-    discover_thunderbolt_connection,
+    DnetDeviceProperties
 )
-from dnet_p2p.thunderbolt import ThunderboltConnection
-from dperf import DeviceProfileInfo, profile_device
 
-
-from ..model.base import BaseRingModel
-from ...protos import dnet_ring_pb2, shard_api_comm_pb2
-from ...protos.dnet_ring_pb2_grpc import add_DnetRingServiceServicer_to_server
-from ...protos.shard_api_comm_pb2_grpc import (
-    ShardApiServiceStub,
-    add_ShardApiServiceServicer_to_server,
-)
-from ...utils.async_utils import make_cache
-from ...utils.latency import (
-    DeviceLatencyResult,
-    LatencyMeasurement,
-    LatencyResults,
-    calculate_median_latency_seconds,
-)
-from ...utils.logger import logger
-from ...utils.model import ModelMetadata, get_model_metadata
-from ...utils.time import utc_epoch_now
-from ...utils.serialization import dtype_map, mlx_dtype_map, tensor_to_bytes
-from ..api.models import RecieveResultRequest
-from ..data_types import ActivationMessage
-from ..memory_pool import LayerAwareMemoryPool
-from ..model import get_ring_model
-from ..weight_cache import WeightCache
-from .servicer import ShardServicer
 from .models import (
-    HealthResponse,
     ShardLoadModelRequest,
     ShardLoadModelResponse,
-    ShardProfileRequest,
-    ShardProfileResponse,
     ShardUnloadModelResponse,
 )
 
+from ..model.base import BaseRingModel
 
-class RingShardNode:
+from ...protos import dnet_ring_pb2
+from ...protos.shard_api_comm_pb2_grpc import ShardApiServiceStub
+from ...utils.model import make_cache, load_api_layer_weights
+from ...utils.logger import logger
+from ...utils.layer_manager import set_prefetch_mode
+from ...utils.model import ModelMetadata, get_model_metadata
+from ...utils.time import utc_epoch_now
+from ...utils.serialization import dtype_map, mlx_dtype_map
+from ..observability import load_settings, make_profiler
+from ..data_types import ActivationMessage
+from ..memory_pool import LayerAwareMemoryPool
+from ..model import get_ring_model
+from .compute import ComputeMixin
+from .prefetch import PrefetchMixin
+from .send import SendMixin
+from .startup import StartupMixin
+from ..weight_cache import WeightCache
+
+
+class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
     """Single shard node in the distributed inference ring with dynamic model loading."""
 
     def __init__(
@@ -70,7 +52,9 @@ class RingShardNode:
         node_id: int,
         grpc_port: int,
         http_port: int,
-        queue_size: int = 10,
+        queue_size: int = 128,
+        prefetch_threads: int = 2,
+        device_prefetch_workers: int = 4,
     ) -> None:
         """Initialize ring shard node.
 
@@ -87,6 +71,10 @@ class RingShardNode:
         self.prefetch_window_size = (
             0  # Set dynamically during load_model, zero'ed for types
         )
+        self._prefetch_threads = prefetch_threads
+        self._device_prefetch_workers = device_prefetch_workers
+
+        self.role: Optional[str] = None
 
         # Model state (loaded dynamically)
         self.model_metadata: Optional[ModelMetadata] = None
@@ -111,6 +99,17 @@ class RingShardNode:
         self.output_pool: Optional[LayerAwareMemoryPool] = None
         self.weight_cache: Optional[WeightCache] = None
         self._prefetch_scheduled: set[int] = set()
+        self._prefetch_pause = threading.Event()
+        self._prefetch_pending: set[int] = set()
+        self._prefetch_active = 0
+        self._beyond_cursor: Optional[int] = None
+
+        # Offloading params TODO: Assign these via envs or cli
+        self._resident_windows = 2
+        self._defer_unload = True
+        self._await_next_ready = False
+        set_prefetch_mode("off") # off|sequential|full
+        self._warmup_keep_flag = False
 
         # Queues for async processing
         self.activation_recv_queue: Queue[ActivationMessage] = Queue(maxsize=queue_size)
@@ -118,13 +117,18 @@ class RingShardNode:
         self.activation_computed_queue: Queue[ActivationMessage] = Queue(
             maxsize=queue_size
         )
+        self.ingress_q: asyncio.Queue[dnet_ring_pb2.ActivationRequest] = asyncio.Queue(maxsize=queue_size)
 
         # Threading
         self.compute_thread: Optional[threading.Thread] = None
         self.running = False
-        self.executor = ThreadPoolExecutor(max_workers=4)
+        self.executor = ThreadPoolExecutor(max_workers=int(self._device_prefetch_workers or 4))
         self._active_nonce: Optional[str] = None
         self._bound_versions: Dict[int, int] = {}
+
+        # Compute serialization and MLX lock
+        self._compute_busy = threading.Event()
+        self._mlx_lock = threading.Lock()
 
         # gRPC
         self.server: Optional[aio_grpc.Server] = None
@@ -140,22 +144,26 @@ class RingShardNode:
         # Background tasks
         self.background_tasks: List[asyncio.Task] = []
 
-        logger.info(f"Shard node {node_id} initialized with queue_size={queue_size}")
+        obs = load_settings()
+        self._profile = obs.enabled
+        self._sync_per_layer = obs.sync_per_layer
+        self._sync_every_n = obs.sync_every_n
+        self._prof = make_profiler(self._profile)
+        if self._profile:
+            logger.info("[PROFILE] enabled on shard node %s", self.node_id)
+
+        # Per-nonce KV caches (concurrent requests)
+        self._kv_by_nonce: Dict[str, list] = {}
+        self._kv_last_seen: Dict[str, float] = {}
+        try:
+            self._kv_ttl_s: float = max(1.0, float(os.getenv("RING_KV_TTL_S", "30")))
+        except Exception:
+            self._kv_ttl_s = 30.0
+
+        logger.info("Shard node %s initialized with queue_size=%d", self.node_id, self.queue_size)
 
     async def load_model(self, req: ShardLoadModelRequest) -> ShardLoadModelResponse:
         """Load model with specified layers.
-
-        Args:
-            model_path: Path to model (HF repo ID or local path)
-            layers: Layer indices to load
-            warmup: Whether to perform warmup after loading
-            next_node_address: Address of next shard in ring
-            prefetch_window: Number of layers to prefetch (computed from k if not provided)
-            total_layers: Total number of layers in the model
-            api_callback_address: API callback address for final layer completion
-
-        Returns:
-            LoadModelResponse with success, message, layers_loaded, load_time_ms
         """
         try:
             start_time = time.perf_counter()
@@ -166,9 +174,7 @@ class RingShardNode:
                 and self.model_path == req.model_path
                 and self.assigned_layers == req.layers
             ):
-                logger.info(
-                    f"Node {self.node_id}: Model already loaded with same configuration"
-                )
+                logger.info("Node %s: Model already loaded with same configuration", self.node_id)
                 return ShardLoadModelResponse(
                     success=True,
                     message="Model already loaded",
@@ -180,9 +186,7 @@ class RingShardNode:
             if self.model is not None and (
                 self.model_path != req.model_path or self.assigned_layers != req.layers
             ):
-                logger.info(
-                    f"Node {self.node_id}: Unloading current model to load new configuration"
-                )
+                logger.info("Node %s: Unloading current model to load new configuration", self.node_id)
                 await self.unload_model()
 
             # Load model metadata
@@ -190,21 +194,25 @@ class RingShardNode:
             self.assigned_layers = req.layers
             self.model_path = req.model_path
 
+            self.role = (
+                "start" if 0 in self.assigned_layers 
+                else "end" if self.model_metadata.num_layers() - 1 in self.assigned_layers 
+                else "inter"
+            )
             # Initialize memory pools
             self.input_pool = LayerAwareMemoryPool(total_memory_mb=512)
             self.output_pool = LayerAwareMemoryPool(total_memory_mb=512)
 
             # Set prefetch window size (must be provided by API)
             self.prefetch_window_size = req.prefetch_window
-            logger.info(
-                f"Node {self.node_id}: Using prefetch window size: {self.prefetch_window_size}"
-            )
+            logger.info("Node %s: Using prefetch window size: %d", self.node_id, self.prefetch_window_size)
 
             # Initialize weight cache
             self.weight_cache = WeightCache(
                 self.assigned_layers,
                 self.model_metadata,
                 window_size=self.prefetch_window_size,
+                prefetch_threads=self._prefetch_threads
             )
 
             # Load the model
@@ -215,6 +223,13 @@ class RingShardNode:
             )
             self.model.eval()
             self.cache = make_cache(self.model)
+
+            try:
+                if self.role in {"start", "end"}:
+                    load_api_layer_weights(self.model_metadata, self.model)
+                    logger.info("Loaded API-layer weights on shard role=%s", self.role)
+            except Exception as e:
+                logger.warning("Failed to load API-layer weights on role=%s: %s", self.role, e)
 
             # Reset prefetch tracking
             self._prefetch_scheduled = set()
@@ -228,7 +243,7 @@ class RingShardNode:
             if self.next_node:
                 await self._connect_next_node()
             else:
-                logger.info(f"Node {self.node_id}: No next node configured")
+                logger.info("Node %s: No next node configured", self.node_id)
 
             # Warmup if requested
             if req.warmup:
@@ -236,8 +251,11 @@ class RingShardNode:
 
             load_time_ms = (time.perf_counter() - start_time) * 1000.0
             logger.info(
-                f"Node {self.node_id}: Successfully loaded model {req.model_path} "
-                f"with layers {req.layers} in {load_time_ms:.2f}ms"
+                "Node %s: Successfully loaded model %s with layers %s in %.2fms",
+                self.node_id,
+                req.model_path,
+                req.layers,
+                load_time_ms
             )
 
             return ShardLoadModelResponse(
@@ -248,7 +266,7 @@ class RingShardNode:
             )
 
         except Exception as e:
-            logger.exception(f"Node {self.node_id}: Error loading model: {e}")
+            logger.exception("Node %s: Error loading model: %s", self.node_id, e)
             return ShardLoadModelResponse(
                 success=False,
                 message=f"Error loading model: {str(e)}",
@@ -316,7 +334,7 @@ class RingShardNode:
         if not self.assigned_layers or not self.weight_cache:
             return
 
-        logger.info(f"Node {self.node_id}: Starting model warmup")
+        logger.info("Node %s: Starting model warmup", self.node_id)
 
         # Warm up initial local window: prefetch to RAM and enqueue device loads
         ordered = sorted(self.assigned_layers)
@@ -327,7 +345,7 @@ class RingShardNode:
             self._enqueue_weight_prefetch(lyr)
 
         logger.info(
-            f"Node {self.node_id}: Warmup completed for layers {initial_window}"
+            "Node %s: Warmup completed for layers %s", self.node_id, initial_window
         )
 
     def _check_model_loaded(self) -> bool:
@@ -337,372 +355,6 @@ class RingShardNode:
             True if model is loaded, False otherwise
         """
         return self.model is not None and self.model_metadata is not None
-
-    async def start(self, shutdown_trigger: Any = lambda: asyncio.Future()) -> None:
-        """Start the inference node.
-
-        Args:
-            shutdown_trigger: Shutdown trigger function
-        """
-        self.running = True
-
-        # Start gRPC server
-        await self._start_grpc_server()
-
-        # Start HTTP server
-        await self._start_http_server(shutdown_trigger)
-
-        # Allow brief startup settling
-        await asyncio.sleep(0.2)
-
-        # Start background coroutines
-        self.background_tasks = [
-            asyncio.create_task(self._prefetch_worker()),
-            asyncio.create_task(self._send_worker()),
-        ]
-
-        # Start compute thread
-        self.compute_thread = threading.Thread(target=self._compute_worker)
-        self.compute_thread.start()
-
-        # Start discovery service
-        self._start_discovery()
-
-        logger.info(
-            f"Shard node {self.node_id} started on gRPC port {self.grpc_port}, "
-            f"HTTP port {self.http_port}"
-        )
-
-    def _start_discovery(self) -> None:
-        """Start mDNS discovery service."""
-        hostname = gethostname()
-        # TODO: optionally take shard name from CLI
-        instance = f"shard-{token_hex(4)}-{hostname}"
-        self.discovery.create_instance(
-            instance,
-            hostname,
-            "0.0.0.0",  # Binds to all addresses
-            self.http_port,  # HTTP port
-            self.grpc_port,  # gRPC port
-            is_manager=False,  # Shard is never a manager
-        )
-        self.discovery.start()
-        logger.info(
-            f"Discovery service started for shard node {self.node_id} with name {self.discovery.fullname()}"
-        )
-
-    async def _start_grpc_server(self) -> None:
-        """Start gRPC server."""
-        self.server = aio_grpc.server()
-
-        # Add the servicer (handles both ring and shard API services)
-        servicer = ShardServicer(self)  # type: ignore # FIXME: !!!
-        add_DnetRingServiceServicer_to_server(servicer, self.server)
-        add_ShardApiServiceServicer_to_server(servicer, self.server)
-
-        listen_addr = f"[::]:{self.grpc_port}"
-        self.server.add_insecure_port(listen_addr)
-        await self.server.start()
-        logger.info(f"Shard node {self.node_id} gRPC server started on {listen_addr}")
-
-    async def _start_http_server(self, shutdown_trigger: Any) -> None:
-        """Start HTTP server.
-
-        Args:
-            shutdown_trigger: Shutdown trigger function
-        """
-        await self._setup_routes()
-
-        # Start HTTP server in background
-        config = Config.from_mapping(
-            bind=f"0.0.0.0:{self.http_port}",
-            log_level="info",
-            log_config=None,
-            use_reloader=False,
-            h2c=True,
-        )
-
-        # Start the server as a background task
-        self.http_server = asyncio.create_task(
-            aio_hypercorn.serve(self.app, config, shutdown_trigger=shutdown_trigger)  # type: ignore
-        )
-        logger.info(
-            f"Shard node {self.node_id} HTTP server started on port {self.http_port}"
-        )
-
-    async def _setup_routes(self) -> None:
-        """Setup HTTP routes."""
-
-        @self.app.get("/health")
-        async def health() -> HealthResponse:
-            return HealthResponse(
-                status="ok",
-                node_id=self.node_id,
-                running=self.running,
-                model_loaded=self._check_model_loaded(),
-                model_path=self.model_path,
-                assigned_layers=self.assigned_layers,
-                queue_size=self.activation_recv_queue.qsize(),
-                grpc_port=self.grpc_port,
-                http_port=self.http_port,
-            )
-
-        @self.app.post("/profile")
-        async def profile(req: ShardProfileRequest) -> ShardProfileResponse:
-            logger.info("Received /profile request")
-            try:
-                # Measure latencies
-                latency_results = await self._measure_latency_to_devices(
-                    req.devices, req.thunderbolts, req.payload_sizes
-                )
-
-                # Profile device using dperf
-                device_profile = await self._profile_device(
-                    req.repo_id, req.max_batch_exp
-                )
-
-                # Overwrite `t_comm` with median latency
-                median_latency = calculate_median_latency_seconds(latency_results)
-                if median_latency is not None:
-                    device_profile.t_comm = median_latency
-                    logger.info(
-                        f"Set t_comm to median latency: {device_profile.t_comm:.6f}s"
-                    )
-                else:
-                    logger.warning(
-                        "No valid latency measurements, keeping default t_comm"
-                    )
-
-                return ShardProfileResponse(
-                    # FIXME: asdict because this is `dataclass`
-                    profile=asdict(device_profile),
-                    latency=latency_results,
-                )
-            except Exception as e:
-                logger.error(f"Error in /profile endpoint: {e}")
-                raise
-
-        @self.app.post("/load_model")
-        async def load_model_endpoint(
-            req: ShardLoadModelRequest,
-        ) -> ShardLoadModelResponse:
-            """Load model with specified layers."""
-            try:
-                logger.info(
-                    f"HTTP /load_model: model={req.model_path}, layers={req.layers}, "
-                    f"next_node={req.next_node or 'none'}, prefetch_window={req.prefetch_window}, "
-                    f"total_layers={req.total_layers}, api_callback={req.api_callback_address or 'none'}"
-                )
-                result = await self.load_model(req)
-                return result
-
-            except Exception as e:
-                logger.error(f"Error in /load_model endpoint: {e}")
-                return ShardLoadModelResponse(
-                    success=False,
-                    message=f"Error: {str(e)}",
-                    layers_loaded=[],
-                    load_time_ms=0.0,
-                )
-
-        @self.app.post("/unload_model")
-        async def unload_model_endpoint() -> ShardUnloadModelResponse:
-            """Unload current model."""
-            try:
-                logger.info("HTTP /unload_model")
-                result = await self.unload_model()
-                return result
-
-            except Exception as e:
-                logger.error(f"Error in /unload_model endpoint: {e}")
-                return ShardUnloadModelResponse(
-                    success=False,
-                    message=f"Error: {str(e)}",
-                )
-
-    async def _measure_latency_to_devices(
-        self,
-        devices: Mapping[str, DnetDeviceProperties],
-        thunderbolts: Mapping[str, ThunderboltConnection],
-        payload_sizes: List[int],
-    ) -> LatencyResults:
-        """Measure latency to all devices except self.
-
-        Args:
-            devices: Device information mapping
-            thunderbolts: Thunderbolt connection information
-            payload_sizes: List of payload sizes to test
-
-        Returns:
-            Latency measurement results
-        """
-        latency_results_dict: Dict[str, DeviceLatencyResult] = {}
-
-        for service_name, device_info in devices.items():
-            # Skip measuring latency to ourselves
-            if service_name.startswith(self.discovery.instance_name()):
-                logger.debug(f"Skipping latency measurement to self: {service_name}")
-                continue
-
-            # Skip measuring latency to API (manager) devices
-            if device_info.is_manager:
-                logger.debug(
-                    f"Skipping latency measurement to manager/API: {service_name}"
-                )
-                continue
-
-            try:
-                shard_port = device_info.shard_port
-
-                # Check for Thunderbolt connection
-                if service_name in thunderbolts:
-                    tb_data = thunderbolts[service_name]
-                    service_ip = tb_data.ip_addr
-                    logger.info(
-                        f"Using Thunderbolt for {service_name} at {service_ip}, "
-                        f"connected to instance {tb_data.instance}"
-                    )
-                else:
-                    # No Thunderbolt, use WiFi
-                    service_ip = device_info.local_ip
-
-                if not shard_port or not service_ip:
-                    logger.warning(
-                        f"No shard_port or local_ip for device {service_name}"
-                    )
-                    continue
-
-                # Connect to target shard's gRPC server
-                target_address = f"{service_ip}:{shard_port}"
-                channel = aio_grpc.insecure_channel(target_address)
-                from ...protos.dnet_ring_pb2_grpc import DnetRingServiceStub
-
-                stub = DnetRingServiceStub(channel)
-
-                # Measure latency for each payload size
-                latency_measurements: List[LatencyMeasurement] = []
-                for payload_size in payload_sizes:
-                    # Create dummy payload
-                    dummy_data = b"x" * payload_size
-
-                    start_time = time.perf_counter()
-                    timestamp_ms = int(time.time() * 1000)
-
-                    request = dnet_ring_pb2.LatencyMeasureRequest(
-                        requester_id=str(self.node_id),
-                        payload_size=payload_size,
-                        dummy_data=dummy_data,
-                        timestamp=timestamp_ms,
-                    )
-
-                    response = await stub.MeasureLatency(request)  # type: ignore
-                    end_time = time.perf_counter()
-
-                    if response.success:
-                        latency_ms = (end_time - start_time) * 1000
-                        latency_measurements.append(
-                            LatencyMeasurement(
-                                payload_size=payload_size,
-                                latency_ms=round(latency_ms, 2),
-                                success=True,
-                                error=None,
-                            )
-                        )
-                    else:
-                        latency_measurements.append(
-                            LatencyMeasurement(
-                                payload_size=payload_size,
-                                success=False,
-                                error=response.message,
-                                latency_ms=0,
-                            )
-                        )
-
-                # Store results
-                result = DeviceLatencyResult(
-                    target_node_id=response.node_id if response.success else None,
-                    measurements=latency_measurements,
-                    success=True,
-                    error=None,
-                )
-                latency_results_dict[service_name] = result
-
-                # Close channel
-                await channel.close()
-
-            except Exception as e:
-                logger.error(f"Error measuring latency to {service_name}: {e}")
-                result = DeviceLatencyResult(
-                    target_node_id=None,
-                    success=False,
-                    error=str(e),
-                    measurements=[],
-                )
-                latency_results_dict[service_name] = result
-
-        return LatencyResults(results=latency_results_dict)
-
-    async def _profile_device(
-        self, repo_id: str, max_batch_exp: int
-    ) -> DeviceProfileInfo:
-        """Profile device using dperf.
-
-        Args:
-            repo_id: Hugging Face repository ID
-            max_batch_exp: Maximum batch size exponent (2^max_batch_exp)
-
-        Returns:
-            Device profile information
-        """
-        device_profile: DeviceProfileInfo = profile_device(
-            repo_id, max_batch_exp=max_batch_exp
-        )
-        logger.info(f"Device profiling completed for node {self.node_id}")
-        return device_profile
-
-    async def _connect_next_node(self) -> bool:
-        """Connect to next node in ring.
-
-        Returns:
-            True if connected or no next node, False on failure
-        """
-        if not self.next_node:
-            logger.info(f"Shard node {self.node_id} is the final shard (no next node)")
-            return True
-
-        if self.next_node_channel:
-            logger.debug(f"Shard node {self.node_id} already connected to next node.")
-            return True
-
-        try:
-            # use thunderbolt here if available
-            this_properties = self.discovery.get_own_properties()
-            thunderbolt_conn = discover_thunderbolt_connection(
-                this_properties,
-                self.next_node,
-            )
-            next_ip = (
-                thunderbolt_conn.ip_addr
-                if thunderbolt_conn
-                else self.next_node.local_ip
-            )
-            address = f"{next_ip}:{self.next_node.shard_port}"
-            logger.info(
-                f"Shard node {this_properties.instance} connecting to next node {self.next_node.instance} at {address}"
-            )
-
-            self.next_node_channel = aio_grpc.insecure_channel(address)
-            from ...protos.dnet_ring_pb2_grpc import DnetRingServiceStub
-
-            self.next_node_stub = DnetRingServiceStub(self.next_node_channel)
-            return True
-        except Exception as e:
-            logger.warning(
-                f"Shard node {self.node_id} failed to connect to next node {address}: {e}"
-            )
-            self.next_node_channel = None
-            self.next_node_stub = None
-            return False
 
     async def reset_cache(self) -> None:
         """Reset LLM KV cache."""
@@ -725,10 +377,7 @@ class RingShardNode:
             request: Activation request from previous node
         """
         if not self._check_model_loaded():
-            logger.error(
-                f"Node {self.node_id}: Cannot process activation - no model loaded. "
-                f"Nonce: {request.nonce}"
-            )
+            logger.error("Node %s: Cannot process activation - no model loaded. Nonce: %s", self.node_id, request.nonce)
             return
 
         if not (await self._connect_next_node()):
@@ -751,15 +400,22 @@ class RingShardNode:
 
             transport_ms = float(utc_epoch_now() - request.timestamp)
             logger.info(
-                f"[PROFILE][RX] node={self.node_id} nonce={request.nonce} "
-                f"target_layer={target_layer} transport_ms={transport_ms:.1f} "
-                f"payload_kb={(payload_bytes / 1024):.1f}"
+                "[PROFILE][RX] node=%s nonce=%s target_layer=%s transport_ms=%.1f payload_kb=%.1f",
+                self.node_id,
+                request.nonce,
+                target_layer,
+                transport_ms,
+                (payload_bytes / 1024.0),
             )
 
             # New sequence detection (reset KV cache once per nonce)
             if request.nonce != self._active_nonce:
+                self._clear_prefetch_state()
                 self._active_nonce = request.nonce
-                await self.reset_cache()
+                try:
+                    self._get_or_make_kv(request.nonce)
+                except Exception:
+                    pass
 
             if target_layer in self.assigned_layers:
                 # Schedule full window RAM prefetch
@@ -829,27 +485,242 @@ class RingShardNode:
         except Exception as e:
             logger.exception(f"Error receiving activation: {e}")
 
-    def _prefetch_to_ram(self, layer_id: int) -> None:
-        """Prefetch layer weights to RAM.
+    async def admit_frame(self, request: dnet_ring_pb2.ActivationRequest) -> None:
+        """Lightweight admission for streaming: enqueue protobuf frame to ingress queue, then return.
 
-        Args:
-            layer_id: Layer to prefetch
+        Uses a cancellable, non-blocking back-off loop to avoid event-loop stalls on shutdown.
         """
-        if layer_id not in self._prefetch_scheduled and self.weight_cache:
-            self._prefetch_scheduled.add(layer_id)
-            self.weight_cache.prefetch_to_ram(layer_id)
+        while self.running:
+            try:
+                self.ingress_q.put_nowait(request)
+                return
+            except asyncio.QueueFull:
+                await asyncio.sleep(0)
+        # If we reached here, node is stopping; drop admission silently
+        return
 
-    def _enqueue_weight_prefetch(self, layer_id: int) -> None:
-        """Enqueue layer for GPU weight prefetch.
+    async def _ingress_worker(self):
+        """Drains ingress queue and processes frames with heavy work offloaded.
 
-        Args:
-            layer_id: Layer to enqueue
+        Admission (servicer) is lightweight; this worker performs per-frame
+        processing, offloading alloc/copy/decompress to the threadpool, and
+        finally enqueues for compute or forwards to the next shard.
+        """
+        while self.running:
+            try:
+                req = await self.ingress_q.get()
+            except asyncio.CancelledError:
+                break
+            try:
+                t_recv = time.perf_counter()
+                await self._connect_next_node()
+
+                activation = req.activation
+                target_layer = activation.layer_id + 1
+
+                try:
+                    payload_bytes = len(activation.data)
+                except Exception:
+                    payload_bytes = -1
+                transport_ms = float(utc_epoch_now() - req.timestamp)
+                logger.info(
+                    "[PROFILE][RX] node=%s nonce=%s target_layer=%s transport_ms=%.1f payload_kb=%.1f",
+                    self.node_id,
+                    req.nonce,
+                    target_layer,
+                    transport_ms,
+                    (payload_bytes / 1024.0),
+                )
+
+                # Detect new sequence per node: initialize per-nonce KV; keep prefetch state per nonce
+                if req.nonce != self._active_nonce:
+                    self._clear_prefetch_state()
+                    self._active_nonce = req.nonce
+                    try:
+                        self._get_or_make_kv(req.nonce)
+                    except Exception:
+                        pass
+
+                if target_layer in self._assigned_set:
+                    # First-hop prefetch on cold start for this nonce
+                    if getattr(self, "_prefetch_init_nonce", None) != req.nonce:
+                        next_locals = self._next_local_layers(target_layer, self.window_size - 1)
+                        window_layers = [target_layer] + next_locals
+                        for wl in window_layers:
+                            self._prefetch_to_ram(wl)
+                            self._enqueue_weight_prefetch(wl)
+                        self._prefetch_init_nonce = req.nonce
+
+                    # Heavy prep in executor (alloc/copy/decompress)
+                    loop = asyncio.get_running_loop()
+                    try:
+                        activation_msg = await loop.run_in_executor(
+                            self.executor, self._prepare_activation_message_blocking, req
+                        )
+                    except Exception as e:
+                        logger.error("Activation prepare failed for nonce %s: %s", req.nonce, e)
+                        continue
+                    if activation_msg is None:
+                        continue
+                    if self._profile:
+                        activation_msg.recv_perf_t = t_recv
+
+                    # Enqueue for compute (cancellable back-off)
+                    while self.running:
+                        try:
+                            self.activation_recv_queue.put_nowait(activation_msg)
+                            logger.debug("Queued activation for processing: nonce %s", activation_msg.nonce)
+                            break
+                        except Full:
+                            await asyncio.sleep(0)
+                    else:
+                        logger.error("Failed to queue activation %s (node stopping)", activation_msg.nonce)
+                        try:
+                            self.input_pool.release(activation_msg.pool_id)
+                        except Exception:
+                            pass
+                else:
+                    # Forward to next node (not our layer)
+                    logger.debug(
+                        "Forwarding activation (layer %s) to next node, nonce: %s",
+                        target_layer,
+                        req.nonce,
+                    )
+                    await self._forward_activation(req)
+
+            except Exception as e:
+                logger.error("Ingress worker error: %s", e)
+
+    def _get_or_make_kv(self, nonce: str) -> list:
+        """Return a per-nonce KV cache list for this shard's local layers."""
+        # Opportunistic, event-driven eviction of expired nonces (no sleeps)
+        try:
+            now = time.perf_counter()
+            ttl = float(getattr(self, "_kv_ttl_s", 30.0))
+            for n, ts in list(self._kv_last_seen.items()):
+                if (now - ts) > ttl:
+                    self._kv_last_seen.pop(n, None)
+                    self._kv_by_nonce.pop(n, None)
+        except Exception:
+            pass
+
+        kv = self._kv_by_nonce.get(nonce)
+        if kv is None:
+            kv = make_cache(self.model)
+            self._kv_by_nonce[nonce] = kv
+        try:
+            self._kv_last_seen[nonce] = time.perf_counter()
+        except Exception:
+            pass
+        return kv
+
+    def _clear_kv(self, nonce: str) -> None:
+        """Clear KV for a finished nonce (no-op if missing)."""
+        try:
+            self._kv_by_nonce.pop(nonce, None)
+            self._kv_last_seen.pop(nonce, None)
+        except Exception:
+            pass
+
+    def _prepare_activation_message_blocking(
+        self, request: piped_ring_mlx_pb2.ActivationRequest
+    ) -> Optional[ActivationMessage]:
+        """Blocking heavy prep: allocate pool buffer, copy/decompress payload, build ActivationMessage.
+
+        Returns None on failure.
         """
         try:
-            self.weight_prefetch_queue.put(layer_id, timeout=0.01)
-        except Exception:
-            # Queue may be full; it's fine to skip
-            pass
+            activation = request.activation
+            if "|" in activation.dtype:
+                # Compressed path: decompress to MLX array and copy to pool
+                try:
+                    deq = decompress_tensor_from_protobuf_data(
+                        tensor_data=activation.data,
+                        shape=list(activation.shape),
+                        dtype_with_metadata=activation.dtype,
+                    )
+                except Exception as e:
+                    logger.error("Decompression failed for nonce %s: %s", request.nonce, e)
+                    return None
+
+                pool_id = self.input_pool.allocate_for_layer(
+                    layer_id=activation.layer_id,
+                    dtype=deq.dtype,
+                    shape=cast(tuple[int, ...], tuple(deq.shape)),
+                )
+                if pool_id is None:
+                    logger.warning("Failed to allocate input pool buffer for nonce %s", request.nonce)
+                    return None
+                buffer = self.input_pool.get_buffer(pool_id)
+                if buffer is not None:
+                    flat = deq.reshape(-1)
+                    buffer[: flat.size] = flat
+                # Update activation message with true dtype/shape
+                new_dtype_str = str(deq.dtype)
+                activation_msg = ActivationMessage.from_proto(request, pool_id)
+                activation_msg.dtype = new_dtype_str
+                activation_msg.shape = tuple(deq.shape)
+                return activation_msg
+            elif activation.dtype == "tokens":
+                # Tokens path: parse int32 token IDs and stage them
+                try:
+                    tokens = np.frombuffer(activation.data, dtype=np.int32)
+                    shp = (int(len(tokens)),)
+                except Exception as e:
+                    logger.error("Failed to parse tokens for nonce %s: %s", request.nonce, e)
+                    return None
+                pool_id = self.input_pool.allocate_for_layer(
+                    layer_id=activation.layer_id,
+                    dtype=mx.int32,
+                    shape=cast(tuple[int, ...], shp),
+                )
+                if pool_id is None:
+                    logger.warning("Failed to allocate input pool buffer for nonce %s", request.nonce)
+                    return None
+                buffer = self.input_pool.get_buffer(pool_id)
+                if buffer is not None:
+                    buffer[: len(tokens)] = tokens
+                activation_msg = ActivationMessage.from_proto(request, pool_id)
+                activation_msg.dtype = "tokens"
+                activation_msg.shape = shp
+                return activation_msg
+            else:
+                # Dense path: validate size and copy raw bytes view into pool buffer
+                try:
+                    expected = int(np.prod(activation.shape)) * np.dtype(dtype_map[activation.dtype]).itemsize
+                    actual = len(activation.data)
+                except Exception:
+                    expected = -1
+                    actual = -1
+                if expected != actual:
+                    logger.error(
+                        "Payload size mismatch for nonce=%s: expected=%d actual=%d dtype=%s shape=%s",
+                        request.nonce,
+                        expected,
+                        actual,
+                        activation.dtype,
+                        activation.shape,
+                    )
+                    return None
+
+                pool_id = self.input_pool.allocate_for_layer(
+                    layer_id=activation.layer_id,
+                    dtype=mlx_dtype_map[activation.dtype],
+                    shape=cast(tuple[int, ...], activation.shape),
+                )
+                if pool_id is None:
+                    logger.warning("Failed to allocate input pool buffer for nonce %s", request.nonce)
+                    return None
+                buffer = self.input_pool.get_buffer(pool_id)
+                if buffer is not None:
+                    data = request.activation.data
+                    input_data = np.frombuffer(data, dtype=dtype_map[activation.dtype])
+                    buffer[: len(input_data)] = input_data
+                activation_msg = ActivationMessage.from_proto(request, pool_id)
+                return activation_msg
+        except Exception as e:
+            logger.error("Activation prep error: %s", e)
+            return None
 
     def _next_local_layers(self, after_layer: int, count: int) -> List[int]:
         """Get next local layers after specified layer.
@@ -867,47 +738,6 @@ class RingShardNode:
         nxt = [lyr for lyr in ordered if lyr > after_layer]
         return nxt[:count]
 
-    async def _forward_activation(
-        self, request: dnet_ring_pb2.ActivationRequest
-    ) -> None:
-        """Forward activation to next node.
-
-        Args:
-            request: Activation request to forward
-        """
-        try:
-            t0 = time.perf_counter()
-            response = await self.next_node_stub.SendActivation(request)  # type: ignore
-            rpc_ms = (time.perf_counter() - t0) * 1000.0
-            if not response.success:
-                logger.warning(f"Next node reported error: {response.message}")
-            logger.info(
-                f"[PROFILE][TX] node={self.node_id} nonce={request.nonce} "
-                f"forwarded_layer={request.activation.layer_id + 1} rpc_ms={rpc_ms:.2f}"
-            )
-        except Exception as e:
-            logger.error(f"Failed to forward activation: {e}")
-
-    async def _prefetch_worker(self) -> None:
-        """Async worker for weight prefetching."""
-        while self.running:
-            try:
-                # Non-blocking fetch
-                layer_id = self.weight_prefetch_queue.get_nowait()
-
-                if self.weight_cache:
-                    # Prefetch in background
-                    await asyncio.get_running_loop().run_in_executor(
-                        self.executor, self.weight_cache.get_weight, layer_id
-                    )
-                    logger.debug(f"Prefetched weights for layer {layer_id}")
-
-            except Empty:
-                await asyncio.sleep(0.005)
-            except Exception as e:
-                logger.error(f"Prefetch worker error: {e}")
-                await asyncio.sleep(0.02)
-
     def _compute_worker(self) -> None:
         """Compute thread worker."""
         while self.running:
@@ -921,354 +751,7 @@ class RingShardNode:
             except Empty:
                 continue
             except Exception as e:
-                logger.error(f"Compute worker error: {e}")
-
-    def _process_activation(self, activation_msg: ActivationMessage) -> None:
-        """Process activation through consecutive local layers.
-
-        Args:
-            activation_msg: Activation message to process
-        """
-        if (
-            not self._check_model_loaded()
-            or not self.weight_cache
-            or not self.input_pool
-            or not self.output_pool
-        ):
-            logger.error(
-                f"Node {self.node_id}: Cannot process activation - model not loaded"
-            )
-            return
-
-        try:
-            # Get input activation from pool
-            input_buffer = self.input_pool.get_buffer(activation_msg.pool_id)
-            if input_buffer is None:
-                logger.error(f"Failed to get input buffer {activation_msg.pool_id}")
-                return
-
-            # Prepare input activation as MLX array view
-            input_size = int(np.prod(activation_msg.shape))
-            x = (input_buffer.flatten()[:input_size]).reshape(activation_msg.shape)
-
-            # Compute up to prefetch_window_size consecutive local layers
-            start_time = time.perf_counter()
-            processed = 0
-            current_layer = activation_msg.layer_id + 1
-            last_layer = current_layer - 1
-
-            # Determine contiguous local window
-            window_layers: List[int] = []
-            _tmp_layer = current_layer
-            while processed < self.prefetch_window_size and (
-                _tmp_layer in self.assigned_layers
-            ):
-                window_layers.append(_tmp_layer)
-                _tmp_layer += 1
-                processed += 1
-
-            # Ensure weights for window are resident and bind only if arrays changed
-            to_bind: Dict[str, mx.array] = {}
-            for wl in window_layers:
-                weights = self.weight_cache.get_weight(wl)
-                if weights is None:
-                    logger.error(f"Failed to load weights for layer {wl}")
-                    self.input_pool.release(activation_msg.pool_id)
-                    return
-                try:
-                    # Use identity of first array as version fingerprint
-                    first_arr = next(iter(weights.values()))
-                    version = id(first_arr)
-                except StopIteration:
-                    version = -1
-                if self._bound_versions.get(wl) != version:
-                    for k, v in weights.items():
-                        to_bind[k] = v
-                    self._bound_versions[wl] = version
-
-            if to_bind:
-                self.model.load_weights(list(to_bind.items()), strict=False)  # type: ignore # FIXME: !!!
-
-            # Run window compute
-            processed = 0
-            current_layer = activation_msg.layer_id + 1
-            while processed < len(window_layers):
-                logger.info(
-                    f"Computing layer {current_layer} for nonce {activation_msg.nonce}"
-                )
-                t_l = time.perf_counter()
-                x = self.model.apply_single_layer(current_layer, x, cache=self.cache)  # type: ignore # FIXME: !!!
-                t_l_done = time.perf_counter()
-                logger.info(
-                    f"[PROFILE][LAYER] node={self.node_id} nonce={activation_msg.nonce} "
-                    f"layer={current_layer} compute_ms={(t_l_done - t_l) * 1000.0:.3f}"
-                )
-
-                # Advance
-                self.weight_cache.decrease_reference(current_layer)
-                last_layer = current_layer
-                current_layer += 1
-                processed += 1
-
-            computation_time = time.perf_counter() - start_time
-            logger.info(
-                f"Completed layers up to {last_layer} in {computation_time:.3f}s, "
-                f"nonce: {activation_msg.nonce}, result: {x.shape} {x.dtype}"
-            )
-
-            # Prefetch next window
-            next_window = self._next_local_layers(last_layer, self.prefetch_window_size)
-            for nl in next_window:
-                self._prefetch_to_ram(nl)
-
-            # Evict layers not needed in next window
-            for wl in window_layers:
-                if wl not in next_window:
-                    try:
-                        self.weight_cache.evict_layer(wl)
-                    except Exception:
-                        pass
-
-            # Optionally prefetch first next-window layer
-            if next_window:
-                self._enqueue_weight_prefetch(next_window[0])
-
-            # Allocate output buffer
-            output_pool_id = self.output_pool.allocate_for_layer(
-                last_layer, cast(Tuple[int, ...], tuple(x.shape)), x.dtype
-            )
-            if output_pool_id is None:
-                logger.error(f"Failed to allocate output buffer for layer {last_layer}")
-                self.input_pool.release(activation_msg.pool_id)
-                return
-
-            output_buffer = self.output_pool.get_buffer(output_pool_id)
-            if output_buffer is None:
-                logger.error(f"Failed to get output buffer {output_pool_id}")
-                return
-            x_flat = x.flatten()
-            output_buffer[: len(x_flat)] = x_flat
-
-            # Create output activation message
-            output_msg = ActivationMessage(
-                nonce=activation_msg.nonce,
-                layer_id=last_layer,
-                pool_id=output_pool_id,
-                shape=cast(Tuple[int, ...], tuple(x.shape)),
-                batch_size=activation_msg.batch_size,
-                timestamp=utc_epoch_now(),
-                node_origin=f"node_{self.node_id}",
-                dtype=str(x.dtype),
-                callback_url=activation_msg.callback_url,
-            )
-
-            # Queue for sending
-            try:
-                self.activation_computed_queue.put(output_msg, timeout=10)
-            except Exception as e:
-                logger.error(f"Failed to queue computed activation for sending: {e}")
-                self.output_pool.release(output_pool_id)
-
-            # Clean up input resources
-            self.input_pool.release(activation_msg.pool_id)
-
-        except Exception as e:
-            logger.exception(f"Error processing activation: {e}")
-
-    async def _send_worker(self) -> None:
-        """Async worker for sending activations to next node."""
-        while self.running:
-            try:
-                # Check for computed activations to send
-                try:
-                    activation_msg = self.activation_computed_queue.get_nowait()
-                    await self._send_activation(activation_msg)
-                except Empty:
-                    await asyncio.sleep(0.01)
-            except Exception as e:
-                logger.error(f"Send worker error: {e}")
-                await asyncio.sleep(0.05)
-
-    async def _send_activation(self, activation_msg: ActivationMessage) -> None:
-        """Send activation to next node.
-
-        Args:
-            activation_msg: Activation message to send
-        """
-        logger.info(
-            f"Node {self.node_id}: _send_activation called for nonce={activation_msg.nonce}, "
-            f"layer_id={activation_msg.layer_id}, pool_id={activation_msg.pool_id}"
-        )
-
-        if not self._check_model_loaded() or not self.output_pool:
-            logger.error(
-                f"Node {self.node_id}: Cannot send activation - model not loaded"
-            )
-            return
-
-        try:
-            # Get data from output buffer
-            logger.info(
-                f"Node {self.node_id}: Getting output buffer {activation_msg.pool_id}"
-            )
-            output_buffer = self.output_pool.get_buffer(activation_msg.pool_id)
-            if output_buffer is None:
-                logger.error(
-                    f"Node {self.node_id}: Failed to get output buffer {activation_msg.pool_id}"
-                )
-                return
-
-            # Extract actual data
-            t_ser = time.perf_counter()
-            data_size = int(np.prod(activation_msg.shape))
-            logger.info(
-                f"Node {self.node_id}: Serializing activation data, size={data_size}"
-            )
-            data = tensor_to_bytes(output_buffer.flatten()[:data_size])
-            ser_ms = (time.perf_counter() - t_ser) * 1000.0
-
-            # Send to next node or complete
-            next_layer = activation_msg.layer_id + 1
-
-            # Use total_layers if available, otherwise fall back to model_metadata
-            total_layers = (
-                self.total_layers
-                if self.total_layers > 0
-                else (self.model_metadata.num_layers if self.model_metadata else 0)
-            )
-
-            logger.info(
-                f"Node {self.node_id}: Processed layer {activation_msg.layer_id}, "
-                f"next_layer={next_layer}, total_layers={total_layers}, "
-                f"has_next_stub={self.next_node_stub is not None}, "
-                f"next_node={self.next_node.instance if self.next_node else 'none'}"
-            )
-
-            if next_layer < total_layers:
-                # More layers to process - forward to next shard
-                if self.next_node_stub:
-                    logger.info(
-                        f"Node {self.node_id}: Forwarding to next shard, "
-                        f"next_layer={next_layer}"
-                    )
-                    # Update per-hop timestamp
-                    request = activation_msg.to_proto(data)
-                    request.timestamp = utc_epoch_now()
-                    t0 = time.perf_counter()
-                    response = await self.next_node_stub.SendActivation(request)  # type: ignore
-                    rpc_ms = (time.perf_counter() - t0) * 1000.0
-
-                    if response.success:
-                        logger.info(
-                            f"Node {self.node_id}: Successfully sent activation to {response.node_id}, "
-                            f"nonce: {activation_msg.nonce}"
-                        )
-                    else:
-                        logger.error(
-                            f"Node {self.node_id}: Failed to send activation: {response.message}"
-                        )
-                    logger.info(
-                        f"[PROFILE][TX] node={self.node_id} nonce={activation_msg.nonce} "
-                        f"next_layer={next_layer} "
-                        f"payload_kb={(len(data) / 1024):.1f} serialize_ms={ser_ms:.3f} "
-                        f"rpc_ms={rpc_ms:.2f}"
-                    )
-                else:
-                    logger.error(
-                        f"Node {self.node_id}: Cannot forward activation - no next node configured. "
-                        f"Layer {next_layer} needs processing but this is the final shard."
-                    )
-            else:
-                # Final layer - send to API callback
-                logger.info(
-                    f"FINAL OUTPUT - Nonce: {activation_msg.nonce}, "
-                    f"Shape: {activation_msg.shape}, Layer: {activation_msg.layer_id}"
-                )
-                t_final_ser = time.perf_counter()
-                serialized = tensor_to_bytes(output_buffer)
-                final_ser_ms = (time.perf_counter() - t_final_ser) * 1000.0
-
-                # Use API callback address if provided, otherwise use callback_url from activation
-                api_addr = self.api_callback_address
-                # FIXME: we kinda expect api_addr here?
-                if not api_addr and activation_msg.callback_url.startswith("grpc://"):
-                    parsed = urlparse(activation_msg.callback_url)
-                    api_addr = parsed.netloc  # host:port
-
-                # Send via gRPC to API
-                if api_addr:
-                    if (self.api_channel is None) or (api_addr != self.api_address):
-                        # Reconnect if address changed
-                        if self.api_channel is not None:
-                            try:
-                                await self.api_channel.close()
-                            except Exception:
-                                pass
-                        self.api_address = api_addr
-                        self.api_channel = aio_grpc.insecure_channel(api_addr)
-                        self.api_stub = ShardApiServiceStub(self.api_channel)
-
-                    try:
-                        t_rpc = time.perf_counter()
-                        req = shard_api_comm_pb2.FinalActivationRequest(
-                            nonce=activation_msg.nonce,
-                            data=serialized,
-                            batch_size=activation_msg.batch_size,
-                            shape=list(activation_msg.shape),
-                            dtype=str(output_buffer.dtype),
-                            layer_id=activation_msg.layer_id,
-                            timestamp=utc_epoch_now(),
-                            node_origin=activation_msg.node_origin,
-                        )
-                        resp = await self.api_stub.SendFinalActivation(req)  # type: ignore
-                        rpc_ms = (time.perf_counter() - t_rpc) * 1000.0
-                        if not resp.success:
-                            logger.error(
-                                f"API gRPC callback failed for {activation_msg.nonce}: "
-                                f"{resp.message}"
-                            )
-                        logger.info(
-                            f"[PROFILE][TX-FINAL][gRPC] node={self.node_id} "
-                            f"nonce={activation_msg.nonce} "
-                            f"payload_kb={(len(serialized) / 1024):.1f} "
-                            f"serialize_ms={final_ser_ms:.3f} rpc_ms={rpc_ms:.2f}"
-                        )
-                    except Exception as e:
-                        logger.exception(
-                            f"Error sending final activation via gRPC: {e}"
-                        )
-                else:
-                    # Fallback to HTTP callback
-                    t_rpc = time.perf_counter()
-                    async with httpx.AsyncClient(
-                        http1=False, http2=True, verify=False
-                    ) as session:
-                        await session.post(
-                            activation_msg.callback_url,
-                            json=RecieveResultRequest(
-                                nonce=activation_msg.nonce,
-                                batch_size=activation_msg.batch_size,
-                                shape=activation_msg.shape,
-                                dtype=str(output_buffer.dtype),
-                                layer_id=activation_msg.layer_id,
-                                timestamp=utc_epoch_now(),
-                                node_origin=activation_msg.node_origin,
-                                data=RecieveResultRequest.encode(serialized),
-                            ).model_dump(),
-                        )
-                    rpc_ms = (time.perf_counter() - t_rpc) * 1000.0
-                    logger.info(
-                        f"[PROFILE][TX-FINAL][HTTP] node={self.node_id} "
-                        f"nonce={activation_msg.nonce} "
-                        f"payload_kb={(len(serialized) / 1024):.1f} "
-                        f"serialize_ms={final_ser_ms:.3f} rpc_ms={rpc_ms:.2f}"
-                    )
-
-            # Release output buffer
-            self.output_pool.release(activation_msg.pool_id)
-
-        except Exception as e:
-            logger.exception(f"Error sending activation: {e}")
+                logger.error("Compute worker error: %s", e)
 
     async def shutdown(self) -> None:
         """Shutdown the node."""
@@ -1310,3 +793,23 @@ class RingShardNode:
         await asyncio.gather(*self.background_tasks, return_exceptions=True)
 
         logger.info(f"Node {self.node_id} shutdown complete")
+
+    def _clear_prefetch_state(self):
+        """Clear scheduled/in-flight prefetch when a request ends or resets"""
+        try:
+            self._prefetch_scheduled.clear()
+        except Exception:
+            pass
+        try:
+            self._beyond_cursor = None
+        except Exception:
+            pass
+        try:
+            while True:
+                self.weight_prefetch_queue.get_nowait()
+        except Exception:
+            pass
+        try:
+            self.weight_cache.cancel_all_prefetch()
+        except Exception:
+            pass

@@ -5,7 +5,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from queue import Empty, Queue, Full
-from typing import Any, Dict, List, Optional, Tuple, cast
+from typing import Any, Dict, List, Optional, cast
 
 import mlx.core as mx
 import numpy as np
@@ -132,7 +132,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
         self.executor = ThreadPoolExecutor(max_workers=int(self._device_prefetch_workers or 4))
         self._active_nonce: Optional[str] = None
         self._bound_versions: Dict[int, int] = {}
-        
+
         try:
             _wd = (os.getenv("RING_WIRE_DTYPE", "fp16") or "fp16").strip().lower()
         except Exception:

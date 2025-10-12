@@ -256,7 +256,7 @@ class StartupMixin:
             try:
                 logger.info(
                     f"HTTP /load_model: model={req.model_path}, layers={req.layers}, "
-                    f"next_node={req.next_node or 'none'}, prefetch_window={req.window_size}, "
+                    f"next_node={req.next_node or 'none'}, window_size={req.window_size}, "
                     f"total_layers={req.total_layers}, api_callback={req.api_callback_address or 'none'}"
                 )
                 result = await self.load_model(req)

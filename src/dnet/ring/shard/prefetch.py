@@ -7,6 +7,7 @@ import time
 import logging
 from typing import Dict
 from threading import Lock
+from queue import Queue
 
 import mlx.core as mx
 
@@ -24,7 +25,7 @@ class PrefetchMixin:
     node_id: int
     running: bool
     weight_cache: WeightCache
-    weight_prefetch_queue: asyncio.Queue[int]
+    weight_prefetch_queue: Queue[int]
     _materialize_prefetch_default: bool
     executor: ThreadPoolExecutor
     _touch_during_compute: bool

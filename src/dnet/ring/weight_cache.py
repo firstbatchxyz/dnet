@@ -1,3 +1,4 @@
+"""Weight cache with windowed GPU residency and LRU eviction."""
 import threading
 import time
 from typing import Dict, List, Optional
@@ -7,7 +8,7 @@ from concurrent.futures import Future
 import mlx.core as mx
 
 from ..utils.layer_manager import LayerManager
-from ..utils.model import ModelMetadata 
+from ..utils.model import ModelMetadata
 from ..utils.logger import logger
 
 
@@ -60,7 +61,10 @@ class WeightCache:
                 if inc_ref:
                     self.reference_counts[layer_id] = self.reference_counts.get(layer_id, 0) + 1
                 logger.debug(
-                    f"Cache hit for layer {layer_id}, ref={self.reference_counts.get(layer_id, 0)} inc={int(inc_ref)}"
+                    "Cache hit for layer %s, ref=%d inc=%d",
+                    layer_id,
+                    self.reference_counts.get(layer_id, 0),
+                    int(inc_ref),
                 )
                 return data
 
@@ -107,7 +111,10 @@ class WeightCache:
                     except Exception:
                         self.loading_futures.pop(layer_id, None)
                 logger.info(
-                    f"[PROFILE][MATERIALIZE] layer={layer_id} ms={dt_ms:.2f} bytes={(total_bytes / 1_048_576):.2f}MB"
+                    "[PROFILE][MATERIALIZE] layer=%s ms=%.2f bytes=%.2fMB",
+                    layer_id,
+                    dt_ms,
+                    (total_bytes / 1_048_576),
                 )
                 return data
             except Exception as e:
@@ -119,7 +126,7 @@ class WeightCache:
                             fut.set_exception(e)
                     except Exception:
                         self.loading_futures.pop(layer_id, None)
-                logger.exception(f"Failed to load weight {layer_id}: {e}")
+                logger.exception("Failed to load weight %s: %s", layer_id, e)
                 return None
         else:
             # Not the creator: wait for the in-flight load to complete
@@ -127,11 +134,11 @@ class WeightCache:
             try:
                 inflight.result()  # block until the creator completes
             except Exception as e:
-                logger.error(f"Wait for layer {layer_id} load failed: {e}")
+                logger.error("Wait for layer %s load failed: %s", layer_id, e)
                 return None
             wait_ms = (time.perf_counter() - t0w) * 1000.0
             try:
-                logger.info(f"[PROFILE][WAIT-WEIGHT] layer={layer_id} ms={wait_ms:.2f}")
+                logger.info("[PROFILE][WAIT-WEIGHT] layer=%s ms=%.2f", layer_id, wait_ms)
             except Exception:
                 pass
             # Return from cache (now populated) and update ref/LRU
@@ -151,7 +158,7 @@ class WeightCache:
         with self.lock:
             if layer_id in self.reference_counts:
                 self.reference_counts[layer_id] -= 1
-                logger.debug(f"Decreased ref count for {layer_id}: {self.reference_counts[layer_id]}")
+                logger.debug("Decreased ref count for %s: %d", layer_id, self.reference_counts[layer_id])
 
     def prefetch_to_ram(self, layer_id: int):
         """Asynchronously hint the OS to prefetch layer pages into RAM.
@@ -168,13 +175,13 @@ class WeightCache:
             self.prefetch_futures[layer_id] = f
             return f
         except Exception as e:
-            logger.debug(f"Prefetch to RAM failed for layer {layer_id}: {e}")
+            logger.debug("Prefetch to RAM failed for layer %s: %s", layer_id, e)
             return None
 
     def cancel_all_prefetch(self):
         """Cancel any in-flight prefetch tasks and clear tracking."""
         with self.lock:
-            for lid, fut in list(self.prefetch_futures.items()):
+            for _, fut in list(self.prefetch_futures.items()):
                 try:
                     if fut is not None and not fut.done():
                         fut.cancel()
@@ -204,7 +211,7 @@ class WeightCache:
             if layer_id in self.reference_counts:
                 del self.reference_counts[layer_id]
 
-            logger.info(f"Evicted layer {layer_id} from cache")
+            logger.info("Evicted layer %s from cache", layer_id)
 
     def evict_layer(self, layer_id: int) -> bool:
         """Proactively evict a specific layer if it has no active references.
@@ -223,7 +230,7 @@ class WeightCache:
             del self.cache[layer_id]
             if layer_id in self.reference_counts:
                 del self.reference_counts[layer_id]
-            logger.info(f"Proactively evicted layer {layer_id} from cache")
+            logger.info("Proactively evicted layer %s from cache", layer_id)
             return True
 
     def evict_layers(self, layer_ids: List[int]) -> int:

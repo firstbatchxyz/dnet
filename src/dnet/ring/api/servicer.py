@@ -19,9 +19,6 @@ class ShardApiServicer(pb2_grpc.ShardApiServiceServicer):
         # api_node: RingApiNode
         self.api_node = api_node
 
-    # Final activation path removed: projection/sampling runs on end shard
-
-    # Optional: placeholder for future use
     async def SendToken(self, request: pb2.TokenRequest, context: grpc.aio.ServicerContext):  # type: ignore[override]
         try:
             nonce = request.nonce

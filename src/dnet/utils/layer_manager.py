@@ -352,12 +352,12 @@ class LayerManager:
                 if collected == 0:
                     data.clear()
                     raise RuntimeError("mxload keys not found for layer")
-                # Optional debug
                 try:
                     if os.getenv("RING_DEBUG_MATERIALIZE_PATH", "").strip():
                         path_label = "mxload-cache" if use_cache else "mxload-nocache"
                         logger.info(
-                            f"[MATERIALIZE-PATH] layer={layer_idx} path={path_label} files={[os.path.basename(f) for f in sorted(fnames)]} tensors={collected}"
+                            "[MATERIALIZE-PATH] layer=%s path=%s files=%s tensors=%s",
+                            layer_idx, path_label, [os.path.basename(f) for f in sorted(fnames)], collected
                         )
                 except Exception:
                     pass

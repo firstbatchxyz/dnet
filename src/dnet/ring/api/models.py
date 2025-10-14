@@ -208,15 +208,44 @@ class PrepareTopologyResponse(TopologyInfo):
     pass
 
 
+# ------------------------
+# Manual Topology API
+# ------------------------
+
+
+class ManualDevice(BaseModel):
+    """Manual device specification for topology (no discovery)."""
+
+    name: str = Field(..., description="Unique service name for the device")
+    local_ip: str = Field(..., description="Reachable IP/host for the device")
+    server_port: int = Field(..., description="Device HTTP port (for /load_model)")
+    shard_port: int = Field(..., description="Device gRPC port (ring service)")
+
+
+class PrepareTopologyManualRequest(BaseModel):
+    """Prepare topology manually by providing devices and assignments.
+
+    This bypasses discovery and profiling. The resulting topology is stored and
+    can be used with /v1/load_model.
+    """
+
+    model: str = Field(..., description="Model name or HuggingFace repo ID")
+    devices: List[ManualDevice] = Field(..., description="Manual device endpoints")
+    assignments: List[LayerAssignment] = Field(
+        ..., description="Layer assignments per device (rounds or flat)"
+    )
+    num_layers: Optional[int] = Field(
+        default=None, description="Total number of layers (optional; inferred if missing)"
+    )
+
 class APILoadModelRequest(BaseModel):
     """Request to load model with prepared topology.
 
     Uses the assignment data from TopologyInfo.
     """
 
-    model: str = Field(..., description="Model name or HuggingFace repo ID")
-    assignments: List[LayerAssignment] = Field(
-        ..., description="Layer assignments from prepare_topology"
+    model: Optional[str] = Field(
+        default=None, description="Model name or HuggingFace repo ID (optional)"
     )
 
 

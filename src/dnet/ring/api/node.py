@@ -54,6 +54,7 @@ from .models import (
     CompletionRequestModel,
     APILoadModelRequest,
     APILoadModelResponse,
+    PrepareTopologyManualRequest,
     PrepareTopologyRequest,
     RoleMapping,
     ShardLoadStatus,
@@ -155,8 +156,9 @@ class RingApiNode:
         # Start discovery
         self._start_discovery()
 
-        # Start HTTP server
+        # Start HTTP server (background)
         await self._start_http_server(shutdown_trigger)
+        await asyncio.sleep(0.2)
 
     def _start_discovery(self) -> None:
         """Start mDNS discovery service."""
@@ -206,11 +208,14 @@ class RingApiNode:
             h2c=True,
         )
 
-        await aio_hypercorn.serve(
-            self.app,  # type: ignore # FIXME: !!!
-            config,
-            shutdown_trigger=shutdown_trigger,
+        self.http_server = asyncio.create_task(
+            aio_hypercorn.serve(  # type: ignore
+                self.app,
+                config,
+                shutdown_trigger=shutdown_trigger,
+            )
         )
+        logger.info("API HTTP server started on port %s", self.http_port)
 
     async def _setup_routes(self) -> None:
         """Setup HTTP routes."""
@@ -266,6 +271,20 @@ class RingApiNode:
                 return await self._handle_prepare_topology(req)
             except Exception as e:
                 logger.exception("Error in /v1/prepare_topology: %s", e)
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=str(e),
+                ) from e
+
+        @self.app.post("/v1/prepare_topology_manual")
+        async def prepare_topology_manual(
+            req: PrepareTopologyManualRequest,
+        ) -> TopologyInfo:
+            """Prepare topology manually (no discovery)."""
+            try:
+                return await self._handle_prepare_topology_manual(req)
+            except Exception as e:
+                logger.exception("Error in /v1/prepare_topology_manual: %s", e)
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=str(e),
@@ -391,6 +410,94 @@ class RingApiNode:
 
         return self.topology
 
+    async def _handle_prepare_topology_manual(
+        self, req: PrepareTopologyManualRequest
+    ) -> TopologyInfo:
+        """Handle manual topology preparation without discovery."""
+        logger.info("Preparing manual topology for model: %s", req.model)
+
+        # Validate unique device names
+        device_names = [d.name for d in req.devices]
+        if len(device_names) != len(set(device_names)):
+            raise ValueError("Device names must be unique in manual topology")
+
+        # Normalize assignments and validate services
+        services = set(device_names)
+        normalized: List[LayerAssignment] = []
+        for a in req.assignments:
+            if a.service not in services:
+                raise ValueError(f"Assignment references unknown service: {a.service}")
+            layers_2d = a.layers
+            try:
+                # Accept flat list; wrap to single round
+                if layers_2d and all(isinstance(x, int) for x in layers_2d):  # type: ignore
+                    layers_2d = [layers_2d]  # type: ignore
+            except Exception:
+                pass
+            normalized.append(
+                LayerAssignment(
+                    service=a.service,
+                    layers=layers_2d,
+                    next_service=a.next_service,
+                    window_size=a.window_size,
+                )
+            )
+
+        # Infer num_layers if not provided
+        num_layers = req.num_layers
+        if num_layers is None:
+            flat = [l for aa in normalized for rr in aa.layers for l in rr]
+            if not flat:
+                raise ValueError("No layers provided in assignments")
+            num_layers = max(flat) + 1
+
+        # Build device properties from provided endpoints
+        devices_props: List[DnetDeviceProperties] = []
+        for d in req.devices:
+            devices_props.append(
+                DnetDeviceProperties(
+                    is_manager=False,
+                    is_busy=False,
+                    instance=d.name,
+                    host=d.local_ip,
+                    server_port=d.server_port,
+                    shard_port=d.shard_port,
+                    local_ip=d.local_ip,
+                )
+            )
+
+        # If next_service missing and >1 device, compute simple ring by min layer
+        if any(a.next_service is None for a in normalized) and len(normalized) > 1:
+            order = sorted(
+                normalized,
+                key=lambda aa: min([l for rr in aa.layers for l in rr]) if aa.layers else (1 << 30),
+            )
+            ring_map = {order[i].service: order[(i + 1) % len(order)].service for i in range(len(order))}
+            normalized = [
+                LayerAssignment(
+                    service=a.service,
+                    layers=a.layers,
+                    next_service=a.next_service or ring_map.get(a.service),
+                    prefetch_window=a.prefetch_window,
+                )
+                for a in normalized
+            ]
+
+        # Persist manual topology
+        self.topology = TopologyInfo(
+            model=req.model,
+            num_layers=int(num_layers),
+            devices=devices_props,
+            assignments=normalized,
+            solution={"source": "manual"},
+        )
+        logger.info(
+            "Manual topology prepared: %d devices, %d layers",
+            len(devices_props),
+            int(num_layers),
+        )
+        return self.topology
+
     async def _handle_load_model(
         self, req: APILoadModelRequest
     ) -> APILoadModelResponse:
@@ -402,17 +509,48 @@ class RingApiNode:
         Returns:
             Load model response
         """
-        logger.info(f"Loading model: {req.model}")
+        # Decide model and assignments
+        if self.topology:
+            model_to_load = self.topology.model
+            assignments_to_use = self.topology.assignments
+            if getattr(req, "model", None) and req.model != model_to_load:
+                logger.info(
+                    "load_model request model %s overridden by topology model %s",
+                    req.model,
+                    model_to_load,
+                )
+        else:
+            if not getattr(req, "model", None):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        "No topology configured and no model provided. "
+                        "Call /v1/prepare_topology or /v1/prepare_topology_manual first, "
+                        "or include 'model' to bootstrap with discovery."
+                    ),
+                )
+            # Bootstrap: run discovery-based prepare
+            await self._handle_prepare_topology(PrepareTopologyRequest(model=req.model))
+            model_to_load = self.topology.model  # type: ignore
+            assignments_to_use = self.topology.assignments  # type: ignore
 
-        # Get shards
+        logger.info("Loading model: %s", model_to_load)
+
+        # Resolve shard endpoints
         api_properties = self.discovery.get_own_properties()
-        # FIXME: use topology here, not a new discovery
-        shards = self._get_shards_from_discovery()
+        if self.topology and getattr(self.topology, "devices", []):
+            # Build mapping from topology (service/instance -> properties)
+            shards: Dict[str, DnetDeviceProperties] = {
+                getattr(dev, "instance"): dev for dev in self.topology.devices
+            }
+        else:
+            # Fallback to discovery when no topology is configured
+            shards = self._get_shards_from_discovery()
 
         # Notify each shard to load their layers via HTTP
         shard_statuses: List[ShardLoadStatus] = []
         async with httpx.AsyncClient() as http_client:
-            for assignment in req.assignments:
+            for assignment in assignments_to_use:
                 service_name = assignment.service
                 # Flatten layers for shard loading
                 layers = [
@@ -435,24 +573,27 @@ class RingApiNode:
 
                 shard_props = shards[service_name]
 
-                # Get next node address from next_service in ring
-                if assignment.next_service and assignment.next_service in shards:
-                    next_shard = shards[assignment.next_service]
-                    logger.info("Shard %s next node in ring: %s", service_name, assignment.next_service)
-                else:
-                    logger.info("Shard %s has no valid next service in ring", service_name)
+                # Get next node address from next_service in ring (if provided)
+                next_shard = None
+                if getattr(assignment, "next_service", None):
+                    ns = assignment.next_service  # type: ignore[attr-defined]
+                    if ns in shards:
+                        next_shard = shards[ns]
+                        logger.info("Shard %s next node in ring: %s", service_name, ns)
+                    else:
+                        logger.info("Shard %s next service %s not found; skipping ring hop", service_name, ns)
 
                 try:
-                    # Get total layers from stored topology
-                    total_layers = self.topology.num_layers if self.topology else 0
+                    # Total layers from topology (present after bootstrap)
+                    total_layers = self.topology.num_layers if self.topology else (max(layers) + 1 if layers else 0)
 
                     # Build API callback address (gRPC)
                     api_callback_address = f"{api_properties.local_ip}:{self.grpc_port}"
 
-                    # Call load_model via HTTP
+                    # Call load_model via HTTP (window_size unified)
                     url = f"http://{shard_props.local_ip}:{shard_props.server_port}/load_model"
                     payload = ShardLoadModelRequest(
-                        model_path=req.model,
+                        model_path=model_to_load,
                         layers=layers,
                         warmup=True,
                         next_node=next_shard,
@@ -488,11 +629,11 @@ class RingApiNode:
         # Check if all shards loaded successfully
         if all(status.success for status in shard_statuses):
             try:
-                self.model_metadata = get_model_metadata(req.model)
-                self.model_name = req.model
+                self.model_metadata = get_model_metadata(model_to_load)
+                self.model_name = model_to_load
 
                 # Load tokenizer
-                self.tokenizer = load_tokenizer(Path(req.model), {})
+                self.tokenizer = load_tokenizer(Path(model_to_load), {})
 
                 # Load API-side model (embeddings, lm_head, etc.)
                 self.model = get_ring_model(
@@ -507,16 +648,16 @@ class RingApiNode:
                 # this should be the first device in `self.topology.devices`
                 await self._connect_first_shard()
 
-                logger.info("API-side model loaded successfully for %s", req.model)
+                logger.info("API-side model loaded successfully for %s", model_to_load)
                 return APILoadModelResponse(
-                    model=req.model,
+                    model=model_to_load,
                     success=True,
                     shard_statuses=shard_statuses,
                 )
             except Exception as e:
                 logger.exception("Error loading API-side model: %s", e)
                 return APILoadModelResponse(
-                    model=req.model,
+                    model=model_to_load,
                     success=False,
                     shard_statuses=shard_statuses,
                     message=("Error loading API-side model: %s", e),
@@ -527,7 +668,7 @@ class RingApiNode:
             ]
             logger.error("Failed to load model on shards: %s", failed_shards)
             return APILoadModelResponse(
-                model=req.model,
+                model=model_to_load,
                 success=False,
                 shard_statuses=shard_statuses,
             )
@@ -630,24 +771,45 @@ class RingApiNode:
         )
 
     async def _connect_first_shard(self) -> bool:
-        """Connect to first shard in ring.
+        """Connect to the shard that owns layer 0 (entry shard).
 
-        Returns:
-            True if connected, False otherwise
+        Falls back to the first device in topology when ownership cannot be
+        determined. Returns True on success, False otherwise.
         """
-        if not self.topology:
+        if not self.topology or not getattr(self.topology, "devices", []):
             return False
 
-        # since topology stores the sorted devices, we simply get the first one
-        first_shard = self.topology.devices[0]
-        first_shard_address = f"{first_shard.local_ip}:{first_shard.shard_port}"
+        # Pick the device whose assignment contains layer 0; fallback to index 0
+        start_service: str | None = None
+        try:
+            for assignment in getattr(self.topology, "assignments", []) or []:
+                # Flatten round layers
+                flat = [l for round_layers in assignment.layers for l in round_layers]
+                if 0 in flat:
+                    start_service = assignment.service
+                    break
+        except Exception:
+            start_service = None
+
+        start_device = None
+        if start_service is not None:
+            try:
+                for dev in self.topology.devices:
+                    if getattr(dev, "instance", None) == start_service:
+                        start_device = dev
+                        break
+            except Exception:
+                start_device = None
+
+        if start_device is None:
+            start_device = self.topology.devices[0]
+
+        first_shard_address = f"{start_device.local_ip}:{start_device.shard_port}"
         if self.first_shard_channel:
             return True
 
         try:
-            self.first_shard_channel = aio_grpc.insecure_channel(
-                f"{first_shard.local_ip}:{first_shard.shard_port}"
-            )
+            self.first_shard_channel = aio_grpc.insecure_channel(first_shard_address)
             self.first_shard_stub = DnetRingServiceStub(self.first_shard_channel)
 
             # Prepare generate_step with gRPC callback
@@ -657,14 +819,16 @@ class RingApiNode:
                 self.first_shard_stub,
                 callback_protocol="grpc",
                 callback_addr=callback_addr,
-                compression=self._compression_pct
+                compression=self._compression_pct,
             )
 
             logger.info("Connected to first shard at %s", first_shard_address)
             return True
 
         except Exception as e:
-            logger.warning("Failed to connect to first shard %s: %s", first_shard_address, e)
+            logger.warning(
+                "Failed to connect to first shard %s: %s", first_shard_address, e
+            )
             self.first_shard_channel = None
             self.first_shard_stub = None
             self.generate_step = None
@@ -700,14 +864,7 @@ class RingApiNode:
         logger.info("Model profiling completed.")
         return load_model_profile_from_dict(asdict(model_profile_split))
 
-    async def _collect_shard_profiles(
-        self,
-        shards: Dict[str, DnetDeviceProperties],
-        repo_id: str,
-        embedding_size: int,
-        max_batch_exp: int,
-        batch_sizes: List[int],
-    ) -> Tuple[Dict[str, DeviceProfile], Dict[str, Dict[str, ThunderboltConnection]]]:
+    async def _collect_shard_profiles(self, shards: Dict[str, DnetDeviceProperties], repo_id: str, embedding_size: int, max_batch_exp: int, batch_sizes: List[int]) -> Tuple[Dict[str, DeviceProfile], Dict[str, Dict[str, ThunderboltConnection]]]:
         """Collect profile data from all shards.
 
         Args:
@@ -1094,9 +1251,8 @@ class RingApiNode:
         async for (token, logprobs), _ in azip(
             self.generate_step(
                 nonce=nonce,
-                node_origin=f"0.0.0.0:{self.http_port}",
+                node_origin=f"localhost:{self.http_port}",
                 prompt=prompt,
-                model=self.model,
                 pending_requests=self.pending_requests,
                 params=ChatBaseParams(
                     model=req.model,
@@ -1114,7 +1270,7 @@ class RingApiNode:
             detokenizer.add_token(token)
             tokens.append(token)
 
-            if req.logprobs and (req.logprobs > 0):
+            if (logprobs is not None) and (req.logprobs > 0) and logprobs.size != 0:
                 sorted_indices = mx.argpartition(-logprobs, kth=req.logprobs - 1)
                 top_indices = sorted_indices[: (req.logprobs or 0)]
                 top_logprobs_array = logprobs[top_indices]
@@ -1124,7 +1280,8 @@ class RingApiNode:
                 )
                 top_tokens.append(dict(top_token_info))
 
-            token_logprobs.append(logprobs[token].item())
+            if logprobs is not None and logprobs.size != 0:
+                token_logprobs.append(logprobs[token].item())
 
             stop_condition = await self._stopping_criteria(
                 tokens,
@@ -1307,9 +1464,8 @@ class RingApiNode:
             async for (token, _), _ in azip(
                 self.generate_step(
                     nonce=nonce,
-                    node_origin=f"0.0.0.0:{self.http_port}", # FIXME: Not sure of this, grpc-http port mix
+                    node_origin=f"localhost:{self.http_port}", # FIXME: Not sure of this, grpc-http port mix
                     prompt=prompt,
-                    model=self.model,
                     pending_requests=self.pending_requests,
                     params=ChatBaseParams(
                         model=req.model,
@@ -1361,9 +1517,8 @@ class RingApiNode:
             async for (token, _), _ in azip(
                 self.generate_step(
                     nonce=nonce,
-                    node_origin=f"0.0.0.0:{self.http_port}",  # FIXME: Not sure of this, grpc-http port mix
+                    node_origin=f"localhost:{self.http_port}",  # FIXME: Not sure of this, grpc-http port mix
                     prompt=prompt,
-                    model=self.model,
                     pending_requests=self.pending_requests,
                     params=ChatBaseParams(
                         model=req.model,
@@ -1404,9 +1559,12 @@ class RingApiNode:
         self.running = False
 
         # Stop HTTP server
-        if self.http_server:
-            self.http_server.should_exit = True
-            await asyncio.sleep(1)
+        if self.http_server and not self.http_server.done():
+            self.http_server.cancel()
+            try:
+                await self.http_server
+            except asyncio.CancelledError:
+                pass
 
         # Close channels
         if self.first_shard_channel:

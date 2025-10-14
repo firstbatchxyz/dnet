@@ -35,8 +35,7 @@ class ShardServicer(DnetRingServiceServicer):
                 request.activation.layer_id,
             )
 
-            # Process the activation
-            await self.node.receive_activation(request)
+            await self.node.admit_frame(request)
 
             return ActivationResponse(
                 success=True,

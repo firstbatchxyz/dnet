@@ -835,13 +835,15 @@ class RingApiNode:
             return False
 
     def _get_shards_from_discovery(self) -> Dict[str, DnetDeviceProperties]:
-        """Get shards from discovery (excluding manager nodes).
-
-        Returns:
-            Dictionary of shard service names to properties
-        """
+        """Get shards from discovery keyed by instance name (excluding managers)."""
         devices = self.discovery.get_properties()
-        return {k: v for k, v in devices.items() if not v.is_manager}
+        # Normalize keys to the short "instance" form
+        normalized: Dict[str, DnetDeviceProperties] = {}
+        for _fullname, props in devices.items():
+            if props.is_manager:
+                continue
+            normalized[props.instance] = props
+        return normalized
 
     async def _profile_model(
         self, repo_id: str, batch_sizes: List[int], sequence_length: int

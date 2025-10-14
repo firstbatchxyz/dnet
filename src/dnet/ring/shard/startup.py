@@ -201,6 +201,10 @@ class StartupMixin:
 
         @self.app.get("/health")
         async def health() -> HealthResponse:
+            try:
+                instance = self.discovery.instance_name()
+            except Exception:
+                instance = None
             return HealthResponse(
                 status="ok",
                 node_id=self.node_id,
@@ -211,6 +215,7 @@ class StartupMixin:
                 queue_size=self.activation_recv_queue.qsize(),
                 grpc_port=self.grpc_port,
                 http_port=self.http_port,
+                instance=instance,
             )
 
         @self.app.post("/profile")

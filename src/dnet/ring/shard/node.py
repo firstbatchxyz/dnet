@@ -664,16 +664,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
                     transport_ms,
                     (payload_bytes / 1024.0),
                 )
-                try:
-                    logger.info(
-                        "[DIAG][RX] node=%s target_layer=%s in_local=%s assigned_set_size=%d",
-                        self.node_id,
-                        target_layer,
-                        bool(target_layer in self._assigned_set),
-                        len(self._assigned_set),
-                    )
-                except Exception:
-                    pass
+                
 
                 # Detect new sequence per node: initialize per-nonce KV; keep prefetch state per nonce
                 if req.nonce != self._active_nonce:

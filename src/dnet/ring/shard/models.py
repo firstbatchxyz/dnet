@@ -86,3 +86,6 @@ class HealthResponse(BaseModel):
     queue_size: int = Field(..., description="Current activation queue size")
     grpc_port: int = Field(..., description="gRPC server port")
     http_port: int = Field(..., description="HTTP server port")
+    instance: Optional[str] = Field(
+        default=None, description="Short shard instance name (service label)"
+    )

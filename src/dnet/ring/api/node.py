@@ -1047,18 +1047,16 @@ class RingApiNode:
         if not sorted_shard_profiles:
             raise ValueError("No valid shard profiles found")
 
-        logger.info(f"Running solver with {len(sorted_shard_profiles)} shard profiles")
+        logger.info("Running solver with %d shard profiles", len(sorted_shard_profiles))
 
         solution = halda_solve(
-            sorted_shard_profiles,
-            model_profile,
-            time_limit_per_k=5.0,
+            devs=sorted_shard_profiles,
+            model=model_profile,
             mip_gap=1e-4,
-            max_outer_iters=50,
             plot=False,
         )
 
-        logger.info(f"Solver completed: k={solution.k}, objective={solution.obj_value}")
+        logger.info("Solver completed: k=%d, objective=%d", solution.k, solution.obj_value)
 
         return solution
 
@@ -1086,9 +1084,8 @@ class RingApiNode:
             )
 
         num_layers = sum(solution.w) * solution.k
-        logger.info(
-            f"Distributing {num_layers} layers to {len(shards)} devices in {solution.k} rounds"
-        )
+        logger.info("Distributing %d layers to %d devices in %d rounds",
+                    num_layers, len(shards), solution.k)
 
         # Assign layers in round-robin fashion, grouped by rounds
         # Each device gets k sublists (one per round)

@@ -1,9 +1,14 @@
 [submodule "lib/dnet-p2p"]
 	path = lib/dnet-p2p
 	url = https://github.com/firstbatchxyz/dnet-p2p
+	branch = master
+
 [submodule "lib/dperf"]
 	path = lib/dperf
 	url = https://github.com/firstbatchxyz/py-dperf
+	branch = master
+
 [submodule "lib/dsolver"]
 	path = lib/dsolver
 	url = https://github.com/firstbatchxyz/dsolver
+	branch = master

@@ -39,3 +39,4 @@ piped_mlx.egg-info/
 .vscode/
 .DS_Store
 .ruff_cache/
+.logs/

@@ -399,26 +399,25 @@ def get_model_metadata(model_path) -> ModelMetadata:
     return ModelMetadata(path, weight_info, embed_tokens, lm_head, norm, config)
 
 
-def make_cache(model: BaseRingModel):
-    """Create model KV cache with optional quantization.
+def make_cache(
+    model: BaseRingModel,
+    *,
+    kv_mode: str | None = None,
+    kv_bits: int | None = None,
+    kv_group: int | None = None,
+):
+    """Create model KV cache with optional quantization (config-only).
 
-    Controls via env vars:
-      - RING_KV_CACHE: one of {"fp16", "int8", "int4"} (default: fp16)
-      - RING_KV_BITS: bits for quantized cache (default: 8)
-      - RING_KV_GROUP: group size for quantized cache (default: 64)
+    This function does not read environment variables. Callers must pass
+    kv_mode/bits/group explicitly, or rely on the defaults below.
     """
     caches = cache.make_prompt_cache(model)
 
-    try:
-        mode = (os.getenv("RING_KV_CACHE", "fp16") or "fp16").strip().lower()
-    except Exception:
-        mode = "fp16"
+    # Resolve mode strictly from parameters (no env)
+    mode: str = (kv_mode or "fp16").strip().lower()
 
     if mode in {"int8", "int4", "quant", "q"}:
-        try:
-            bits_env = int(os.getenv("RING_KV_BITS", "8"))
-        except Exception:
-            bits_env = 8
+        bits_env = int(kv_bits if kv_bits is not None else 8)
         # Map mode shortcuts
         if mode == "int4":
             bits = 4
@@ -426,10 +425,7 @@ def make_cache(model: BaseRingModel):
             bits = 8
         else:
             bits = max(1, min(8, bits_env))
-        try:
-            group = int(os.getenv("RING_KV_GROUP", "64"))
-        except Exception:
-            group = 64
+        group = int(kv_group if kv_group is not None else 64)
 
         converted = []
         converted_any = False

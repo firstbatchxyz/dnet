@@ -6,7 +6,21 @@ Keep defaults simple; allow future override without touching call sites.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+
+@dataclass
+class KVCacheConfig:
+    """Quantized/unquantized KV cache configuration.
+
+    - mode: "fp16" (default), "int8", "int4", or "quant" (custom bits)
+    - bits: number of bits when mode == "quant" (1..8)
+    - group_size: grouping for quantized cache (e.g., 64)
+    """
+
+    mode: str = "fp16"
+    bits: int = 8
+    group_size: int = 64
 
 
 @dataclass
@@ -54,6 +68,9 @@ class ShardConfig:
 
     # Debug/diagnostics
     x_stats: bool = False
+
+    # KV cache quantization
+    kv_cache: KVCacheConfig = field(default_factory=KVCacheConfig)
 
     @staticmethod
     def for_mode(mode: str) -> "ShardConfig":

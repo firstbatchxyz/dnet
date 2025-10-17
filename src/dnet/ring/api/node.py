@@ -319,7 +319,7 @@ class RingApiNode:
                 ) from e
 
         @self.app.post("/v1/chat/completions")
-        async def chat_completions(req: ChatRequestModel) -> ChatResponseModel:  # type: ignore
+        async def chat_completions(req: ChatRequestModel) -> ChatResponseModel:
             """Handle chat completion requests."""
             if self.model is None:
                 raise HTTPException(
@@ -357,7 +357,7 @@ class RingApiNode:
         Returns:
             Topology preparation response
         """
-        logger.info(f"Preparing topology for model: {req.model}")
+        logger.info("Preparing topology for model: %s", req.model)
 
         # Load model metadata
         model_metadata = get_model_metadata(req.model)
@@ -374,7 +374,7 @@ class RingApiNode:
         if not shards:
             raise ValueError("No shards discovered. Ensure shard nodes are running.")
 
-        logger.info(f"Discovered {len(shards)} shards: {list(shards.keys())}")
+        logger.info("Discovered %d shards: %s", len(shards), list(shards.keys()))
 
         # Collect shard profiles and thunderbolt connections
         shard_profiles, thunderbolt_conns = await self._collect_shard_profiles(
@@ -412,9 +412,8 @@ class RingApiNode:
             solution=asdict(solution),
         )
 
-        logger.info(
-            f"Topology prepared: {len(shards_list)} devices, {model_metadata.num_layers} layers"
-        )
+        logger.info("Topology prepared: %d devices, %d layers", 
+                    len(shards_list), model_metadata.num_layers)
 
         return self.topology
 
@@ -740,13 +739,17 @@ class RingApiNode:
                     )
 
                     logger.info(
-                        f"Shard {shard.instance} unload result: success={result.get('success')}, "
-                        f"message={result.get('message')}"
+                        "Shard %s unload result: success=%s, message=%s",
+                        shard.instance,
+                        result.get("success"),
+                        result.get("message"),
                     )
 
                 except Exception as e:
                     logger.exception(
-                        f"Error unloading model on shard {shard.instance}: {e}"
+                        "Error unloading model on shard %s: %s",
+                        shard.instance,
+                        e,
                     )
                     shard_statuses.append(
                         ShardUnloadStatus(
@@ -926,8 +929,10 @@ class RingApiNode:
         this_device = self.discovery.get_own_properties()
 
         logger.info(
-            f"Model {repo_id}: embedding_size={embedding_size}, "
-            f"payload_sizes={payload_sizes}"
+            "Model %s: embedding_size=%d, payload_sizes=%s",
+            repo_id,
+            embedding_size,
+            payload_sizes
         )
 
         # Find Thunderbolt connections
@@ -940,7 +945,8 @@ class RingApiNode:
             for shard_name, shard_props in shards.items():
                 if shard_props.is_manager:
                     logger.warning(
-                        f"Skipping manager node {shard_name} in profile collection"
+                        "Skipping manager node %s in profile collection",
+                        shard_name
                     )
                     continue
 
@@ -949,7 +955,9 @@ class RingApiNode:
                 try:
                     shard_url = f"http://{server_ip}:{server_port}/profile"
                     logger.info(
-                        f"Calling /profile endpoint for shard {shard_name} at {shard_url}"
+                        "Calling /profile endpoint for shard %s at %s",
+                        shard_name,
+                        shard_url
                     )
 
                     response = await client.post(
@@ -1019,7 +1027,7 @@ class RingApiNode:
             logger.warning("No head device found in profiles, using first device")
             head_devices = [device_names[0]] if device_names else []
 
-        logger.info(f"Found {len(head_devices)} head device(s): {head_devices}")
+        logger.info("Found %d head device(s): %s", len(head_devices), head_devices)
 
         # FIXME: shards on the same machine should be adjacent too!
 
@@ -1062,8 +1070,8 @@ class RingApiNode:
                 next_device = remaining.pop()
                 ordered.append(next_device)
 
-        logger.info(f"Optimized device ordering: {ordered}")
-        logger.info(f"Thunderbolt graph: {tb_graph}")
+        logger.info("Optimized device ordering: %s", ordered)
+        logger.info("Thunderbolt graph: %s", tb_graph)
 
         return ordered
 
@@ -1137,8 +1145,6 @@ class RingApiNode:
             solution.k,
         )
 
-        # Assign layers in round-robin fashion, grouped by rounds
-        # Each device gets k sublists (one per round)
         layer_assignments: Dict[str, List[List[int]]] = {
             name: [[] for _ in range(solution.k)] for name in device_names
         }
@@ -1160,7 +1166,7 @@ class RingApiNode:
         if len(device_names) == 1:
             # Single device: forwards to itself in a loop
             next_service_map[device_names[0]] = device_names[0]
-            logger.info(f"Ring (single device): {device_names[0]} -> SELF (loops back)")
+            logger.info("Ring (single device): %s -> SELF (loops back)", device_names[0])
         else:
             # Multiple devices: each forwards to the next in the ring
             for i, service_name in enumerate(device_names):
@@ -1173,7 +1179,7 @@ class RingApiNode:
 
             # Log ring topology
             for service_name in device_names:
-                logger.info(f"Ring: {service_name} -> {next_service_map[service_name]}")
+                logger.info("Ring: %s -> %s", service_name, next_service_map[service_name])
 
         # Compute window size for each device: total_layers_per_device / k
         window_sizes: Dict[str, int] = {}
@@ -1184,17 +1190,21 @@ class RingApiNode:
                 window_size = max(1, total_layers // solution.k)
                 window_sizes[service_name] = window_size
                 logger.info(
-                    f"Window size for {service_name}: {window_size} "
-                    f"(total_layers={total_layers}, k={solution.k})"
+                    "Window size for %s: %d (total_layers=%d, k=%d)",
+                    service_name,
+                    window_size,
+                    total_layers,
+                    solution.k,
                 )
             else:
                 # FIXME: how to handle?
                 logger.error(
-                    f"No layers assigned to {service_name}, setting window size to 1"
+                    "No layers assigned to %s, setting window size to 1",
+                    service_name,
                 )
                 window_sizes[service_name] = 1
 
-        logger.info(f"Layer assignments (by rounds): {layer_assignments}")
+        logger.info("Layer assignments (by rounds): %s", layer_assignments)
         # return layer_assignments, next_service_map, window_size
 
         return [

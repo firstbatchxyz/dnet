@@ -89,9 +89,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
         # Topology (configured later)
         self.next_node: Optional[DnetDeviceProperties] = None
         self.total_layers: int = 0  # Total layers in model
-        self.api_callback_address: Optional[str] = (
-            None  # API callback address for final layer
-        )
+        self.api_callback_address: Optional[str] = None
 
         # HTTP server
         self.app = FastAPI()
@@ -258,23 +256,23 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
             self.input_pool = LayerAwareMemoryPool(total_memory_mb=512)
             self.output_pool = LayerAwareMemoryPool(total_memory_mb=512)
 
-            # Determine effective window size
-            # - fit mode: use all local layers to minimize staging/rounds
-            # - offload mode: respect API-provided window_size, capped by local layer count
+            # Decide mode dynamically from assignment + requested window
             requested_w = int(max(1, int(getattr(req, "window_size", 1))))
             local_count = max(1, len(self.assigned_layers))
-            if (getattr(self.config, "mode", "fit") or "fit").lower() == "fit":
-                eff_window_size = local_count
-            else:
-                eff_window_size = max(1, min(requested_w, local_count))
+
+            self._mode = "fit" if requested_w >= local_count else "offload"
+            self.config = ShardConfig.for_mode(self._mode)  # Reset config
+            eff_window_size = local_count if (self._mode == "fit") else max(1, min(requested_w, local_count))
             self.window_size = eff_window_size
+
             logger.info(
-                "Node %s: Using prefetch window size: %d (requested=%s, local_count=%s, mode=%s)",
+                "Node %s: Using prefetch window size: %d (requested=%s, local_count=%s, mode=%s). \n With mode: %s",
                 self.node_id,
                 self.window_size,
                 requested_w,
                 local_count,
                 getattr(self.config, "mode", "fit"),
+                self._mode
             )
 
             # Initialize weight cache
@@ -296,7 +294,12 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
                 assigned_layers=self.assigned_layers,
             )
             self.model.eval()
-            self.cache = make_cache(self.model)
+            self.cache = make_cache(
+                self.model,
+                kv_mode=getattr(self.config.kv_cache, "mode", None),
+                kv_bits=getattr(self.config.kv_cache, "bits", None),
+                kv_group=getattr(self.config.kv_cache, "group_size", None),
+            )
 
             try:
                 if self.role in {"start", "end"}:
@@ -465,7 +468,12 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
             return
 
         try:
-            self.cache = make_cache(self.model)  # type: ignore # model is checked
+            self.cache = make_cache(
+                self.model,  # type: ignore[arg-type]
+                kv_mode=getattr(self.config.kv_cache, "mode", None),
+                kv_bits=getattr(self.config.kv_cache, "bits", None),
+                kv_group=getattr(self.config.kv_cache, "group_size", None),
+            )
             logger.info("Node %s: Cache reset successfully", self.node_id)
         except Exception as e:
             logger.error("Node %s: Error resetting cache: %s", self.node_id, e)
@@ -812,7 +820,12 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
 
         kv = self._kv_by_nonce.get(nonce)
         if kv is None:
-            kv = make_cache(self.model)
+            kv = make_cache(
+                self.model,
+                kv_mode=getattr(self.config.kv_cache, "mode", None),
+                kv_bits=getattr(self.config.kv_cache, "bits", None),
+                kv_group=getattr(self.config.kv_cache, "group_size", None),
+            )
             self._kv_by_nonce[nonce] = kv
         try:
             self._kv_last_seen[nonce] = time.perf_counter()

@@ -26,14 +26,14 @@ from dnet_p2p import (
 from dnet_p2p.thunderbolt import ThunderboltConnection
 from dperf import profile_model
 from dperf.profiler import ModelProfileSplit
-from dsolver import (
+from distilp import (
     DeviceProfile,
     halda_solve,
     ModelProfile,
     load_model_profile_from_dict,
     load_device_profile_from_dict,
 )
-from dsolver.components.dense_common import HALDAResult
+from distilp.components.dense_common import HALDAResult
 
 from ...protos.dnet_ring_pb2_grpc import DnetRingServiceStub
 from ...protos.shard_api_comm_pb2_grpc import (
@@ -1082,7 +1082,7 @@ class RingApiNode:
         model_profile: ModelProfile,
         device_order: List[str],
     ) -> HALDAResult:
-        """Run dsolver with model and device profiles.
+        """Run distilp with model and device profiles.
 
         Args:
             shard_profiles: Collected shard profiles

@@ -7,7 +7,6 @@ license = { file = "LICENSE" }
 authors = [
   { name = "andthattoo", email = "omer@dria.co" },
   { name = "erhant", email = "erhan@dria.co" },
-  { name = "Mehmet Uzunosmanoğlu", email = "mehmet@dria.co" },
   { name = "Shashank Jaiswal", email = "shashank@dria.co" },
 ]
 keywords = [
@@ -35,7 +34,7 @@ dependencies = [
   "httpx[http2]>=0.24.0",
   "cryptography>=40.0.0",
   "dperf @ file://${PROJECT_ROOT}/lib/dperf",
-  "dsolver @ file://${PROJECT_ROOT}/lib/dsolver",
+  "distilp @ file://${PROJECT_ROOT}/lib/distilp",
   "dnet-p2p @ file://${PROJECT_ROOT}/lib/dnet-p2p/bindings/py",
 ]
 

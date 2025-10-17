@@ -8,7 +8,7 @@
 	url = https://github.com/firstbatchxyz/py-dperf
 	branch = master
 
-[submodule "lib/dsolver"]
-	path = lib/dsolver
-	url = https://github.com/firstbatchxyz/dsolver
+[submodule "lib/distilp"]
+	path = lib/distilp
+	url = https://github.com/firstbatchxyz/distilp
 	branch = master

@@ -2,7 +2,6 @@
 import threading
 import time
 from typing import Dict, List, Optional
-import os
 from concurrent.futures import Future
 
 import mlx.core as mx
@@ -26,16 +25,15 @@ class WeightCache:
         model_metadata: ModelMetadata,
         window_size: Optional[int] = None,
         prefetch_threads: int = 2,
+        *,
+        resident_windows: int = 2,
+        file_cache_mode: str = "auto",
+        file_dict_cap: Optional[int] = None,
+        eager_load: bool = False,
     ):
         self.assigned_layers = assigned_layers
-        # Resident budget: enforce up to N windows resident where N defaults to 2 and
-        # can be overridden via env RING_RESIDENT_WINDOWS. When memory is tight,
-        # set RING_RESIDENT_WINDOWS=1 to cap to a single window.
-        try:
-            resident_windows = int(os.getenv("RING_RESIDENT_WINDOWS", "2"))
-        except Exception:
-            resident_windows = 2
-        resident_windows = max(1, resident_windows)
+        # Resident budget: enforce up to N windows resident
+        resident_windows = max(1, int(resident_windows))
 
         if window_size is not None and window_size > 0:
             self.max_weights = min(len(self.assigned_layers), max(1, resident_windows * int(window_size)))
@@ -43,7 +41,14 @@ class WeightCache:
             self.max_weights = len(self.assigned_layers)
         self.cache = {}  # layer_id -> (data, access_time)
         self.reference_counts: Dict[int, int] = {}  # layer_id -> count
-        self.layer_manager = LayerManager(model_metadata, assigned_layers, thread_pool_size=int(prefetch_threads or 2))
+        self.layer_manager = LayerManager(
+            model_metadata,
+            assigned_layers,
+            thread_pool_size=int(prefetch_threads or 2),
+            file_cache_mode=file_cache_mode,
+            file_cache_cap=file_dict_cap,
+            eager_load=eager_load,
+        )
         self.lock = threading.Lock()
         # Track in-flight materializations so compute can wait on prefetch
         self.loading_futures: Dict[int, Future] = {}

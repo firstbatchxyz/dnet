@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 from dataclasses import dataclass
 from typing import Callable, Optional, Any
@@ -108,12 +107,7 @@ class SendMixin:
                         # Temporary backoff on backpressure; do not permanently disable
                         msg = str(getattr(ack, "message", "")).lower()
                         if "backpressure" in msg:
-                            try:
-                                backoff_s = float(
-                                    os.getenv("RING_STREAM_BACKOFF_S", "0.5")
-                                )
-                            except Exception:
-                                backoff_s = 0.5
+                            backoff_s = float(getattr(self, "_stream_backoff_s", 0.5))
                             loop = asyncio.get_running_loop()
                             ctx.disabled = True
                             ctx.disabled_until = loop.time() + backoff_s
@@ -153,10 +147,7 @@ class SendMixin:
             ctx.ack_task.cancel()
 
     async def _stream_sweeper(self):
-        try:
-            idle_s = float(os.getenv("RING_STREAM_IDLE_S", "2.0"))
-        except Exception:
-            idle_s = 2.0
+        idle_s = float(getattr(self, "_stream_idle_s", 2.0))
         while getattr(self, "running", False):
             try:
                 if not getattr(self, "_streaming_enabled", False):
@@ -370,7 +361,7 @@ class SendMixin:
 
                     if not stream_used:
                         t0 = time.perf_counter()
-                        max_attempts = max(1, int(os.getenv("RING_SEND_RETRIES", "3")))
+                        max_attempts = max(1, int(getattr(self, "_send_retries", 3)))
                         last_exc: Optional[Exception] = None
                         for attempt in range(1, max_attempts + 1):
                             try:
@@ -489,12 +480,7 @@ class SendMixin:
                 # Optional: explicitly end the per-nonce stream on request completion
                 # Enable by setting RING_EXPLICIT_EOR=1 when you emit a true end-of-request signal.
                 try:
-                    if os.getenv("RING_EXPLICIT_EOR", "0").strip().lower() in {
-                        "1",
-                        "true",
-                        "yes",
-                        "on",
-                    }:
+                    if getattr(self, "_explicit_eor", False):
                         if (
                             getattr(self, "_streams", None)
                             and activation_msg.nonce in self._streams

@@ -65,6 +65,10 @@ class LayerManager:
         model_metadata: ModelMetadata,
         assigned_layers: List[int],
         thread_pool_size: int = 2,
+        *,
+        file_cache_mode: str | None = None,
+        file_cache_cap: int | None = None,
+        eager_load: bool | None = None,
     ):
         """
         Args:
@@ -85,20 +89,10 @@ class LayerManager:
         self._file_cache: "OrderedDict[str, Dict[str, mx.array]]" = OrderedDict()
         self._file_cache_lock = threading.Lock()
         # Cache mode: 'none' disables caching; otherwise LRU with capacity tied to RING_RESIDENT_WINDOWS
-        try:
-            mode = os.getenv("RING_FILE_CACHE_MODE", "auto").strip().lower()
-        except Exception:
-            mode = "auto"
+        mode = (file_cache_mode or "auto").strip().lower()
         self._file_cache_mode = mode
-        # Capacity: override via RING_FILE_DICT_CAP, else tied to resident windows
-        try:
-            override = os.getenv("RING_FILE_DICT_CAP")
-            if override is not None:
-                cap = max(1, int(override))
-            else:
-                cap = max(1, int(os.getenv("RING_RESIDENT_WINDOWS", "1")))
-        except Exception:
-            cap = 1
+        # Capacity: explicit cap or default to 1
+        cap = max(1, int(file_cache_cap or 1))
         self._file_cache_cap = cap
         try:
             logger.info(f"[FILE-CACHE] mode={self._file_cache_mode} cap={self._file_cache_cap}")
@@ -108,10 +102,7 @@ class LayerManager:
         logger.info(f"Initialized LLM manager with layers {self.assigned_layers}")
 
         # Optional eager-load: for fits-in-memory cases, pre-load all files once.
-        try:
-            eager = os.getenv("RING_EAGER_LOAD", "0").strip().lower() in {"1", "true", "yes", "on", "all"}
-        except Exception:
-            eager = False
+        eager = bool(eager_load)
         if eager and self._file_cache_mode != "none":
             for fname in filenames:
                 try:

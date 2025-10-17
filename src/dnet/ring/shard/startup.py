@@ -126,7 +126,7 @@ class StartupMixin:
         except Exception:
             default_n = 1
         try:
-            max_windows = max(1, int(os.getenv("SHARD_WARMUP_WINDOWS", str(default_n))))
+            max_windows = max(1, int(getattr(self, "config", None).warmup_windows if getattr(self, "config", None) else default_n))
         except Exception:
             max_windows = default_n
         windows: list[list[int]] = []

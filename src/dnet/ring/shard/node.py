@@ -32,6 +32,7 @@ from ...protos.shard_api_comm_pb2_grpc import ShardApiServiceStub
 from ...utils.model import make_cache, load_api_layer_weights
 from ...utils.logger import logger
 from ...utils.layer_manager import set_prefetch_mode
+from .config import ShardConfig
 from ...utils.model import ModelMetadata, get_model_metadata
 from ...utils.time import utc_epoch_now
 from ...utils.serialization import dtype_map, mlx_dtype_map
@@ -57,6 +58,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
         queue_size: int = 128,
         prefetch_threads: int = 2,
         device_prefetch_workers: int = 4,
+        config: Optional[ShardConfig] = None,
     ) -> None:
         """Initialize ring shard node.
 
@@ -70,9 +72,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
         self.grpc_port = grpc_port
         self.http_port = http_port
         self.queue_size = queue_size
-        self.window_size = (
-            0  # Set dynamically during load_model, zero'ed for types
-        )
+        self.window_size = 0  # Set dynamically during load_model
         self._prefetch_threads = prefetch_threads
         self._device_prefetch_workers = device_prefetch_workers
 
@@ -100,6 +100,10 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
         self.app = FastAPI()
         self.http_server: Optional[asyncio.Task] = None
 
+        # Configuration (preserve self._mode contract)
+        self._mode = "fit"
+        self.config = config or ShardConfig.for_mode(self._mode)
+
         # Memory management (initialized when model loads)
         self.input_pool: Optional[LayerAwareMemoryPool] = None
         self.output_pool: Optional[LayerAwareMemoryPool] = None
@@ -110,30 +114,27 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
         self._prefetch_active = 0
         self._beyond_cursor: Optional[int] = None
 
-        # Offloading params TODO: Assign these via envs or cli
-        self._resident_windows = 2
+        # Offloading/config-derived params
+        self._resident_windows = int(self.config.resident_windows)
         self._defer_unload = True
         self._await_next_ready = False
-        set_prefetch_mode("off") # off|sequential|full
+        set_prefetch_mode(self.config.prefetch_mode)
         self._warmup_keep_flag = False
-        self._materialize_prefetch_default = True
+        self._materialize_prefetch_default = bool(self.config.materialize_prefetch)
         self._touch_during_compute = False
-        self._mode = "fit"
-        
-        if self._mode == "fit":
-            os.environ.setdefault("RING_RESIDENT_WINDOWS", "9999")
-            os.environ.setdefault("RING_FILE_CACHE_MODE", "none")
-            os.environ.setdefault("RING_MATERIALIZE_PREFETCH", "0")
-            os.environ.setdefault("RING_PREFETCH_MODE", "off")
-            os.environ.setdefault("RING_PREFETCH_TOUCH", "none")
-        else:
-            # Offload mode defaults
-            os.environ.setdefault("RING_RESIDENT_WINDOWS", "1")
-            os.environ.setdefault("RING_FILE_DICT_CAP", "1")
-            os.environ.setdefault("RING_MATERIALIZE_PREFETCH", "0")
-            os.environ.setdefault("RING_PREFETCH_MODE", "off")
-            os.environ.setdefault("RING_PREFETCH_TOUCH", "none")
-            os.environ.setdefault("RING_LAZY_PARAMS", "1")
+
+        # Streaming
+        self._stream_backoff_s = float(self.config.stream_backoff_s)
+        self._stream_idle_s = float(self.config.stream_idle_s)
+        self._send_retries = int(self.config.send_retries)
+        self._explicit_eor = bool(self.config.explicit_eor)
+
+        # Prefetch IO and touches
+        self._file_io_direct = bool(self.config.file_io_direct)
+        self._prefetch_touch_mode = (self.config.prefetch_touch or "none").strip().lower()
+        self._prefetch_async = bool(self.config.prefetch_async)
+        self._prefetch_fraction = float(self.config.prefetch_fraction)
+        self._prefetch_budget_ms = float(self.config.prefetch_budget_ms)
 
         # Queues for async processing
         self.activation_recv_queue: Queue[ActivationMessage] = Queue(maxsize=queue_size)
@@ -150,10 +151,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
         self._active_nonce: Optional[str] = None
         self._bound_versions: Dict[int, int] = {}
 
-        try:
-            _wd = (os.getenv("RING_WIRE_DTYPE", "fp16") or "fp16").strip().lower()
-        except Exception:
-            _wd = "fp16"
+        _wd = (self.config.wire_dtype or "fp16").strip().lower()
         if _wd in {"bf16", "bfloat16"}:
             self._wire_dtype_str = "bfloat16"
         else:
@@ -189,10 +187,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
         # Per-nonce KV caches (concurrent requests)
         self._kv_by_nonce: Dict[str, list] = {}
         self._kv_last_seen: Dict[str, float] = {}
-        try:
-            self._kv_ttl_s: float = max(1.0, float(os.getenv("RING_KV_TTL_S", "30")))
-        except Exception:
-            self._kv_ttl_s = 30.0
+        self._kv_ttl_s: float = max(1.0, float(self.config.kv_ttl_s))
 
         logger.info("Shard node %s initialized with queue_size=%d", self.node_id, self.queue_size)
 
@@ -251,19 +246,35 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
             self.input_pool = LayerAwareMemoryPool(total_memory_mb=512)
             self.output_pool = LayerAwareMemoryPool(total_memory_mb=512)
 
-            # Set prefetch window size (must be provided by API)
-            self.window_size = req.window_size
-            logger.info("Node %s: Using prefetch window size: %d", self.node_id, self.window_size)
-
-            eff_window_size = max(1, len(self.assigned_layers)) # TODO: create fit/offload seperation for eff_window_size
+            # Determine effective window size
+            # - fit mode: use all local layers to minimize staging/rounds
+            # - offload mode: respect API-provided window_size, capped by local layer count
+            requested_w = int(max(1, int(getattr(req, "window_size", 1))))
+            local_count = max(1, len(self.assigned_layers))
+            if (getattr(self.config, "mode", "fit") or "fit").lower() == "fit":
+                eff_window_size = local_count
+            else:
+                eff_window_size = max(1, min(requested_w, local_count))
             self.window_size = eff_window_size
+            logger.info(
+                "Node %s: Using prefetch window size: %d (requested=%s, local_count=%s, mode=%s)",
+                self.node_id,
+                self.window_size,
+                requested_w,
+                local_count,
+                getattr(self.config, "mode", "fit"),
+            )
 
             # Initialize weight cache
             self.weight_cache = WeightCache(
                 self.assigned_layers,
                 self.model_metadata,
                 window_size=self.window_size,
-                prefetch_threads=self._prefetch_threads
+                prefetch_threads=self._prefetch_threads,
+                resident_windows=self._resident_windows,
+                file_cache_mode=self.config.file_cache_mode,
+                file_dict_cap=self.config.file_dict_cap,
+                eager_load=False,
             )
 
             # Load the model

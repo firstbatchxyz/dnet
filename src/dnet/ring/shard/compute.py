@@ -218,7 +218,7 @@ class ComputeMixin:
                     )
                     # Optional activation stats at window boundary for debugging
                     try:
-                        if os.getenv("RING_X_STATS", "0").strip().lower() in {"1", "true", "yes", "on"}:
+                        if getattr(self, "_x_stats", False):
                             m = mx.mean(x)
                             s = mx.std(x)
                             mn = mx.min(x)

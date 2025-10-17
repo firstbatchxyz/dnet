@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-import os
 import time
 import logging
 from typing import Dict
@@ -32,33 +31,14 @@ class PrefetchMixin:
     _compute_busy: asyncio.Event
 
     def _touch_weights(self, layer_id: int, weights: Dict[str, mx.array]) -> None:
-        try:
-            mode = (
-                (os.getenv("RING_PREFETCH_TOUCH", "stripe") or "stripe").strip().lower()
-            )
-        except Exception:
-            mode = "stripe"
+        mode = getattr(self, "_prefetch_touch_mode", "none")
         if mode in ("", "none"):
             return
 
-        try:
-            async_flag = os.getenv("RING_PREFETCH_ASYNC", "1").strip().lower() in {
-                "1",
-                "true",
-                "yes",
-                "on",
-            }
-        except Exception:
-            async_flag = True
-        try:
-            frac = float(os.getenv("RING_PREFETCH_FRACTION", "0.25"))
-        except Exception:
-            frac = 0.25
+        async_flag = bool(getattr(self, "_prefetch_async", True))
+        frac = float(getattr(self, "_prefetch_fraction", 0.25))
         frac = max(0.0, min(1.0, frac))
-        try:
-            budget_ms = float(os.getenv("RING_PREFETCH_BUDGET_MS", "25.0"))
-        except Exception:
-            budget_ms = 0.0
+        budget_ms = float(getattr(self, "_prefetch_budget_ms", 0.0))
 
         ops: list[mx.array] = []
         total_bytes = 0
@@ -98,10 +78,7 @@ class PrefetchMixin:
     def _prefetch_to_ram(self, layer_id: int):
         if layer_id not in self._prefetch_scheduled:
             self._prefetch_scheduled.add(layer_id)
-            try:
-                fio = os.getenv("RING_FILE_IO", "").strip().lower() == "direct"
-            except Exception:
-                fio = False
+            fio = bool(getattr(self, "_file_io_direct", False))
             if fio or getattr(self, "_resident_windows", 2) <= 1:
                 return
             if self._prefetch_pause.is_set():
@@ -140,15 +117,7 @@ class PrefetchMixin:
                     layer_id = self.weight_prefetch_queue.get_nowait()
                     batch = [layer_id]
 
-                try:
-                    _mp_env = os.getenv("RING_MATERIALIZE_PREFETCH")
-                    _mat_pref = (
-                        self._materialize_prefetch_default
-                        if _mp_env is None
-                        else (_mp_env.strip().lower() in {"1", "true", "yes", "on"})
-                    )
-                except Exception:
-                    _mat_pref = self._materialize_prefetch_default
+                _mat_pref = bool(getattr(self, "_materialize_prefetch_default", False))
 
                 try:
                     self._prefetch_active += len(batch)

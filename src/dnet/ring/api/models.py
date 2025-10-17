@@ -208,10 +208,6 @@ class PrepareTopologyResponse(TopologyInfo):
     pass
 
 
-# ------------------------
-# Manual Topology API
-# ------------------------
-
 
 class ManualDevice(BaseModel):
     """Manual device specification for topology (no discovery)."""

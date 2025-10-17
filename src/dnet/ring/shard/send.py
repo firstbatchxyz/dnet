@@ -203,9 +203,10 @@ class SendMixin:
                 logger.error("Send worker error: %s", e)
 
     async def _send_activation(self, activation_msg: ActivationMessage):
-
         if not self._check_model_loaded() or not self.output_pool:
-            logger.error("Node %s: Cannot send activation - model not loaded", self.node_id)
+            logger.error(
+                "Node %s: Cannot send activation - model not loaded", self.node_id
+            )
             return
         try:
             # Handle final token path (end-shard sampling)
@@ -441,7 +442,6 @@ class SendMixin:
                         "Cannot forward activation - no next node configured; end shard should sample inline."
                     )
             else:
-
                 logger.error(
                     "Final activation reached send path unexpectedly; sampling should occur on end shard."
                 )

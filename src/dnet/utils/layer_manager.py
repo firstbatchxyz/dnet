@@ -1,6 +1,9 @@
+"Layer manager for memory-mapped LLM layers with prefetching on macOS."
+
 import ctypes
-import os
 import ctypes.util
+import fcntl as _fcntl
+import os
 from concurrent.futures import ThreadPoolExecutor
 import threading
 from typing import Dict, List
@@ -82,7 +85,11 @@ class LayerManager:
 
         # Open memory-mapped file
         self.weight_info = weight_info = model_metadata.weight_info
-        filenames = set(wts.filename for layer in assigned_layers for wts in weight_info[layer].values())
+        filenames = set(
+            wts.filename
+            for layer in assigned_layers
+            for wts in weight_info[layer].values()
+        )
         self.mapped_files = {fname: MappedFile(fname) for fname in filenames}
 
         self.executor = ThreadPoolExecutor(max_workers=thread_pool_size)
@@ -95,7 +102,9 @@ class LayerManager:
         cap = max(1, int(file_cache_cap or 1))
         self._file_cache_cap = cap
         try:
-            logger.info(f"[FILE-CACHE] mode={self._file_cache_mode} cap={self._file_cache_cap}")
+            logger.info(
+                f"[FILE-CACHE] mode={self._file_cache_mode} cap={self._file_cache_cap}"
+            )
         except Exception:
             pass
 
@@ -109,16 +118,20 @@ class LayerManager:
                     key = os.path.abspath(fname)
                     if len(self._file_cache) >= self._file_cache_cap:
                         # Respect capacity
-                        logger.info(f"[EAGER-LOAD] capacity reached (cap={self._file_cache_cap}); skipping {key}")
+                        logger.info(
+                            f"[EAGER-LOAD] capacity reached (cap={self._file_cache_cap}); skipping {key}"
+                        )
                         break
                     d = mx.load(fname)
                     self._file_cache[key] = d
-                    logger.info(f"[EAGER-LOAD] loaded {key} tensors={len(d)} cap={self._file_cache_cap}")
+                    logger.info(
+                        f"[EAGER-LOAD] loaded {key} tensors={len(d)} cap={self._file_cache_cap}"
+                    )
                 except Exception as e:
                     logger.warning(f"[EAGER-LOAD] failed {fname}: {e}")
 
     def _memadvise_layer(self, layer_idx: int, memadvise: int) -> bool:
-        if not (layer_idx in self.assigned_layers):
+        if layer_idx not in self.assigned_layers:
             return False
 
         # get information about tensors that this layer needs
@@ -152,7 +165,9 @@ class LayerManager:
         if mode == "off":
             # Skip any OS advice; treat as success for control flow
             dt_ms = (_time.perf_counter() - t0) * 1000.0
-            logger.info(f"[PROFILE][PREFETCH] layer={layer_idx} mode=off ms={dt_ms:.2f}")
+            logger.info(
+                f"[PROFILE][PREFETCH] layer={layer_idx} mode=off ms={dt_ms:.2f}"
+            )
             return True
 
         weight_data = self.weight_info[layer_idx]
@@ -192,9 +207,13 @@ class LayerManager:
 
             dt_ms = (_time.perf_counter() - t0) * 1000.0
             if ok:
-                logger.info(f"[PROFILE][PREFETCH] layer={layer_idx} mode={mode} ms={dt_ms:.2f}")
+                logger.info(
+                    f"[PROFILE][PREFETCH] layer={layer_idx} mode={mode} ms={dt_ms:.2f}"
+                )
             else:
-                logger.info(f"[PROFILE][PREFETCH] layer={layer_idx} mode={mode} ms={dt_ms:.2f} (partial)")
+                logger.info(
+                    f"[PROFILE][PREFETCH] layer={layer_idx} mode={mode} ms={dt_ms:.2f} (partial)"
+                )
             return ok
         except Exception:
             # Robust fallback: original per-tensor path
@@ -205,31 +224,38 @@ class LayerManager:
                 result = self._memadvise_layer(layer_idx, MADV_WILLNEED)
             dt_ms = (_time.perf_counter() - t0) * 1000.0
             if result:
-                logger.info(f"[PROFILE][PREFETCH] layer={layer_idx} mode={mode} ms={dt_ms:.2f}")
+                logger.info(
+                    f"[PROFILE][PREFETCH] layer={layer_idx} mode={mode} ms={dt_ms:.2f}"
+                )
                 return True
             else:
-                logger.info(f"[PROFILE][PREFETCH] layer={layer_idx} mode={mode} ms={dt_ms:.2f} (failed)")
+                logger.info(
+                    f"[PROFILE][PREFETCH] layer={layer_idx} mode={mode} ms={dt_ms:.2f} (failed)"
+                )
                 return False
 
     def release_layer(self, layer_idx: int):
         """Mark layer as not needed anymore"""
         # Skipping heavy DONTNEED advice can significantly reduce tail latency
         # on direct-I/O paths where the page cache is not used.
-        import os as _os
 
         try:
-            fio_direct = _os.getenv("RING_FILE_IO", "").strip().lower() == "direct"
+            fio_direct = os.getenv("RING_FILE_IO", "").strip().lower() == "direct"
         except Exception:
             fio_direct = False
 
         try:
-            release_mode = (_os.getenv("RING_RELEASE_MODE", "advice") or "advice").strip().lower()
+            release_mode = (
+                (os.getenv("RING_RELEASE_MODE", "advice") or "advice").strip().lower()
+            )
         except Exception:
             release_mode = "advice"
 
         if fio_direct or release_mode in {"none", "off", "skip"}:
             # Nothing to advise; model/unload + cache eviction free real memory
-            logger.info(f"Release skip for layer {layer_idx} (mode={release_mode or 'advice'}, direct_io={fio_direct})")
+            logger.info(
+                f"Release skip for layer {layer_idx} (mode={release_mode or 'advice'}, direct_io={fio_direct})"
+            )
             return True
 
         result = self._memadvise_layer(layer_idx, MADV_DONTNEED)
@@ -243,7 +269,7 @@ class LayerManager:
     def load_layer_to_gpu(self, layer_idx) -> Dict[str, mx.array]:
         """Load layer from memory map to GPU"""
 
-        if not (layer_idx in self.assigned_layers):
+        if layer_idx not in self.assigned_layers:
             raise RuntimeError(f"layer {layer_idx} not assigned to this node")
 
         # get information about tensors that this layer needs
@@ -260,7 +286,11 @@ class LayerManager:
             fnames = set()
             info = {}
 
-        if info and (len(fnames) == 1 or bool(self._file_cache) or self._file_cache_mode == "none"):
+        if info and (
+            len(fnames) == 1
+            or bool(self._file_cache)
+            or self._file_cache_mode == "none"
+        ):
             try:
                 # Determine path: cache or no-cache mode
                 use_cache = self._file_cache_mode != "none"
@@ -278,7 +308,10 @@ class LayerManager:
                                     try:
                                         evk, _ = self._file_cache.popitem(last=False)
                                         try:
-                                            state_files = [os.path.basename(k) for k in self._file_cache.keys()]
+                                            state_files = [
+                                                os.path.basename(k)
+                                                for k in self._file_cache.keys()
+                                            ]
                                             logger.info(
                                                 f"[FILE-CACHE] action=evict file={os.path.basename(evk)} cap={self._file_cache_cap} size={len(self._file_cache)} files={state_files}"
                                             )
@@ -290,7 +323,10 @@ class LayerManager:
                                         break
                                 self._file_cache[key] = d_new
                                 try:
-                                    state_files = [os.path.basename(k) for k in self._file_cache.keys()]
+                                    state_files = [
+                                        os.path.basename(k)
+                                        for k in self._file_cache.keys()
+                                    ]
                                     logger.info(
                                         f"[FILE-CACHE] action=load file={os.path.basename(key)} tensors={len(d_new)} size={len(self._file_cache)}/{self._file_cache_cap} files={state_files}"
                                     )
@@ -348,7 +384,10 @@ class LayerManager:
                         path_label = "mxload-cache" if use_cache else "mxload-nocache"
                         logger.info(
                             "[MATERIALIZE-PATH] layer=%s path=%s files=%s tensors=%s",
-                            layer_idx, path_label, [os.path.basename(f) for f in sorted(fnames)], collected
+                            layer_idx,
+                            path_label,
+                            [os.path.basename(f) for f in sorted(fnames)],
+                            collected,
                         )
                 except Exception:
                     pass
@@ -367,7 +406,9 @@ class LayerManager:
         if not use_direct:
             # Default path: mmap-based per-tensor load
             for name, wt in weight_data.items():
-                data[get_model_layer_name(layer_idx, name)] = load_weight(wt, self.mapped_files)
+                data[get_model_layer_name(layer_idx, name)] = load_weight(
+                    wt, self.mapped_files
+                )
             try:
                 if os.getenv("RING_DEBUG_MATERIALIZE_PATH", "").strip():
                     logger.info(
@@ -385,14 +426,14 @@ class LayerManager:
             files.setdefault(wt.filename, []).append((name, wt))
 
         for fname, items in files.items():
-            import fcntl as _fcntl, os as _os
-
             try:
-                fd = _os.open(fname, _os.O_RDONLY)
+                fd = os.open(fname, os.O_RDONLY)
             except Exception:
                 # Fallback to buffered path for this file
                 for name, wt in items:
-                    data[get_model_layer_name(layer_idx, name)] = load_weight(wt, self.mapped_files)
+                    data[get_model_layer_name(layer_idx, name)] = load_weight(
+                        wt, self.mapped_files
+                    )
                 continue
 
             try:
@@ -405,14 +446,20 @@ class LayerManager:
                     # Read each tensor separately to avoid a large coalesced blob
                     for name, wt in items:
                         try:
-                            t_bytes = _os.pread(fd, int(wt.size_bytes), int(wt.offset))
+                            t_bytes = os.pread(fd, int(wt.size_bytes), int(wt.offset))
                             if not t_bytes or len(t_bytes) < int(wt.size_bytes):
                                 raise OSError("short read")
                             mv = memoryview(t_bytes)
                             if wt.dtype == "BF16":
                                 uint16_data = np.frombuffer(mv, dtype=np.uint16)
-                                float32_data = (uint16_data.astype(np.uint32) << 16).view(np.float32)
-                                arr = mx.array(float32_data).reshape(wt.shape).astype(mx.bfloat16)
+                                float32_data = (
+                                    uint16_data.astype(np.uint32) << 16
+                                ).view(np.float32)
+                                arr = (
+                                    mx.array(float32_data)
+                                    .reshape(wt.shape)
+                                    .astype(mx.bfloat16)
+                                )
                             else:
                                 np_dt = safetensor_dtype_map[wt.dtype]
                                 np_data = np.frombuffer(mv, dtype=np_dt)
@@ -420,7 +467,9 @@ class LayerManager:
                             data[get_model_layer_name(layer_idx, name)] = arr
                         except Exception:
                             # Fallback per-tensor via mmap path on failure
-                            data[get_model_layer_name(layer_idx, name)] = load_weight(wt, self.mapped_files)
+                            data[get_model_layer_name(layer_idx, name)] = load_weight(
+                                wt, self.mapped_files
+                            )
                     continue
 
                 # Default: coalesced span per file (efficient syscalls)
@@ -434,14 +483,16 @@ class LayerManager:
                 read_size = int(pad + span_size)
 
                 try:
-                    blob = _os.pread(fd, read_size, aligned_start)
+                    blob = os.pread(fd, read_size, aligned_start)
                 except OSError:
                     blob = None
 
                 if not blob or len(blob) < read_size:
                     # Fallback: per-tensor via mmap path
                     for name, wt in items:
-                        data[get_model_layer_name(layer_idx, name)] = load_weight(wt, self.mapped_files)
+                        data[get_model_layer_name(layer_idx, name)] = load_weight(
+                            wt, self.mapped_files
+                        )
                     continue
 
                 mv = memoryview(blob)
@@ -451,8 +502,12 @@ class LayerManager:
                     t_bytes = mv[off0:off1]
                     if wt.dtype == "BF16":
                         uint16_data = np.frombuffer(t_bytes, dtype=np.uint16)
-                        float32_data = (uint16_data.astype(np.uint32) << 16).view(np.float32)
-                        arr = mx.array(float32_data).reshape(wt.shape).astype(mx.bfloat16)
+                        float32_data = (uint16_data.astype(np.uint32) << 16).view(
+                            np.float32
+                        )
+                        arr = (
+                            mx.array(float32_data).reshape(wt.shape).astype(mx.bfloat16)
+                        )
                     else:
                         np_dt = safetensor_dtype_map[wt.dtype]
                         np_data = np.frombuffer(t_bytes, dtype=np_dt)
@@ -460,7 +515,7 @@ class LayerManager:
                     data[get_model_layer_name(layer_idx, name)] = arr
             finally:
                 try:
-                    _os.close(fd)
+                    os.close(fd)
                 except Exception:
                     pass
 

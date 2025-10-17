@@ -20,9 +20,7 @@ class ShardLoadModelRequest(BaseModel):
     next_node: Optional[DnetDeviceProperties] = Field(
         default=None, description="Next shard in the ring"
     )
-    window_size: int = Field(
-        ..., description="Window size (computed from k)"
-    )
+    window_size: int = Field(..., description="Window size (computed from k)")
     api_callback_address: str = Field(
         ...,
         description="API callback address for final layer completion (gRPC host:port)",

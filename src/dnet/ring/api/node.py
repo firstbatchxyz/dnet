@@ -31,7 +31,7 @@ from dsolver import (
     halda_solve,
     ModelProfile,
     load_model_profile_from_dict,
-    load_device_profile_from_dict
+    load_device_profile_from_dict,
 )
 from dsolver.components.dense_common import HALDAResult
 
@@ -41,7 +41,7 @@ from ...protos.shard_api_comm_pb2_grpc import (
 )
 
 from ...utils.logger import logger
-from ...utils.model import ModelMetadata, get_model_metadata, load_api_layer_weights
+from ...utils.model import ModelMetadata, get_model_metadata
 from .utils import create_generate_step_for_ring_with_grpc
 from .models import (
     ChatBaseParams,
@@ -140,7 +140,11 @@ class RingApiNode:
         # Callback tracking
         self.pending_requests: Dict[str, asyncio.Future] = {}
 
-        logger.info("API node initialized on HTTP port %s, gRPC port %s", self.http_port, self.grpc_port)
+        logger.info(
+            "API node initialized on HTTP port %s, gRPC port %s",
+            self.http_port,
+            self.grpc_port,
+        )
 
     async def start(self, shutdown_trigger: Any = lambda: asyncio.Future()) -> None:
         """Start the API node.
@@ -328,14 +332,18 @@ class RingApiNode:
                     detail="Not connected to first shard",
                 )
             if bool(getattr(req, "stream", False)):
-                return StreamingResponse(self._stream_chat(req), media_type="text/event-stream")
+                return StreamingResponse(
+                    self._stream_chat(req), media_type="text/event-stream"
+                )
             return await self._handle_chat_completion(req)
 
         @self.app.post("/v1/completions")
         async def completions(req: CompletionRequestModel):  # type: ignore
             """Handle completion requests (not implemented)."""
             if bool(getattr(req, "stream", False)):
-                return StreamingResponse(self._stream_completion(req), media_type="text/event-stream")
+                return StreamingResponse(
+                    self._stream_completion(req), media_type="text/event-stream"
+                )
             return await self._handle_text_completion(req)
 
     async def _handle_prepare_topology(
@@ -355,8 +363,8 @@ class RingApiNode:
         model_metadata = get_model_metadata(req.model)
 
         # Profile model
-        batch_sizes = [1, 2] # TODO: make it configurable
-        sequence_length = 512 # TODO: make it configurable
+        batch_sizes = [1, 2]  # TODO: make it configurable
+        sequence_length = 512  # TODO: make it configurable
         model_profile = await self._profile_model(
             req.model, batch_sizes, sequence_length
         )
@@ -424,10 +432,12 @@ class RingApiNode:
         # Normalize assignments and validate services
         services = set(device_names)
         normalized: List[LayerAssignment] = []
-        for a in req.assignments:
-            if a.service not in services:
-                raise ValueError(f"Assignment references unknown service: {a.service}")
-            layers_2d = a.layers
+        for assignment in req.assignments:
+            if assignment.service not in services:
+                raise ValueError(
+                    f"Assignment references unknown service: {assignment.service}"
+                )
+            layers_2d = assignment.layers
             try:
                 # Accept flat list; wrap to single round
                 if layers_2d and all(isinstance(x, int) for x in layers_2d):  # type: ignore
@@ -436,17 +446,17 @@ class RingApiNode:
                 pass
             normalized.append(
                 LayerAssignment(
-                    service=a.service,
+                    service=assignment.service,
                     layers=layers_2d,
-                    next_service=a.next_service,
-                    window_size=a.window_size,
+                    next_service=assignment.next_service,
+                    window_size=assignment.window_size,
                 )
             )
 
         # Infer num_layers if not provided
         num_layers = req.num_layers
         if num_layers is None:
-            flat = [l for aa in normalized for rr in aa.layers for l in rr]
+            flat = [layer for aa in normalized for rr in aa.layers for layer in rr]
             if not flat:
                 raise ValueError("No layers provided in assignments")
             num_layers = max(flat) + 1
@@ -470,9 +480,14 @@ class RingApiNode:
         if any(a.next_service is None for a in normalized) and len(normalized) > 1:
             order = sorted(
                 normalized,
-                key=lambda aa: min([l for rr in aa.layers for l in rr]) if aa.layers else (1 << 30),
+                key=lambda aa: min([layer for rr in aa.layers for layer in rr])
+                if aa.layers
+                else (1 << 30),
             )
-            ring_map = {order[i].service: order[(i + 1) % len(order)].service for i in range(len(order))}
+            ring_map = {
+                order[i].service: order[(i + 1) % len(order)].service
+                for i in range(len(order))
+            }
             normalized = [
                 LayerAssignment(
                     service=a.service,
@@ -581,11 +596,19 @@ class RingApiNode:
                         next_shard = shards[ns]
                         logger.info("Shard %s next node in ring: %s", service_name, ns)
                     else:
-                        logger.info("Shard %s next service %s not found; skipping ring hop", service_name, ns)
+                        logger.info(
+                            "Shard %s next service %s not found; skipping ring hop",
+                            service_name,
+                            ns,
+                        )
 
                 try:
                     # Total layers from topology (present after bootstrap)
-                    total_layers = self.topology.num_layers if self.topology else (max(layers) + 1 if layers else 0)
+                    total_layers = (
+                        self.topology.num_layers
+                        if self.topology
+                        else (max(layers) + 1 if layers else 0)
+                    )
 
                     # Build API callback address (gRPC)
                     api_callback_address = f"{api_properties.local_ip}:{self.grpc_port}"
@@ -614,9 +637,16 @@ class RingApiNode:
                             layers_loaded=result.layers_loaded,
                         )
                     )
-                    logger.info("Shard %s load result: success=%s (%s)", service_name, result.success, result.message)
+                    logger.info(
+                        "Shard %s load result: success=%s (%s)",
+                        service_name,
+                        result.success,
+                        result.message,
+                    )
                 except Exception as e:
-                    logger.exception("Error loading model on shard %s: %s", service_name, e)
+                    logger.exception(
+                        "Error loading model on shard %s: %s", service_name, e
+                    )
                     shard_statuses.append(
                         ShardLoadStatus(
                             service_name=service_name,
@@ -641,7 +671,7 @@ class RingApiNode:
                     self.model_metadata.model_config,
                     is_api_layer=True,
                 )
-                #load_api_layer_weights(self.model_metadata, self.model)
+                # load_api_layer_weights(self.model_metadata, self.model)
                 # FIXME: I think we don't need to load lm_head + embedding at API side
 
                 # Connect to first shard (head device)
@@ -784,7 +814,11 @@ class RingApiNode:
         try:
             for assignment in getattr(self.topology, "assignments", []) or []:
                 # Flatten round layers
-                flat = [l for round_layers in assignment.layers for l in round_layers]
+                flat = [
+                    layer
+                    for round_layers in assignment.layers
+                    for layer in round_layers
+                ]
                 if 0 in flat:
                     start_service = assignment.service
                     break
@@ -866,7 +900,14 @@ class RingApiNode:
         logger.info("Model profiling completed.")
         return load_model_profile_from_dict(asdict(model_profile_split))
 
-    async def _collect_shard_profiles(self, shards: Dict[str, DnetDeviceProperties], repo_id: str, embedding_size: int, max_batch_exp: int, batch_sizes: List[int]) -> Tuple[Dict[str, DeviceProfile], Dict[str, Dict[str, ThunderboltConnection]]]:
+    async def _collect_shard_profiles(
+        self,
+        shards: Dict[str, DnetDeviceProperties],
+        repo_id: str,
+        embedding_size: int,
+        max_batch_exp: int,
+        batch_sizes: List[int],
+    ) -> Tuple[Dict[str, DeviceProfile], Dict[str, Dict[str, ThunderboltConnection]]]:
         """Collect profile data from all shards.
 
         Args:
@@ -928,7 +969,9 @@ class RingApiNode:
                             response.json()
                         )
                         profile = load_device_profile_from_dict(profile_data.profile)
-                        logger.info("Successfully collected profile from %s", shard_name)
+                        logger.info(
+                            "Successfully collected profile from %s", shard_name
+                        )
 
                         # Mark head device (same local IP as API)
                         if shard_props.local_ip == this_device.local_ip:
@@ -937,7 +980,11 @@ class RingApiNode:
                         # FIXME: DeviceProfileInfo to DeviceProfile should be better
                         shard_profiles[shard_name] = profile
                     else:
-                        logger.error("Failed to get profile from %s: %s", shard_name, response.status_code)
+                        logger.error(
+                            "Failed to get profile from %s: %s",
+                            shard_name,
+                            response.status_code,
+                        )
 
                 except Exception as e:
                     logger.exception("Error calling /profile for %s: %s", shard_name, e)
@@ -1053,7 +1100,9 @@ class RingApiNode:
             plot=False,
         )
 
-        logger.info("Solver completed: k=%d, objective=%d", solution.k, solution.obj_value)
+        logger.info(
+            "Solver completed: k=%d, objective=%d", solution.k, solution.obj_value
+        )
 
         return solution
 
@@ -1081,8 +1130,12 @@ class RingApiNode:
             )
 
         num_layers = sum(solution.w) * solution.k
-        logger.info("Distributing %d layers to %d devices in %d rounds",
-                    num_layers, len(shards), solution.k)
+        logger.info(
+            "Distributing %d layers to %d devices in %d rounds",
+            num_layers,
+            len(shards),
+            solution.k,
+        )
 
         # Assign layers in round-robin fashion, grouped by rounds
         # Each device gets k sublists (one per round)
@@ -1354,7 +1407,7 @@ class RingApiNode:
             ],
             "usage": chat_resp.usage,
         }
-    
+
     async def _stopping_criteria(
         self,
         tokens: List[int],
@@ -1432,7 +1485,7 @@ class RingApiNode:
             },
             metrics=metrics,
         )
-    
+
     def _stream_chat(self, req: ChatRequestModel):
         created = int(time.time())
         nonce = f"chatcmpl-{uuid.uuid4()}"
@@ -1452,7 +1505,9 @@ class RingApiNode:
                 "object": "chat.completion.chunk",
                 "created": created,
                 "model": getattr(req, "model", None) or "default_model",
-                "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+                "choices": [
+                    {"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}
+                ],
             }
             yield f"data: {json.dumps(chunk)}\n\n"
 
@@ -1460,7 +1515,7 @@ class RingApiNode:
             async for (token, _), _ in azip(
                 self.generate_step(
                     nonce=nonce,
-                    node_origin=f"localhost:{self.http_port}", # FIXME: Not sure of this, grpc-http port mix
+                    node_origin=f"localhost:{self.http_port}",  # FIXME: Not sure of this, grpc-http port mix
                     prompt=prompt,
                     pending_requests=self.pending_requests,
                     params=ChatBaseParams(
@@ -1476,17 +1531,25 @@ class RingApiNode:
             ):
                 tokens.append(token)
                 detok.add_token(token)
-                delta = detok.delta if hasattr(detok, "delta") else self.tokenizer.decode([token])
+                delta = (
+                    detok.delta
+                    if hasattr(detok, "delta")
+                    else self.tokenizer.decode([token])
+                )
                 chunk = {
                     "id": nonce,
                     "object": "chat.completion.chunk",
                     "created": created,
                     "model": getattr(req, "model", None) or "default_model",
-                    "choices": [{"index": 0, "delta": {"content": delta}, "finish_reason": None}],
+                    "choices": [
+                        {"index": 0, "delta": {"content": delta}, "finish_reason": None}
+                    ],
                 }
                 yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 
-                stop = await self._stopping_criteria(tokens, stop_id_sequences, self.tokenizer.eos_token_id)  # type: ignore
+                stop = await self._stopping_criteria(
+                    tokens, stop_id_sequences, self.tokenizer.eos_token_id
+                )  # type: ignore
                 if stop.stop_met:
                     break
 
@@ -1528,7 +1591,11 @@ class RingApiNode:
                 arange(req.max_tokens or 0),
             ):
                 detok.add_token(token)
-                delta = detok.delta if hasattr(detok, "delta") else self.tokenizer.decode([token])
+                delta = (
+                    detok.delta
+                    if hasattr(detok, "delta")
+                    else self.tokenizer.decode([token])
+                )
                 chunk = {
                     "id": nonce,
                     "object": "text_completion.chunk",

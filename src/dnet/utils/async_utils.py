@@ -1,10 +1,7 @@
 """Asynchronous iteration utilities for dnet."""
 
 import asyncio
-from typing import TYPE_CHECKING, Any, AsyncIterator, Self, Union, final, overload
-
-if TYPE_CHECKING:
-    from ..ring.model import BaseRingModel
+from typing import Any, AsyncIterator, Self, Union, final, overload
 
 
 @final

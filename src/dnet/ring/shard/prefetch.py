@@ -70,8 +70,16 @@ class PrefetchMixin:
                         mx.eval(*ops)
                 if self._profile:
                     dt_ms = (time.perf_counter() - t0) * 1000.0
-                    logger.info("[PROFILE][PREFETCH-TOUCH] node=%s layer=%d mode=%s ops=%d bytes=%.1fMB ms=%.2f async=%d",
-                                self.node_id, layer_id, mode, len(ops), total_bytes / 1_048_576, dt_ms, int(async_flag))
+                    logger.info(
+                        "[PROFILE][PREFETCH-TOUCH] node=%s layer=%d mode=%s ops=%d bytes=%.1fMB ms=%.2f async=%d",
+                        self.node_id,
+                        layer_id,
+                        mode,
+                        len(ops),
+                        total_bytes / 1_048_576,
+                        dt_ms,
+                        int(async_flag),
+                    )
         except Exception:
             pass
 

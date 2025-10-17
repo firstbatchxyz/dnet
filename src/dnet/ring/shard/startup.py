@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 from typing import Any, Dict, List, Mapping
 import threading
@@ -43,6 +42,7 @@ from .models import (
 )
 from ...protos import dnet_ring_pb2
 
+
 class StartupMixin:
     async def start(self, shutdown_trigger: Any = lambda: asyncio.Future()):
         self.running = True
@@ -62,16 +62,25 @@ class StartupMixin:
         ]
         # Start idle sweeper to close silent streams
         try:
-            if getattr(self, "_streaming_enabled", False) and hasattr(self, "_stream_sweeper"):
-                self.background_tasks.append(asyncio.create_task(self._stream_sweeper()))
+            if getattr(self, "_streaming_enabled", False) and hasattr(
+                self, "_stream_sweeper"
+            ):
+                self.background_tasks.append(
+                    asyncio.create_task(self._stream_sweeper())
+                )
         except Exception:
             pass
-    
+
         self.compute_thread = threading.Thread(target=self._compute_worker, daemon=True)
         self.compute_thread.start()
 
         self._start_discovery()
-        logger.info("Shard node %s started on gRPC port %s HTTP port %s", self.node_id, self.grpc_port, self.http_port)
+        logger.info(
+            "Shard node %s started on gRPC port %s HTTP port %s",
+            self.node_id,
+            self.grpc_port,
+            self.http_port,
+        )
 
     def _start_discovery(self) -> None:
         """Start mDNS discovery service."""
@@ -87,7 +96,11 @@ class StartupMixin:
             is_manager=False,  # Shard is never a manager
         )
         self.discovery.start()
-        logger.info("Discovery service started for shard node %s with name %s", self.node_id, self.discovery.fullname())
+        logger.info(
+            "Discovery service started for shard node %s with name %s",
+            self.node_id,
+            self.discovery.fullname(),
+        )
 
     async def _start_grpc_server(self) -> None:
         """Start gRPC server."""
@@ -100,9 +113,13 @@ class StartupMixin:
         listen_addr = f"[::]:{self.grpc_port}"
         self.server.add_insecure_port(listen_addr)
         await self.server.start()
-        logger.info("Shard node %s gRPC server started on %s", self.node_id, listen_addr)
+        logger.info(
+            "Shard node %s gRPC server started on %s", self.node_id, listen_addr
+        )
         try:
-            await asyncio.get_running_loop().run_in_executor(self.executor, self._warmup_serialization)
+            await asyncio.get_running_loop().run_in_executor(
+                self.executor, self._warmup_serialization
+            )
             logger.info("Warmup serialization completed")
         except Exception as e:
             logger.warning("Warmup serialization failed: %s", e)
@@ -116,7 +133,9 @@ class StartupMixin:
             pass
 
     def _warmup_shard(self):
-        logger.info("[WARMUP] Starting shard warmup with window size %s", self.window_size)
+        logger.info(
+            "[WARMUP] Starting shard warmup with window size %s", self.window_size
+        )
         batch_size, seq_len = 1, 1
         hidden_size = self.model_metadata.model_config.get("hidden_size", 2560)
         x = mx.zeros((batch_size, seq_len, hidden_size), dtype=mx.bfloat16)
@@ -126,12 +145,21 @@ class StartupMixin:
         except Exception:
             default_n = 1
         try:
-            max_windows = max(1, int(getattr(self, "config", None).warmup_windows if getattr(self, "config", None) else default_n))
+            max_windows = max(
+                1,
+                int(
+                    getattr(self, "config", None).warmup_windows
+                    if getattr(self, "config", None)
+                    else default_n
+                ),
+            )
         except Exception:
             max_windows = default_n
         windows: list[list[int]] = []
         for window_start in range(0, len(self._assigned_sorted), self.window_size):
-            window_end = min(window_start + self.window_size, len(self._assigned_sorted))
+            window_end = min(
+                window_start + self.window_size, len(self._assigned_sorted)
+            )
             windows.append(self._assigned_sorted[window_start:window_end])
         for wi, window_layers in enumerate(windows[:max_windows]):
             weights_to_bind = {}
@@ -194,7 +222,9 @@ class StartupMixin:
         self.http_server = asyncio.create_task(
             aio_hypercorn.serve(self.app, config, shutdown_trigger=shutdown_trigger)  # type: ignore
         )
-        logger.info("Shard node %s HTTP server started on port %s", self.node_id, self.http_port)
+        logger.info(
+            "Shard node %s HTTP server started on port %s", self.node_id, self.http_port
+        )
 
     async def _setup_routes(self) -> None:
         """Setup HTTP routes."""
@@ -298,7 +328,9 @@ class StartupMixin:
                 start = int(body.get("start", -1))
                 window = int(body.get("window", self.window_size))
                 if start < 0:
-                    return JSONResponse(status_code=400, content={"error": "missing/invalid start"})
+                    return JSONResponse(
+                        status_code=400, content={"error": "missing/invalid start"}
+                    )
                 start_idx = 0
                 for i, lyr in enumerate(self._assigned_sorted):
                     if lyr >= start:
@@ -306,7 +338,9 @@ class StartupMixin:
                         break
                 else:
                     return JSONResponse(content={"prefetched": []})
-                window_layers = self._assigned_sorted[start_idx : start_idx + max(1, window)]
+                window_layers = self._assigned_sorted[
+                    start_idx : start_idx + max(1, window)
+                ]
                 for wl in window_layers:
                     self._prefetch_to_ram(wl)
                     self._enqueue_weight_prefetch(wl)
@@ -330,7 +364,7 @@ class StartupMixin:
         device_profile: DeviceProfileInfo = profile_device(
             repo_id, max_batch_exp=max_batch_exp
         )
-        logger.info("Device profiling completed for node %s",self.node_id)
+        logger.info("Device profiling completed for node %s", self.node_id)
         return device_profile
 
     async def _connect_next_node(self) -> bool:
@@ -391,10 +425,20 @@ class StartupMixin:
         try:
             health_request = dnet_ring_pb2.HealthRequest(requester_id=str(self.node_id))
             response = await self.next_node_stub.HealthCheck(health_request)  # type: ignore
-            logger.info("Shard node %s successfully pinged: %s, healthy: %s", self.node_id, response.node_id, response.healthy)
+            logger.info(
+                "Shard node %s successfully pinged: %s, healthy: %s",
+                self.node_id,
+                response.node_id,
+                response.healthy,
+            )
             return True
         except Exception as e:
-            logger.warning("Shard node %s failed to ping next node %s: %s", self.node_id, self.next_node_address, e)
+            logger.warning(
+                "Shard node %s failed to ping next node %s: %s",
+                self.node_id,
+                self.next_node_address,
+                e,
+            )
             return False
 
     async def _measure_latency_to_devices(
@@ -423,7 +467,9 @@ class StartupMixin:
 
             # Skip measuring latency to API (manager) devices
             if device_info.is_manager:
-                logger.debug("Skipping latency measurement to manager/API: %s", service_name)
+                logger.debug(
+                    "Skipping latency measurement to manager/API: %s", service_name
+                )
                 continue
 
             try:
@@ -444,7 +490,9 @@ class StartupMixin:
                     service_ip = device_info.local_ip
 
                 if not shard_port or not service_ip:
-                    logger.warning("No shard_port or local_ip for device %s",service_name)
+                    logger.warning(
+                        "No shard_port or local_ip for device %s", service_name
+                    )
                     continue
 
                 # Connect to target shard's gRPC server

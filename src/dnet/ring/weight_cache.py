@@ -1,4 +1,5 @@
 """Weight cache with windowed GPU residency and LRU eviction."""
+
 import threading
 import time
 from typing import Dict, List, Optional
@@ -36,7 +37,9 @@ class WeightCache:
         resident_windows = max(1, int(resident_windows))
 
         if window_size is not None and window_size > 0:
-            self.max_weights = min(len(self.assigned_layers), max(1, resident_windows * int(window_size)))
+            self.max_weights = min(
+                len(self.assigned_layers), max(1, resident_windows * int(window_size))
+            )
         else:
             self.max_weights = len(self.assigned_layers)
         self.cache = {}  # layer_id -> (data, access_time)
@@ -55,7 +58,9 @@ class WeightCache:
         self.prefetch_futures: Dict[int, Future] = {}
         logger.info("WeightCache resident budget: max_weights=%d", self.max_weights)
 
-    def get_weight(self, layer_id: int, *, inc_ref: bool = True) -> Optional[Dict[str, mx.array]]:
+    def get_weight(
+        self, layer_id: int, *, inc_ref: bool = True
+    ) -> Optional[Dict[str, mx.array]]:
         """Get weight from cache"""
         # First, fast path under lock for cache hit or in-flight load
         with self.lock:
@@ -64,7 +69,9 @@ class WeightCache:
                 # refresh LRU timestamp
                 self.cache[layer_id] = (data, time.time())
                 if inc_ref:
-                    self.reference_counts[layer_id] = self.reference_counts.get(layer_id, 0) + 1
+                    self.reference_counts[layer_id] = (
+                        self.reference_counts.get(layer_id, 0) + 1
+                    )
                 logger.debug(
                     "Cache hit for layer %s, ref=%d inc=%d",
                     layer_id,
@@ -98,14 +105,18 @@ class WeightCache:
                 # Estimate bytes by summing tensor sizes for the layer
                 try:
                     winfo = self.layer_manager.weight_info.get(layer_id, {})
-                    total_bytes = sum(getattr(w, "size_bytes", 0) for w in winfo.values())
+                    total_bytes = sum(
+                        getattr(w, "size_bytes", 0) for w in winfo.values()
+                    )
                 except Exception:
                     total_bytes = 0
                 # Commit to cache under lock
                 with self.lock:
                     self.cache[layer_id] = (data, time.time())
                     if inc_ref:
-                        self.reference_counts[layer_id] = self.reference_counts.get(layer_id, 0) + 1
+                        self.reference_counts[layer_id] = (
+                            self.reference_counts.get(layer_id, 0) + 1
+                        )
                     else:
                         self.reference_counts.setdefault(layer_id, 0)
                     # Resolve future and clear from tracking
@@ -143,7 +154,9 @@ class WeightCache:
                 return None
             wait_ms = (time.perf_counter() - t0w) * 1000.0
             try:
-                logger.info("[PROFILE][WAIT-WEIGHT] layer=%s ms=%.2f", layer_id, wait_ms)
+                logger.info(
+                    "[PROFILE][WAIT-WEIGHT] layer=%s ms=%.2f", layer_id, wait_ms
+                )
             except Exception:
                 pass
             # Return from cache (now populated) and update ref/LRU
@@ -153,7 +166,9 @@ class WeightCache:
                     return None
                 self.cache[layer_id] = (data, time.time())
                 if inc_ref:
-                    self.reference_counts[layer_id] = self.reference_counts.get(layer_id, 0) + 1
+                    self.reference_counts[layer_id] = (
+                        self.reference_counts.get(layer_id, 0) + 1
+                    )
                 else:
                     self.reference_counts.setdefault(layer_id, 0)
                 return data
@@ -163,7 +178,11 @@ class WeightCache:
         with self.lock:
             if layer_id in self.reference_counts:
                 self.reference_counts[layer_id] -= 1
-                logger.debug("Decreased ref count for %s: %d", layer_id, self.reference_counts[layer_id])
+                logger.debug(
+                    "Decreased ref count for %s: %d",
+                    layer_id,
+                    self.reference_counts[layer_id],
+                )
 
     def prefetch_to_ram(self, layer_id: int):
         """Asynchronously hint the OS to prefetch layer pages into RAM.
@@ -197,7 +216,9 @@ class WeightCache:
     def _evict_lru(self):
         """Evict least recently used weight with zero references"""
         candidates = [
-            (lid, access_time) for lid, (_, access_time) in self.cache.items() if self.reference_counts.get(lid, 0) == 0
+            (lid, access_time)
+            for lid, (_, access_time) in self.cache.items()
+            if self.reference_counts.get(lid, 0) == 0
         ]
 
         if candidates:

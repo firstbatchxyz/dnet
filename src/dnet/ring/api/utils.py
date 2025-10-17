@@ -1,4 +1,5 @@
 """API utilities for ring topology generation."""
+
 import asyncio
 import time
 from typing import AsyncGenerator, Dict, Tuple
@@ -82,15 +83,21 @@ def create_generate_step_for_ring_with_grpc(
             t_rpc = asyncio.get_running_loop().time()
             response = await stub.SendActivation(activation_message)  # type: ignore
             api_rpc_ms = (asyncio.get_running_loop().time() - t_rpc) * 1000.0
-            logger.info(f"[PROFILE][API-TX] nonce={nonce} to=shard0 rpc_ms={api_rpc_ms:.2f} payload_kb={(len(activation_message.activation.data) / 1024):.1f}")
+            logger.info(
+                f"[PROFILE][API-TX] nonce={nonce} to=shard0 rpc_ms={api_rpc_ms:.2f} payload_kb={(len(activation_message.activation.data) / 1024):.1f}"
+            )
             if not response.success:
-                raise RuntimeError(f"Sending activation {nonce} to {node_origin} was not succesful")
+                raise RuntimeError(
+                    f"Sending activation {nonce} to {node_origin} was not succesful"
+                )
 
             # Wait for token callback from last shard
             try:
                 result = await asyncio.wait_for(future, timeout=3000.0)
             except asyncio.TimeoutError as e:
-                raise RuntimeError("Did not receive token corresponding to %s, err: %s", nonce, e)
+                raise RuntimeError(
+                    "Did not receive token corresponding to %s, err: %s", nonce, e
+                )
             except Exception as e:
                 raise RuntimeError(f"Request {nonce} failed with exception {e!r}")
             finally:
@@ -98,16 +105,16 @@ def create_generate_step_for_ring_with_grpc(
 
             # Only token IDs are supported (end shard samples inline)
             if not isinstance(result, int):
-                raise RuntimeError("Expected token callback from shard, but received activation payload")
+                raise RuntimeError(
+                    "Expected token callback from shard, but received activation payload"
+                )
             y = mx.array([int(result)], dtype=mx.int32)
             logprobs = mx.array([], dtype=mx.float32)
             if repetition_penalty:
                 repetition_context.append(y.item())
             if repetition_context_size:
                 if len(repetition_context) > repetition_context_size:
-                    repetition_context = repetition_context[
-                        -repetition_context_size:
-                    ]
+                    repetition_context = repetition_context[-repetition_context_size:]
             return y, logprobs
 
         y, logprobs = await _step(y)

@@ -21,7 +21,10 @@ def _truthy(val: str | None) -> bool:
 
 def load_settings() -> ObsSettings:
     # Profile enable flags (union of common envs)
-    enabled = any(_truthy(os.getenv(k)) for k in ("RING_PROFILE", "PROFILE", "RUN_PROFILE", "SHARD_PROFILE"))
+    enabled = any(
+        _truthy(os.getenv(k))
+        for k in ("RING_PROFILE", "PROFILE", "RUN_PROFILE", "SHARD_PROFILE")
+    )
 
     # Per-layer sync: default to enabled when profiling, else off unless explicitly set
     spe = os.getenv("RING_SYNC_PER_LAYER")

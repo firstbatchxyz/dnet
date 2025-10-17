@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import time
 import asyncio
 from typing import Dict, List, cast
@@ -15,20 +14,20 @@ from ..data_types import ActivationMessage
 
 
 class ComputeMixin:
-    """Split out the hot-path compute from RingShardNode.
-    """
+    """Split out the hot-path compute from RingShardNode."""
 
     def _process_activation(self, activation_msg: ActivationMessage):
-
         if (
             not self._check_model_loaded()
             or not self.weight_cache
             or not self.input_pool
             or not self.output_pool
         ):
-            logger.error("Node %s: Cannot process activation - model not loaded", self.node_id)
+            logger.error(
+                "Node %s: Cannot process activation - model not loaded", self.node_id
+            )
             return
-        
+
         try:
             # per-nonce kvcache for concurrent requests
             kv = self._get_or_make_kv(activation_msg.nonce)
@@ -70,15 +69,22 @@ class ComputeMixin:
                 # Determine contiguous local window starting at current_layer
                 window_layers: List[int] = []
                 _tmp_layer = current_layer
-                while processed < self.window_size and (_tmp_layer in self._assigned_set):
+                while processed < self.window_size and (
+                    _tmp_layer in self._assigned_set
+                ):
                     window_layers.append(_tmp_layer)
                     _tmp_layer += 1
                     processed += 1
 
                 # Ensure weights for the window are resident and bind only if arrays changed
                 # if model fits and we've already bound these layers, skip the scan entirely.
-                fast_fit = getattr(self, "_mode", "") == "fit" and len(self._assigned_sorted) <= self.window_size
-                skip_scan = fast_fit and all((wl in self._bound_versions) for wl in window_layers)
+                fast_fit = (
+                    getattr(self, "_mode", "") == "fit"
+                    and len(self._assigned_sorted) <= self.window_size
+                )
+                skip_scan = fast_fit and all(
+                    (wl in self._bound_versions) for wl in window_layers
+                )
                 to_bind: Dict[str, mx.array] = {}
                 if not skip_scan:
                     t_w_ready = time.perf_counter()
@@ -134,7 +140,11 @@ class ComputeMixin:
                 # Opportunistically schedule prefetch for the next window to overlap with compute
                 try:
                     next_win_pre = self._next_local_layers(
-                        (window_layers[-1] if window_layers else (activation_msg.layer_id)),
+                        (
+                            window_layers[-1]
+                            if window_layers
+                            else (activation_msg.layer_id)
+                        ),
                         self.window_size,
                     )
                     for nl in next_win_pre:
@@ -151,7 +161,9 @@ class ComputeMixin:
                     pass
 
                 # Execute the window
-                self._beyond_cursor = window_layers[-1] if window_layers else (activation_msg.layer_id)
+                self._beyond_cursor = (
+                    window_layers[-1] if window_layers else (activation_msg.layer_id)
+                )
                 t_comp = time.perf_counter()
                 # Prevent prefetch touching during encode/compute to minimize UMA pressure
                 try:
@@ -160,12 +172,16 @@ class ComputeMixin:
                     pass
                 layer_times_ms: list[tuple[int, float]] = []
                 for i, lyr in enumerate(window_layers):
-                    t_l0 = time.perf_counter() if getattr(self, "_profile", False) else 0.0
+                    t_l0 = (
+                        time.perf_counter() if getattr(self, "_profile", False) else 0.0
+                    )
                     with self._mlx_lock:
                         x = self.model.apply_single_layer(lyr, x, cache=kv)
-                        
+
                     # Optional per-n-layer sync for profiling, gated by settings
-                    if getattr(self, "_profile", False) and getattr(self, "_sync_per_layer", False):
+                    if getattr(self, "_profile", False) and getattr(
+                        self, "_sync_per_layer", False
+                    ):
                         do_sync = True
                         try:
                             n = int(getattr(self, "_sync_every_n", 0) or 0)
@@ -190,7 +206,9 @@ class ComputeMixin:
                                 dt,
                             )
                 t_comp_done = time.perf_counter()
-                last_layer = window_layers[-1] if window_layers else activation_msg.layer_id
+                last_layer = (
+                    window_layers[-1] if window_layers else activation_msg.layer_id
+                )
                 # Ensure compute is complete before any cache/eviction ops
                 # try:
                 #    mx.eval(x)
@@ -198,7 +216,11 @@ class ComputeMixin:
                 #    pass
                 if self._profile:
                     try:
-                        avg = sum(t for _, t in layer_times_ms) / len(layer_times_ms) if layer_times_ms else 0.0
+                        avg = (
+                            sum(t for _, t in layer_times_ms) / len(layer_times_ms)
+                            if layer_times_ms
+                            else 0.0
+                        )
                         self._prof.info(
                             "[PROFILE][LAYER-AVG] node=%s nonce=%s window=%s avg_ms=%.3f per_layer_ms=%.3f",
                             self.node_id,
@@ -253,7 +275,9 @@ class ComputeMixin:
                 try:
                     self._recent_windows.append(list(window_layers))
                     if not self._defer_unload:
-                        while len(self._recent_windows) > max(1, int(getattr(self, "_resident_windows", 2))):
+                        while len(self._recent_windows) > max(
+                            1, int(getattr(self, "_resident_windows", 2))
+                        ):
                             old = self._recent_windows.pop(0)
                             # Proactively evict; shrink params for old window
                             try:
@@ -269,7 +293,14 @@ class ComputeMixin:
                                 pass
                             if self._profile:
                                 try:
-                                    logger.info("[PROFILE][UNLOAD-WINDOW] node=%s nonce=%s old_layers=%s evicted=%s keep_windows=%s", self.node_id, activation_msg.nonce, old, evicted_cnt, self._resident_windows)
+                                    logger.info(
+                                        "[PROFILE][UNLOAD-WINDOW] node=%s nonce=%s old_layers=%s evicted=%s keep_windows=%s",
+                                        self.node_id,
+                                        activation_msg.nonce,
+                                        old,
+                                        evicted_cnt,
+                                        self._resident_windows,
+                                    )
                                 except Exception:
                                     pass
                 except Exception:
@@ -300,7 +331,11 @@ class ComputeMixin:
 
                 # Boundary reached — directly pass tensor to TX to avoid extra copy/sync
                 t_stage = time.perf_counter()
-                x_cast = x if x.dtype == self._wire_mx_dtype else x.astype(self._wire_mx_dtype)
+                x_cast = (
+                    x
+                    if x.dtype == self._wire_mx_dtype
+                    else x.astype(self._wire_mx_dtype)
+                )
                 try:
                     self._compute_busy.clear()
                 except Exception:
@@ -327,7 +362,10 @@ class ComputeMixin:
 
                 # Create and enqueue output message: either forward activations or finalize on end role
                 nxt = last_layer + 1
-                if nxt >= self.model_metadata.num_layers and getattr(self, "role", "inter") == "end":
+                if (
+                    nxt >= self.model_metadata.num_layers
+                    and getattr(self, "role", "inter") == "end"
+                ):
                     # End-shard head+sampling inline; return only token to API
                     try:
                         with self._mlx_lock:
@@ -379,14 +417,18 @@ class ComputeMixin:
                 try:
                     loop = getattr(self, "_loop", None)
                     if loop is not None:
-                        fut = asyncio.run_coroutine_threadsafe(self.activation_computed_queue.put(output_msg), loop)
+                        fut = asyncio.run_coroutine_threadsafe(
+                            self.activation_computed_queue.put(output_msg), loop
+                        )
                         fut.result(timeout=10)
                     else:
                         # Fallback: try immediate put_nowait via a temporary loop context
                         # (should not happen in practice)
                         raise RuntimeError("Event loop not available for TX queue")
                 except Exception as e:
-                    logger.error("Failed to queue computed activation for sending: %s", e)
+                    logger.error(
+                        "Failed to queue computed activation for sending: %s", e
+                    )
                     # nothing to release when using direct tensor path
 
                 # Clean up input resources
@@ -412,7 +454,9 @@ class ComputeMixin:
                 # Optional unload/evict after stage
                 if getattr(self, "_defer_unload", False):
                     try:
-                        while len(self._recent_windows) > max(1, int(getattr(self, "_resident_windows", 2))):
+                        while len(self._recent_windows) > max(
+                            1, int(getattr(self, "_resident_windows", 2))
+                        ):
                             old = self._recent_windows.pop(0)
                             try:
                                 evicted_cnt = self.weight_cache.evict_layers(old)

@@ -9,7 +9,7 @@ from ...protos import shard_api_comm_pb2_grpc as pb2_grpc
 from ...utils.logger import logger
 
 if TYPE_CHECKING:
-    from .node import RingApiNode
+    pass
 
 
 class ShardApiServicer(pb2_grpc.ShardApiServiceServicer):
@@ -19,7 +19,9 @@ class ShardApiServicer(pb2_grpc.ShardApiServiceServicer):
         # api_node: RingApiNode
         self.api_node = api_node
 
-    async def SendToken(self, request: pb2.TokenRequest, context: grpc.aio.ServicerContext):  # type: ignore[override]
+    async def SendToken(
+        self, request: pb2.TokenRequest, context: grpc.aio.ServicerContext
+    ):  # type: ignore[override]
         try:
             nonce = request.nonce
             token_id = int(request.token_id)

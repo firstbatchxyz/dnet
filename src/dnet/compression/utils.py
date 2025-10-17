@@ -3,8 +3,10 @@ from __future__ import annotations
 from typing import Optional, Tuple
 import mlx.core as mx
 
+
 def _u32(vals):
     return mx.array(vals, dtype=mx.uint32)
+
 
 def infer_groups_and_gsize(
     D: int, group_size: int, scales: Optional[mx.array], biases: Optional[mx.array]

@@ -1,4 +1,5 @@
 """Model metadata and weight loading utilities for dnet."""
+
 import os
 import ctypes
 import glob
@@ -201,7 +202,9 @@ def load_weight(wt: TensorInfo, mapped_files: Dict[str, MappedFile]) -> mx.array
         if fd >= 0:
             try:
                 try:
-                    fcntl.fcntl(fd, fcntl.F_NOCACHE, 1)  # macOS advisory: don't add to cache
+                    fcntl.fcntl(
+                        fd, fcntl.F_NOCACHE, 1
+                    )  # macOS advisory: don't add to cache
                 except Exception:
                     pass
                 try:
@@ -226,7 +229,9 @@ def load_weight(wt: TensorInfo, mapped_files: Dict[str, MappedFile]) -> mx.array
     # Special handling for BF16
     if wt.dtype == "BF16":
         # BF16 needs special handling - read as uint16 and convert
-        uint16_data = np.frombuffer(layer_data, dtype=np.uint16) # FIXME: reference before assignment
+        uint16_data = np.frombuffer(
+            layer_data, dtype=np.uint16
+        )  # FIXME: reference before assignment
         float32_data = (uint16_data.astype(np.uint32) << 16).view(np.float32)
         return mx.array(float32_data).reshape(wt.shape).astype(mx.bfloat16)
     else:
@@ -269,7 +274,11 @@ def load_api_layer_weights(model_metadata: ModelMetadata, model: BaseRingModel):
         else:
             # Dense path: only load if shape matches or transpose
             w_info = model_metadata.lm_head.get("weight")
-            if w_info is not None and hidden_size is not None and vocab_size is not None:
+            if (
+                w_info is not None
+                and hidden_size is not None
+                and vocab_size is not None
+            ):
                 w_arr = load_weight(w_info, mapped_files)
                 shp = tuple(w_arr.shape)
                 if shp == (hidden_size, vocab_size):
@@ -281,10 +290,15 @@ def load_api_layer_weights(model_metadata: ModelMetadata, model: BaseRingModel):
                     logger.info("Loaded transposed dense lm_head.weight for API")
                     loaded_head = True
                 else:
-                    logger.warning("Skipping lm_head.weight with incompatible shape %s; will use tied projection if configured.", shp)
+                    logger.warning(
+                        "Skipping lm_head.weight with incompatible shape %s; will use tied projection if configured.",
+                        shp,
+                    )
             else:
                 if w_info is None:
-                    logger.info("No lm_head.weight found; will use tied projection if applicable")
+                    logger.info(
+                        "No lm_head.weight found; will use tied projection if applicable"
+                    )
 
         # If we couldn't load any head and model supports fallback, force tied projection
         if not loaded_head and hasattr(model, "force_tied_head"):
@@ -301,7 +315,7 @@ def load_api_layer_weights(model_metadata: ModelMetadata, model: BaseRingModel):
         for mapped_file in mapped_files.values():
             mapped_file.mmap.close()
             mapped_file.file.close()
-            
+
 
 def get_safetensor_details(path) -> Dict[str, TensorInfo]:
     with open(path, "rb") as f:
@@ -384,6 +398,7 @@ def get_model_metadata(model_path) -> ModelMetadata:
 
     return ModelMetadata(path, weight_info, embed_tokens, lm_head, norm, config)
 
+
 def make_cache(model: BaseRingModel):
     """Create model KV cache with optional quantization.
 
@@ -425,16 +440,23 @@ def make_cache(model: BaseRingModel):
                     converted.append(qc)
                     converted_any = True
                 except Exception as e:
-                    logger.warning("KV quantization failed for one cache entry: %s; using fp16 entry", e)
+                    logger.warning(
+                        "KV quantization failed for one cache entry: %s; using fp16 entry",
+                        e,
+                    )
                     converted.append(c)
             else:
                 converted.append(c)
 
         if converted_any:
-            logger.info("Enabled quantized KV cache: bits=%s, group_size=%s", bits, group)
+            logger.info(
+                "Enabled quantized KV cache: bits=%s, group_size=%s", bits, group
+            )
             return converted
         else:
-            logger.info("KV quantization requested but not supported by cache type; using fp16 KV cache")
+            logger.info(
+                "KV quantization requested but not supported by cache type; using fp16 KV cache"
+            )
             return caches
 
     # Default fp16/unquantized cache

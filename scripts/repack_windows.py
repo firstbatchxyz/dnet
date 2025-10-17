@@ -32,10 +32,14 @@ LAYER_RE = re.compile(r"^model\.layers\.(\d+)\.")
 
 
 def chunk_layers(layer_list: List[int], window_size: int) -> List[List[int]]:
-    return [layer_list[i : i + window_size] for i in range(0, len(layer_list), window_size)]
+    return [
+        layer_list[i : i + window_size] for i in range(0, len(layer_list), window_size)
+    ]
 
 
-def repack_windows(model_dir: Path, chunks: List[List[int]], out_prefix: Path) -> List[Path]:
+def repack_windows(
+    model_dir: Path, chunks: List[List[int]], out_prefix: Path
+) -> List[Path]:
     # Resolve model and use metadata + memory mapping to load only needed tensors
     md = get_model_metadata(str(model_dir))
     mapped_files: Dict[str, MappedFile] = {}
@@ -86,9 +90,22 @@ def repack_windows(model_dir: Path, chunks: List[List[int]], out_prefix: Path) -
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model-dir", required=True, help="Model directory or HF repo id (resolved like runtime)")
-    ap.add_argument("--layers", required=True, help="Single Python list of layer indices (e.g., '[0,1,2,...]')")
-    ap.add_argument("--window-size", type=int, required=True, help="Chunk size for the provided list of layers")
+    ap.add_argument(
+        "--model-dir",
+        required=True,
+        help="Model directory or HF repo id (resolved like runtime)",
+    )
+    ap.add_argument(
+        "--layers",
+        required=True,
+        help="Single Python list of layer indices (e.g., '[0,1,2,...]')",
+    )
+    ap.add_argument(
+        "--window-size",
+        type=int,
+        required=True,
+        help="Chunk size for the provided list of layers",
+    )
     ap.add_argument("--out-prefix", required=True, help="Prefix for output files")
     args = ap.parse_args()
 

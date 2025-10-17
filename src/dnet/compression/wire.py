@@ -7,7 +7,6 @@ import numpy as np
 import mlx.core as mx
 
 from .ops import (
-    column_sparsify_tensor,
     _compute_norms_fp32,
     _compute_norms_quant_int8,
     _select_k_smallest_indices,

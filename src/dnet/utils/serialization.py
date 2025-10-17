@@ -1,4 +1,5 @@
 """Tensor serialization utilities for dnet."""
+
 import mlx.core as mx
 import numpy as np
 
@@ -26,55 +27,66 @@ ALIASES = {
 
 NP_MAP_BASE = {
     "bfloat16": (NP_BF16 or np.uint16),  # fallback keeps size=2
-    "float16":  np.float16,
-    "float32":  np.float32,
-    "float64":  np.float64,
-    "int8":     np.int8,
-    "int16":    np.int16,
-    "int32":    np.int32,
-    "int64":    np.int64,
-    "uint8":    np.uint8,
-    "uint16":   np.uint16,
-    "uint32":   np.uint32,
-    "uint64":   np.uint64,
-    "bool":     np.bool_,
+    "float16": np.float16,
+    "float32": np.float32,
+    "float64": np.float64,
+    "int8": np.int8,
+    "int16": np.int16,
+    "int32": np.int32,
+    "int64": np.int64,
+    "uint8": np.uint8,
+    "uint16": np.uint16,
+    "uint32": np.uint32,
+    "uint64": np.uint64,
+    "bool": np.bool_,
 }
 
 MX_MAP = {
     "bfloat16": mx.bfloat16,
-    "float16":  mx.float16,
-    "float32":  mx.float32,
-    "float64":  mx.float64,
-    "int8":     mx.int8,
-    "int16":    mx.int16,
-    "int32":    mx.int32,
-    "int64":    mx.int64,
-    "uint8":    mx.uint8,
-    "uint16":   mx.uint16,
-    "uint32":   mx.uint32,
-    "uint64":   mx.uint64,
+    "float16": mx.float16,
+    "float32": mx.float32,
+    "float64": mx.float64,
+    "int8": mx.int8,
+    "int16": mx.int16,
+    "int32": mx.int32,
+    "int64": mx.int64,
+    "uint8": mx.uint8,
+    "uint16": mx.uint16,
+    "uint32": mx.uint32,
+    "uint64": mx.uint64,
 }
+
 
 def _canon(s: str) -> str:
     s = (s or "").strip()
-    if s in NP_MAP_BASE: return s
-    for k, al in ALIASES.items():
-        if s == k or s in al: return k
+    if s in NP_MAP_BASE:
+        return s
+    for kn, al in ALIASES.items():
+        if s == kn or s in al:
+            return kn
     return s
+
 
 dtype_map = {}
 for k, npdt in NP_MAP_BASE.items():
     dtype_map[k] = npdt
-    for a in ALIASES[k]: dtype_map[a] = npdt
+    for a in ALIASES[k]:
+        dtype_map[a] = npdt
 
 safetensor_dtype_map = {
     "BOOL": np.bool_,
-    "U8": np.uint8, "I8": np.int8,
-    "I16": np.int16, "I32": np.int32, "I64": np.int64,
-    "U16": np.uint16, "U32": np.uint32, "U64": np.uint64,
+    "U8": np.uint8,
+    "I8": np.int8,
+    "I16": np.int16,
+    "I32": np.int32,
+    "I64": np.int64,
+    "U16": np.uint16,
+    "U32": np.uint32,
+    "U64": np.uint64,
     "F16": np.float16,
     "BF16": (NP_BF16 or np.uint16),  # keep width if no bfloat16
-    "F32": np.float32, "F64": np.float64,
+    "F32": np.float32,
+    "F64": np.float64,
 }
 
 mlx_dtype_map = {}
@@ -84,11 +96,13 @@ for k, mxdt in MX_MAP.items():
         if a.islower() or a.startswith("mlx.core."):
             mlx_dtype_map[a] = mxdt
 
+
 def tensor_to_bytes(tensor: mx.array) -> bytes:
     """
     Serialize MLX tensor to raw bytes.
     """
     return bytes(memoryview(tensor))
+
 
 def bytes_to_tensor(byte_data: bytes, dtype_str: str) -> mx.array:
     """

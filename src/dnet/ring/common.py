@@ -13,9 +13,7 @@ class LayerAssignment(BaseModel):
     next_service: Optional[str] = Field(
         None, description="Next node service name in ring (null if connects to API)"
     )
-    window_size: int = Field(
-        ..., description="Prefetch window size for this device"
-    )
+    window_size: int = Field(..., description="Prefetch window size for this device")
 
 
 class TopologyInfo(BaseModel):

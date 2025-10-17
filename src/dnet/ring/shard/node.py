@@ -1,5 +1,5 @@
 """Ring shard node implementation with dynamic model loading."""
-import os
+
 import asyncio
 import threading
 import time
@@ -13,10 +13,7 @@ import numpy as np
 from fastapi import FastAPI
 from grpc import aio as aio_grpc
 
-from dnet_p2p import (
-    DnetP2P,
-    DnetDeviceProperties
-)
+from dnet_p2p import DnetP2P, DnetDeviceProperties
 
 from .models import (
     ShardLoadModelRequest,
@@ -131,7 +128,9 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
 
         # Prefetch IO and touches
         self._file_io_direct = bool(self.config.file_io_direct)
-        self._prefetch_touch_mode = (self.config.prefetch_touch or "none").strip().lower()
+        self._prefetch_touch_mode = (
+            (self.config.prefetch_touch or "none").strip().lower()
+        )
         self._prefetch_async = bool(self.config.prefetch_async)
         self._prefetch_fraction = float(self.config.prefetch_fraction)
         self._prefetch_budget_ms = float(self.config.prefetch_budget_ms)
@@ -139,15 +138,19 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
         # Queues for async processing
         self.activation_recv_queue: Queue[ActivationMessage] = Queue(maxsize=queue_size)
         self.weight_prefetch_queue: Queue[int] = Queue(maxsize=50)
-        self.activation_computed_queue: asyncio.Queue[ActivationMessage] = asyncio.Queue(
+        self.activation_computed_queue: asyncio.Queue[ActivationMessage] = (
+            asyncio.Queue(maxsize=queue_size)
+        )
+        self.ingress_q: asyncio.Queue[dnet_ring_pb2.ActivationRequest] = asyncio.Queue(
             maxsize=queue_size
         )
-        self.ingress_q: asyncio.Queue[dnet_ring_pb2.ActivationRequest] = asyncio.Queue(maxsize=queue_size)
 
         # Threading
         self.compute_thread: Optional[threading.Thread] = None
         self.running = False
-        self.executor = ThreadPoolExecutor(max_workers=int(self._device_prefetch_workers or 4))
+        self.executor = ThreadPoolExecutor(
+            max_workers=int(self._device_prefetch_workers or 4)
+        )
         self._active_nonce: Optional[str] = None
         self._bound_versions: Dict[int, int] = {}
 
@@ -189,11 +192,14 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
         self._kv_last_seen: Dict[str, float] = {}
         self._kv_ttl_s: float = max(1.0, float(self.config.kv_ttl_s))
 
-        logger.info("Shard node %s initialized with queue_size=%d", self.node_id, self.queue_size)
+        logger.info(
+            "Shard node %s initialized with queue_size=%d",
+            self.node_id,
+            self.queue_size,
+        )
 
     async def load_model(self, req: ShardLoadModelRequest) -> ShardLoadModelResponse:
-        """Load model with specified layers.
-        """
+        """Load model with specified layers."""
         try:
             start_time = time.perf_counter()
 
@@ -203,7 +209,10 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
                 and self.model_path == req.model_path
                 and self.assigned_layers == req.layers
             ):
-                logger.info("Node %s: Model already loaded with same configuration", self.node_id)
+                logger.info(
+                    "Node %s: Model already loaded with same configuration",
+                    self.node_id,
+                )
                 return ShardLoadModelResponse(
                     success=True,
                     message="Model already loaded",
@@ -215,7 +224,10 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
             if self.model is not None and (
                 self.model_path != req.model_path or self.assigned_layers != req.layers
             ):
-                logger.info("Node %s: Unloading current model to load new configuration", self.node_id)
+                logger.info(
+                    "Node %s: Unloading current model to load new configuration",
+                    self.node_id,
+                )
                 await self.unload_model()
 
             # Load model metadata
@@ -291,7 +303,9 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
                     load_api_layer_weights(self.model_metadata, self.model)
                     logger.info("Loaded API-layer weights on shard role=%s", self.role)
             except Exception as e:
-                logger.warning("Failed to load API-layer weights on role=%s: %s", self.role, e)
+                logger.warning(
+                    "Failed to load API-layer weights on role=%s: %s", self.role, e
+                )
 
             # Reset prefetch tracking
             self._prefetch_scheduled = set()
@@ -326,13 +340,13 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
                     # Fall back to direct call if executor is unavailable
                     self._warmup_shard()
 
-            #TODO: Make sure this is the right spot for prefetching
+            # TODO: Make sure this is the right spot for prefetching
             initial_window = self._assigned_sorted[: self.window_size]
             if not (self._warmup_completed and self._warmup_keep_flag):
                 for lyr in initial_window:
                     self._prefetch_to_ram(lyr)
                     self._enqueue_weight_prefetch(lyr)
-            
+
             m = len(self._assigned_sorted)
             if m > 0:
                 if m % self.window_size != 0:
@@ -344,7 +358,12 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
                     )
                 else:
                     k = m // self.window_size
-                    logger.info("Windowed prefetch: m=%s, w=%s, k=%s rounds per token", m, self.window_size, k)
+                    logger.info(
+                        "Windowed prefetch: m=%s, w=%s, k=%s rounds per token",
+                        m,
+                        self.window_size,
+                        k,
+                    )
 
             load_time_ms = (time.perf_counter() - start_time) * 1000.0
             logger.info(
@@ -352,7 +371,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
                 self.node_id,
                 req.model_path,
                 req.layers,
-                load_time_ms
+                load_time_ms,
             )
 
             return ShardLoadModelResponse(
@@ -440,7 +459,9 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
     async def reset_cache(self) -> None:
         """Reset LLM KV cache."""
         if not self._check_model_loaded():
-            logger.warning("Node %s: Cannot reset cache - no model loaded", self.node_id)
+            logger.warning(
+                "Node %s: Cannot reset cache - no model loaded", self.node_id
+            )
             return
 
         try:
@@ -484,7 +505,9 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
             if target_layer in self._assigned_set:
                 # First-hop prefetch on cold start for this nonce
                 if getattr(self, "_prefetch_init_nonce", None) != request.nonce:
-                    next_locals = self._next_local_layers(target_layer, self.window_size - 1)
+                    next_locals = self._next_local_layers(
+                        target_layer, self.window_size - 1
+                    )
                     window_layers = [target_layer] + next_locals
                     for wl in window_layers:
                         self._prefetch_to_ram(wl)
@@ -501,7 +524,9 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
                             dtype_with_metadata=activation.dtype,
                         )
                     except Exception as e:
-                        logger.error("Decompression failed for nonce %s: %s", request.nonce, e)
+                        logger.error(
+                            "Decompression failed for nonce %s: %s", request.nonce, e
+                        )
                         return
 
                     pool_id = self.input_pool.allocate_for_layer(
@@ -510,7 +535,10 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
                         shape=cast(tuple[int, ...], tuple(deq.shape)),
                     )
                     if pool_id is None:
-                        logger.warning("Failed to allocate input pool buffer for nonce %s", request.nonce)
+                        logger.warning(
+                            "Failed to allocate input pool buffer for nonce %s",
+                            request.nonce,
+                        )
                         return
                     buffer = self.input_pool.get_buffer(pool_id)
                     if buffer is not None:
@@ -532,10 +560,16 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
                     # Special token stream support: dtype='tokens' carries int32 token IDs
                     if activation.dtype == "tokens":
                         try:
-                            tokens = np.frombuffer(request.activation.data, dtype=np.int32)
+                            tokens = np.frombuffer(
+                                request.activation.data, dtype=np.int32
+                            )
                             shp = (int(len(tokens)),)
                         except Exception as e:
-                            logger.error("Failed to parse tokens for nonce %s: %s", request.nonce, e)
+                            logger.error(
+                                "Failed to parse tokens for nonce %s: %s",
+                                request.nonce,
+                                e,
+                            )
                             return
                         pool_id = self.input_pool.allocate_for_layer(
                             layer_id=activation.layer_id,
@@ -543,7 +577,10 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
                             shape=cast(tuple[int, ...], shp),
                         )
                         if pool_id is None:
-                            logger.warning("Failed to allocate input pool buffer for nonce %s", request.nonce)
+                            logger.warning(
+                                "Failed to allocate input pool buffer for nonce %s",
+                                request.nonce,
+                            )
                             return
                         buffer = self.input_pool.get_buffer(pool_id)
                         if buffer is not None:
@@ -563,7 +600,10 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
                     else:
                         # Safety: byte length must match shape*dtype
                         try:
-                            expected = int(np.prod(activation.shape)) * np.dtype(dtype_map[activation.dtype]).itemsize
+                            expected = (
+                                int(np.prod(activation.shape))
+                                * np.dtype(dtype_map[activation.dtype]).itemsize
+                            )
                             actual = len(request.activation.data)
                         except Exception:
                             expected = -1
@@ -585,12 +625,17 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
                             shape=cast(tuple[int, ...], activation.shape),
                         )
                         if pool_id is None:
-                            logger.warning("Failed to allocate input pool buffer for nonce %s", request.nonce)
+                            logger.warning(
+                                "Failed to allocate input pool buffer for nonce %s",
+                                request.nonce,
+                            )
                             return
                         buffer = self.input_pool.get_buffer(pool_id)
                         if buffer is not None:
                             data = request.activation.data
-                            input_data = np.frombuffer(data, dtype=dtype_map[activation.dtype])
+                            input_data = np.frombuffer(
+                                data, dtype=dtype_map[activation.dtype]
+                            )
                             buffer[: len(input_data)] = input_data
                             alloc_copy_ms = (time.perf_counter() - t_alloc) * 1000.0
                             logger.info(
@@ -610,12 +655,18 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
                 while self.running:
                     try:
                         self.activation_recv_queue.put_nowait(activation_msg)
-                        logger.debug("Queued activation for processing: nonce %s", activation_msg.nonce)
+                        logger.debug(
+                            "Queued activation for processing: nonce %s",
+                            activation_msg.nonce,
+                        )
                         break
                     except Full:
                         await asyncio.sleep(0)
                 else:
-                    logger.error("Failed to queue activation %s (node stopping)", activation_msg.nonce)
+                    logger.error(
+                        "Failed to queue activation %s (node stopping)",
+                        activation_msg.nonce,
+                    )
                     self.input_pool.release(pool_id)
             else:
                 # Forward to next node (not our layer)
@@ -631,7 +682,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
 
     async def admit_frame(self, request: dnet_ring_pb2.ActivationRequest) -> None:
         """
-        Lightweight admission for streaming: 
+        Lightweight admission for streaming:
         enqueue protobuf frame to ingress queue, then return.
         """
         while self.running:
@@ -675,7 +726,6 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
                     transport_ms,
                     (payload_bytes / 1024.0),
                 )
-                
 
                 # Detect new sequence per node: initialize per-nonce KV; keep prefetch state per nonce
                 if req.nonce != self._active_nonce:
@@ -689,7 +739,9 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
                 if target_layer in self._assigned_set:
                     # First-hop prefetch on cold start for this nonce
                     if getattr(self, "_prefetch_init_nonce", None) != req.nonce:
-                        next_locals = self._next_local_layers(target_layer, self.window_size - 1)
+                        next_locals = self._next_local_layers(
+                            target_layer, self.window_size - 1
+                        )
                         window_layers = [target_layer] + next_locals
                         for wl in window_layers:
                             self._prefetch_to_ram(wl)
@@ -700,10 +752,14 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
                     loop = asyncio.get_running_loop()
                     try:
                         activation_msg = await loop.run_in_executor(
-                            self.executor, self._prepare_activation_message_blocking, req
+                            self.executor,
+                            self._prepare_activation_message_blocking,
+                            req,
                         )
                     except Exception as e:
-                        logger.error("Activation prepare failed for nonce %s: %s", req.nonce, e)
+                        logger.error(
+                            "Activation prepare failed for nonce %s: %s", req.nonce, e
+                        )
                         continue
                     if activation_msg is None:
                         continue
@@ -714,12 +770,18 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
                     while self.running:
                         try:
                             self.activation_recv_queue.put_nowait(activation_msg)
-                            logger.debug("Queued activation for processing: nonce %s", activation_msg.nonce)
+                            logger.debug(
+                                "Queued activation for processing: nonce %s",
+                                activation_msg.nonce,
+                            )
                             break
                         except Full:
                             await asyncio.sleep(0)
                     else:
-                        logger.error("Failed to queue activation %s (node stopping)", activation_msg.nonce)
+                        logger.error(
+                            "Failed to queue activation %s (node stopping)",
+                            activation_msg.nonce,
+                        )
                         try:
                             self.input_pool.release(activation_msg.pool_id)
                         except Exception:
@@ -784,7 +846,9 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
                         dtype_with_metadata=activation.dtype,
                     )
                 except Exception as e:
-                    logger.error("Decompression failed for nonce %s: %s", request.nonce, e)
+                    logger.error(
+                        "Decompression failed for nonce %s: %s", request.nonce, e
+                    )
                     return None
 
                 pool_id = self.input_pool.allocate_for_layer(
@@ -793,7 +857,10 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
                     shape=cast(tuple[int, ...], tuple(deq.shape)),
                 )
                 if pool_id is None:
-                    logger.warning("Failed to allocate input pool buffer for nonce %s", request.nonce)
+                    logger.warning(
+                        "Failed to allocate input pool buffer for nonce %s",
+                        request.nonce,
+                    )
                     return None
                 buffer = self.input_pool.get_buffer(pool_id)
                 if buffer is not None:
@@ -811,7 +878,9 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
                     tokens = np.frombuffer(activation.data, dtype=np.int32)
                     shp = (int(len(tokens)),)
                 except Exception as e:
-                    logger.error("Failed to parse tokens for nonce %s: %s", request.nonce, e)
+                    logger.error(
+                        "Failed to parse tokens for nonce %s: %s", request.nonce, e
+                    )
                     return None
                 pool_id = self.input_pool.allocate_for_layer(
                     layer_id=activation.layer_id,
@@ -819,7 +888,10 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
                     shape=cast(tuple[int, ...], shp),
                 )
                 if pool_id is None:
-                    logger.warning("Failed to allocate input pool buffer for nonce %s", request.nonce)
+                    logger.warning(
+                        "Failed to allocate input pool buffer for nonce %s",
+                        request.nonce,
+                    )
                     return None
                 buffer = self.input_pool.get_buffer(pool_id)
                 if buffer is not None:
@@ -831,7 +903,10 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
             else:
                 # Dense path: validate size and copy raw bytes view into pool buffer
                 try:
-                    expected = int(np.prod(activation.shape)) * np.dtype(dtype_map[activation.dtype]).itemsize
+                    expected = (
+                        int(np.prod(activation.shape))
+                        * np.dtype(dtype_map[activation.dtype]).itemsize
+                    )
                     actual = len(activation.data)
                 except Exception:
                     expected = -1
@@ -853,7 +928,10 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
                     shape=cast(tuple[int, ...], activation.shape),
                 )
                 if pool_id is None:
-                    logger.warning("Failed to allocate input pool buffer for nonce %s", request.nonce)
+                    logger.warning(
+                        "Failed to allocate input pool buffer for nonce %s",
+                        request.nonce,
+                    )
                     return None
                 buffer = self.input_pool.get_buffer(pool_id)
                 if buffer is not None:
@@ -922,7 +1000,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
         # Terminate compute thread
         if self.compute_thread:
             self.compute_thread.join(timeout=5)
-        
+
         try:
             self.executor.shutdown(wait=False, cancel_futures=True)
         except Exception:

@@ -132,7 +132,12 @@ class ShardServicer(DnetRingServiceServicer):
                 if frame.end_of_request:
                     # Acknowledge end-of-request with the last seen nonce (if any)
                     try:
-                        yield pb2.StreamAck(nonce=frame.request.nonce, seq=frame.seq, accepted=True, message="eor")
+                        yield pb2.StreamAck(
+                            nonce=frame.request.nonce,
+                            seq=frame.seq,
+                            accepted=True,
+                            message="eor",
+                        )
                     except Exception:
                         pass
                     # You can choose break (close stream) or continue (keep stream alive)
@@ -142,10 +147,10 @@ class ShardServicer(DnetRingServiceServicer):
                 req = frame.request  # pb2.ActivationRequest
                 if not req.nonce:
                     # If the client sent a frame without a nonce, reject
-                    yield pb2.StreamAck(nonce="", seq=frame.seq, accepted=False, message="missing nonce")
+                    yield pb2.StreamAck(
+                        nonce="", seq=frame.seq, accepted=False, message="missing nonce"
+                    )
                     continue
-
-                last_nonce = req.nonce
 
                 # Lossless server-side flow control: admit to ingress, then ACK
                 await self.node.admit_frame(req)

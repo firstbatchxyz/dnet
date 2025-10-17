@@ -208,7 +208,6 @@ class PrepareTopologyResponse(TopologyInfo):
     pass
 
 
-
 class ManualDevice(BaseModel):
     """Manual device specification for topology (no discovery)."""
 
@@ -231,8 +230,10 @@ class PrepareTopologyManualRequest(BaseModel):
         ..., description="Layer assignments per device (rounds or flat)"
     )
     num_layers: Optional[int] = Field(
-        default=None, description="Total number of layers (optional; inferred if missing)"
+        default=None,
+        description="Total number of layers (optional; inferred if missing)",
     )
+
 
 class APILoadModelRequest(BaseModel):
     """Request to load model with prepared topology.

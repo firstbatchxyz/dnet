@@ -5,17 +5,22 @@ import cmd
 import argparse
 import subprocess
 from dataclasses import dataclass
+from typing import Optional, List, Any
 
-from src.ring.api import run as run_api_node
-from src.ring.shard import run as run_shard_node
-from src.util import (
-  ModelMetadata,
-  NodeAddress,
-  logger,
-  get_model_metadata,
+import asyncio
+import inspect
+import threading
+import concurrent.futures  
+
+from dnet.ring.api import RingApiNode 
+from dnet.ring.shard import RingShardNode 
+from dnet.utils.network import NodeAddress
+from dnet.utils.logger import logger
+from dnet.utils.model import ( 
+  ModelMetadata, 
+  get_model_metadata, 
   load_api_layer_weights,
   get_safetensor_details,
-  create_generate_step_for_ring_with_grpc,
 )
 
 # Handle restricted repos
@@ -29,12 +34,10 @@ except ModuleNotFoundError:
 GatedRepoError = getattr(hf_errors, "GatedRepoError", Exception)
 HfHubHTTPError = getattr(hf_errors, "HfHubHTTPError", Exception)
 
-from src.ring.api_node import RingApiNode
 
 def dprint(msg):
   sys.stdout.write(msg) 
   sys.stdout.flush()
-
 
 @dataclass
 class REPLState:
@@ -43,96 +46,175 @@ class REPLState:
   num_local_nodes: int = 1
   running_port = 50501
   running_httpport = 8091 
-  api_addr_host: str = "10.0.0.2" # TODO: Don't hardcode
-  api_addr_port: int = 0 
-  grpc_listen_port:int = 0 
+  api_http_port: int = 8080 
+  api_grpc_port: int = 50500 
   window_size = 2          # Number of layers per node per visit (also number resident in cache)
 
-class REPL(cmd.Cmd):
 
+class REPL(cmd.Cmd):
   PS1 = "dnet > "
-  WELCOME = "\nDNET Distributed Inference Engine, v0.1\nExperimental software. Enter '.help' for usage hints.\n\n"
+  WELCOME = "\nDNET Distributed Inference Engine, v0.1\nExperimental software. Type 'help' for usage hints.\n\n"
+
   def __init__(self, model="NULL", nodes=1):
+    assert nodes >= 1 and nodes < 10, "Invalid number of local nodes. Must be 0 < num < 10."
+
     super().__init__()
     self.state = REPLState()
     self.state.model = model
-
-    self.state.api_addr_port = self.state.running_port
-    self.state.grpc_listening_port = self.state.running_port + 1 
     self.state.running_port += 2
-    self.discovery = None
-
-    # TODO: Maybe have a 'start search' 'stop search' cmds to manage discovery
-
-    self.api = None
-    #self.config_api_node()
-    #self.start_api_discovery()
-
-    assert nodes >= 1 and nodes < 10, "Invalid number of local nodes. Must be 0 < num < 10."
     self.state.num_local_nodes = nodes
 
-  def loop(self):
-    self.greeting()
+    self._node: Optional[RingApiNode] = None
+    self._api_thread: Optional[threading.Thread] = None 
+    self._api_ready = threading.Event()
+    self._api_running = threading.Event()
+    self._api_loop: Optional[asyncio.AbstractEventLoop] = None
+    self._api_shutdown_e: Optional[asyncio.Event] = None
+    self._api_exc: Optional[BaseException] = None
+
+    self._api_searching = threading.Event() # Track mDNS searching 
+
+  def loop(self): # Main tty loop
+    sys.stdout.write(self.WELCOME) 
     while True:
-
-      #if self.state.model == "NULL":
-      #  self.prompt_model()
-      #  continue
-
       dprint(self.PS1)
       cmd = sys.stdin.readline().strip() 
 
       if cmd == "":
         self.print_state()
-      if cmd in [".exit", "exit", "quit", "q"]:
+      elif cmd in [".exit", "exit", "quit", "q"]:
         self.handle_terminate_signal()
-      if cmd in [".help", "help", "h"]:
+      elif cmd in [".help", "help", "h"]:
         self.print_help()
-      if cmd.startswith((".model", "model", "m")):
+
+      elif cmd.startswith(("api", ".api")):
+        self.do_api(cmd.split(" "))
+        continue
+      elif cmd.startswith("search"):
+        self.do_search(cmd.split(" "))
+        continue
+      elif cmd.startswith("nodes"):
+        self.print_mdns_nodes()
+        continue
+      elif cmd.startswith(("topo", ".topo")):
+        self.do_topo(cmd.split(" "))
+        continue
+      elif cmd.startswith((".model", "model", "m")):
         cmd.split(" ")
         path = self._handle_model_pull(cmd[1])
         if path:
           self.state.model = path
+  
+  def do_api(self, cmd: List[str]) -> None:
+    if len(cmd) < 2:
+      dprint("Invalid API command. Type 'help' for a list of valid commands.\n")
+      return 
+    if cmd[1] in ["start", "run"]:
+      http_port, grpc_port = None, None
+      try:
+        http_port = cmd[2];
+        grpc_port = cmd[3]
+      except:
+        pass
+      self.start_api(
+        http_port or self.state.api_http_port,
+        grpc_port or self.state.api_grpc_port
+      )
+    elif cmd[1] == "stop":
+      self.stop_api()
+    elif cmd[1] == "status":
+      dprint("Running\n" if self._api_running else "Stopped.\n") 
+    elif cmd[1] == "log":
+      dprint("Log print is not yet supported.\n")
+    else:
+      dprint("Invalid API command. Type 'help' for a list of valid commands.\n")
+    return
 
-  def greeting(self):
-    sys.stdout.write(self.WELCOME) 
+  def do_search(self, cmd: List[str]) -> None:
+    if len(cmd) != 2:
+      dprint("mDNS search is " + ("ON\n\n" if self._api_searching else "OFF\n\n"))
+      return 
+    if cmd[1] == "on":
+      if self._api_searching:
+        return
+      if not self._api_ready and self._api_running:
+        dprint("Starting API Server thread.\n")
+        self.start_api()
+      self.api_call("_start_discovery", timeout=10)
+      self._api_searching.set()
+      dprint("Starting mDNS search for worker nodes.\n")
+    elif cmd[1] == "off":
+      dprint("Stop discovery not yet implemented in the API node.\n")
+      pass
+    else:
+      dprint("Invalid topology command. Start searchign with 'search on'.\n")
+    return 
+    
+  def do_topo(self, cmd: List[str]) -> None:
+    if len(cmd) < 2:
+      dprint("Invalid topology command. Type 'help' for a list of valid commands.\n")
+      return 
+    if cmd[1] == "search":
+      pass
+    elif cmd[1] == "auto":
+      pass
+    elif cmd[1] == "setup":
+      pass
+    elif cmd[1] == "add":
+      pass
+    elif cmd[1] in ["remove", "rm"]:
+      pass
+    return
 
+  # TODO: standardize ANSI escape codes for easy use
   def print_help(self):
     def _print_hf(cmd, desc, examples=[""]):
       pcmd = "    " + cmd.ljust(30, '.')
-      dprint(f"{pcmd} {desc}\n")
+      sys.stdout.write(f"{pcmd} {desc}\n")
       for e in examples:
         pex = e.rjust(len(e)+35)+"\n" if e != "" else ""
-        dprint(f"{pex}")
+        sys.stdout.write(f"{pex}")
 
-    dprint("Command Options:\n")
-    _print_hf("nodes [VALUE]", "Set the number of local worker nodes")
+    sys.stdout.write("\033[1m\nAvailable commands:\n\033[0m")
+    dprint("\033[1m\n    Common:\n\033[0m")
     _print_hf("model [REPO]", "Set the target model. [REPO] must be a valid repository",
               ["Examples  > model meta-llama/Meta-Llama-3-8B"])
-    _print_hf("limit [RESOURCE] [VALUE]", "Set a higher limit for a system resource.",
-              ["Examples  > limit memory 12000 (MB)",
-               "          > limit CPU_CORE_COUNT 4",
-               "          > limit GPU_SM 128"])
+    _print_hf("nodes list ", "List mDNS discovered nodes.")
     _print_hf("log [LEVEL]", "Set the logging level.")
-    dprint("\n    Building a topology:\n")
-    _print_hf("search [ON/OFF]", "Toggle mDNS worker node search across the local network.")
+    dprint("\033[1m\n    API Server Control:\n\033[0m")
+    _print_hf("api start [http_port=8080] [grpc_port=50500]", "Start the API server in a separate thread. Use provided ports if given.")
+    _print_hf("api stop ", "Signal clean shutdown of the API server.")
+    _print_hf("api status ", "Prints the status of the API server.")
+    _print_hf("api log ", "Print latest logs to the current terminal.")
+    dprint("\033[1m\n    Building a topology:\n\033[0m")
+    _print_hf("search ", "Returns the current state of mDNS search.")
+    _print_hf("search [on/off] ", "Toggle mDNS search across the local network.")
+    _print_hf("nodes list ", "List all nodes in the current topology (including local ones).")
+    _print_hf("nodes all ", "List all nodes (including local ones).")
+    _print_hf("nodes ", "List mDNS discovered nodes.")
     _print_hf("topo [AUTO/SETUP]", "Toggle between automatic and manual topology creation.")
     _print_hf("topo add [NODE]", "Add [NODE] to the topology.")
     _print_hf("topo remove [NODE]", "Add [NODE] to the topology.")
-    dprint("\n    Building a schedule:\n")
+    sys.stdout.write("\033[1m\n    Building a schedule:\n\033[0m")
     _print_hf("sched create", "Automatic search for best schedule given the active topology and the loaded model.")
     _print_hf("sched assign [LAYER] [NODE]", "Assign the layer with index [LAYER] to [NODE].",
               ["Example   > sched assign 10 benny_234"])
     _print_hf("schedule assign [START-END] [NODE]", "Assign the layer range between [START] and [END] to [NODE].",
               ["Example   > sched assign 0-12 benny_234"])
-    dprint("\n    Benchmarking and profiling:\n")
+    sys.stdout.write("\033[1m\n    Benchmarking and profiling:\n\033[0m")
     _print_hf("profile [REPO]", "Estimate the total FLOPS of the model from [REPO]")
     _print_hf("bench [REPO]", "Benchmark the system using the model from [REPO]")
     _print_hf("bench [KERNEL]", "Behcnmark the system using base kernel [KERNEL]")
     _print_hf("bench [NODE]", "Behcnmark the network latency between the current system and [NODE]")
     _print_hf("bench [NODE0] [NODE1]", "Behcnmark the network latency between [NODE0] and [NODE11")
     _print_hf("bench ", "Behcnmark the system using base library kernels")
-    dprint("\n")
+    sys.stdout.write("\033[1m\n    System control:\n\033[0m")
+    _print_hf("limit [RESOURCE] [VALUE]", "Set a higher limit for a system resource.",
+              ["Examples  > limit memory 12000 (MB)",
+               "          > limit CPU_CORE_COUNT 4",
+               "          > limit GPU_SM 128"])
+    sys.stdout.write("\n")
+    sys.stdout.flush()
     
   def print_state(self):
     dprint("Network state:\n")
@@ -225,7 +307,10 @@ class REPL(cmd.Cmd):
 
   def handle_terminate_signal(self):
     # Handle worker/api shutdown
-    dprint("No workers to shut down. Terminating.\n")
+    if self._api_running:
+      self.stop_api()
+    else:
+      dprint("No workers to shut down. Terminating.\n")
     sys.exit()
 
   # ===== Handle Shard worker servers 
@@ -246,36 +331,165 @@ class REPL(cmd.Cmd):
 
   # ===== Handle API server
 
-  def handle_device_discovery(self):
-    from socket import gethostname
-    from secrets import token_hex
+  async def _api_main(self) -> None: # main thread loop
+    self._api_loop = asyncio.get_running_loop()
+    self._api_shutdown_e = asyncio.Event()
+    self._node = RingApiNode(
+      http_port=self.state.api_http_port, 
+      grpc_port=self.state.api_grpc_port
+    )
 
-    hostname = gethostname()
-    instance = f"api-{token_hex(4)}-{hostname}"
-    lib = DnetP2P("lib/dnet-p2p/lib")  
+    try:
+      await self._node.start(shutdown_trigger=self._api_shutdown_e.wait)
+      self._api_searching.set()
+      self._api_running.set()
+      self._api_ready.set()
+      await self._api_shutdown_e.wait()
+    except Exception as e:
+      self._api_exc = e
+      self._api_running.set()
+      self._api_ready.set()
+    finally:
+      try:
+        await self._node.shutdown()
+      except Exception:
+        pass
+      self._api_running.clear()
 
-    """
-    self.discovery = lib.create_instance(
-      instance, hostname,
-      self.state.p2p_addr.host, self.state.p2p_addr_port,
-      self.state.grpc_listen_port, is_manager=True 
-    ) 
-    self.discovery.start()
-    """
+  def _api_running_loop(self): 
+    try:
+      asyncio.run(self._api_main())
+    except BaseException as e:
+      self._api_exc = e
+      self._api_ready.set()
+      self._api_running.clear()
 
-  def config_api_node(self):
-    api_address = NodeAddress(self.state.api_addr_host, self.state.api_addr_port)
-    self.api = RingApiNode(api_address, shard_address.format(), model_metadata)
+  def start_api(self, http_port: int=8080, grpc_port: int=50500, timeout=10):
+    if self._api_thread and self._api_thread.is_alive(): return
+    self._api_exc = None
+    self._api_ready.clear()
+    self._api_running.clear()
+    self._api_thread = threading.Thread(target=self._api_running_loop, name="api_server", daemon=True)
+    self._api_thread.start()
+    if not self._api_ready.wait(timeout):
+      raise RuntimeError("API Server Timeout.")
+    if self._api_exc is not None:
+      raise RuntimeError(f"API Server failed to start: {e}")
 
-  def start_api_discovery(self):
-    if self.api:
-      self.api._start_discovery()
+  def stop_api(self, timeout: float = 5.0) -> None:
+    if not self._api_thread: return
+    if self._api_loop and self._api_shutdown_e:
+      self._api_loop.call_soon_threadsafe(self._api_shutdown_e.set)
+    if self._api_loop and self._node:
+      f = asyncio.run_coroutine_threadsafe(self._node.shutdown(), self._api_loop)
+      try:
+        f.result(timeout=timeout)
+      except Exception:
+        pass
+    self._api_thread.join(timeout=timeout)
+    self._api_thread = None
+    self._api_running.clear()
+    self._api_ready.clear()
 
-  # Calls dsolver and optimizes topology
-  async def build_topology(self):
-    if self.api:
-      topo = await self.api.topology()
-      return topo
+  def api_call( # Call an API function from the REPL thread
+    self, 
+    method: str,
+    *args: Any, 
+    timeout: float=30.0, 
+    **kwargs: Any
+  ) -> Any:
+    if not self._api_loop or not self._node:
+      raise RuntimeError("API Thread not set up correctly.")
+
+    target = getattr(self._node, method, None)
+    if target is None:
+      raise AttributeError(f"RingApiNode has no method {method}")
+
+    # method is async 
+    if inspect.iscoroutinefunction(target):
+      coroutine = target(*args, **kwargs)
+      f = asyncio.run_coroutine_threadsafe(coroutine, self._api_loop) 
+      return f.result(timeout)
+
+    # method is sync
+    f = concurrent.futures.Future()
+
+    # TODO: this is a mess lol 
+    def runner():
+      try:
+        ret = target(*args, **kwargs)
+        if inspect.isawaitable(ret):
+
+          async def _await_then_set():
+            try:
+              val = await res
+              f.set_result(val)
+            except BaseException as e:
+              f.set_exception(e)
+            
+          asyncio.create_task(_await_then_set())
+        else:
+          f.set_result(ret)
+      except BaseException as e:
+        f.set_exception(e)
+    self._api_loop.call_soon_threadsafe(runner)
+    return f.result(timeout)
+
+  def _print_nodes_table(self, rows: List[Any]) -> None:
+    headers = ["name", "role", "addr", "http", "grpc", "status", "head"]
+    limits = {"name": 36, "addr": 15}
+    w = {h: max(len(h), min(limits.get(h, 8), max(len(str(r[h])) for r in rows))) for h in headers}
+    line = "  ".join(h.ljust(w[h]) for h in headers)
+    sys.stdout.write("\n")
+    sys.stdout.write(line + "\n")
+    sys.stdout.write("  ".join("-"*w[h] for h in headers))
+    sys.stdout.write("\n")
+    for r in rows:
+      name = str(r["name"])
+      addr = str(r["addr"])
+      if len(name) > w["name"]: name = name[:w["name"]-1] + "..."
+      if len(addr) > w["addr"]: addr = addr[:w["addr"]-1] + "..."
+      vals = {
+        "name": name,
+        "role": r["role"],
+        "addr": addr,
+        "http": r["http"],
+        "grpc": r["grpc"],
+        "status": "yes" if r["status"] else "no",
+        "head": "head" if r["head"] else "no",
+      }
+      sys.stdout.write("  ".join(str(vals[h]).ljust(w[h]) for h in headers))
+    sys.stdout.write("\n\n")
+    sys.stdout.flush()
+      
+
+  # Print a table of discovered nodes 
+  def print_mdns_nodes(self) -> None:
+    try:
+      shards = self.api_call("_get_shards_from_discovery", timeout=10)
+      if not shards:
+        dprint("No worker nodes discovered. Is the API searching?\n")
+        return
+
+      rows = []
+      for name, props in shards.items():
+        addr = getattr(props, "local_ip", getattr(props, "host", ""))
+        http = getattr(props, "server_port", 0)
+        grpc = getattr(props, "shard_port", 0)
+        busy = bool(getattr(props, "is_busy", False))
+        head = bool("127.0.0.1" and "127.0.0.1" == addr) # TODO: FIX
+        rows.append({
+          "name": name,
+          "role": "worker",
+          "addr": addr,
+          "http": http,
+          "grpc": grpc,
+          "status": busy,
+          "head": head,
+        })
+      self._print_nodes_table(rows)
+    except Exception as e:
+      dprint(f"Could not list nodes: {e}\n")
 
   # ===== Handle shutdown 
 

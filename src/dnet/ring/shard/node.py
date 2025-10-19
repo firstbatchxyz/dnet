@@ -62,6 +62,8 @@ from .prefetch import PrefetchMixin
 from .comms import CommsMixin
 from ..weight_cache import WeightCache
 
+from dnet.perf.trace import TraceConfig, Tracer
+
 
 class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
     """Single shard node in the distributed inference ring with dynamic model loading."""
@@ -200,6 +202,19 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         if self._profile:
             logger.info("[PROFILE] enabled on shard node %s", self.node_id)
 
+        # Debug tracing
+        cfg = TraceConfig(
+            file="./trace.json",
+            streaming=True,
+            include_prefixes = ("src/dnet/"),
+            include_c_calls = False,
+            budget = 10000,
+            enabled = True,
+            record_pid_tid = True,
+        )
+        self.tracer = Tracer(cfg) 
+        self.tracer.start()
+
         # Per-nonce KV caches (concurrent requests)
         self._kv_by_nonce: Dict[str, list] = {}
         self._kv_last_seen: Dict[str, float] = {}
@@ -218,11 +233,8 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         )
 
     async def load_model(self, req: ShardLoadModelRequest) -> ShardLoadModelResponse:
-        """Load model with specified layers."""
-        try:
-            start_time = time.perf_counter()
-
-            # Check if already loaded with same configuration
+        """Load model with specified layers.  """
+        try: # Check if already loaded with same configuration
             if (
                 self.model is not None
                 and self.model_path == req.model_path
@@ -240,22 +252,22 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 )
 
             # If model loaded with different config, unload first
-            if self.model is not None and (
-                self.model_path != req.model_path or self.assigned_layers != req.layers
+            if (self.model is not None 
+                and (self.model_path != req.model_path or self.assigned_layers != req.layers)
             ):
-                logger.info(
-                    "Node %s: Unloading current model to load new configuration",
-                    self.node_id,
-                )
-                await self.unload_model()
+                logger.info("Node %s: Unloading current model to load new configuration", self.node_id)
+                with self.tracer.frame("memory", "model.unload"):
+                    await self.unload_model()
 
             # Load model metadata
-            self.model_metadata = get_model_metadata(req.model_path)
+            with self.tracer.frame("memory", "model.load_metadata"):
+                self.model_metadata = get_model_metadata(req.model_path)
             self.assigned_layers = req.layers
             self._assigned_sorted = sorted(self.assigned_layers)
             self._assigned_set = set(self._assigned_sorted)
 
             self.model_path = req.model_path
+
             # Decide mode dynamically from assignment + requested window
             requested_w = int(max(1, int(req.window_size)))
             local_count = max(1, len(self.assigned_layers))
@@ -351,45 +363,49 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             )
 
             # Initialize weight cache
-            self.weight_cache = WeightCache(
-                self.assigned_layers,
-                self.model_metadata,
-                window_size=self.window_size,
-                prefetch_threads=self._prefetch_threads,
-                resident_windows=self._resident_windows,
-                use_mxload_fastpath=self.config.mxload_fastpath,
-                prefetch_mode=self.config.prefetch_mode,
-            )
+            with self.tracer.frame("memory", "weight_cache.init"):
+                self.weight_cache = WeightCache(
+                    self.assigned_layers,
+                    self.model_metadata,
+                    window_size=self.window_size,
+                    prefetch_threads=self._prefetch_threads,
+                    resident_windows=self._resident_windows,
+                    use_mxload_fastpath=self.config.mxload_fastpath,
+                    prefetch_mode=self.config.prefetch_mode,
+                )
 
             # Load the model
-            self.model = get_ring_model(
-                self.model_metadata.model_type,
-                self.model_metadata.model_config,
-                assigned_layers=self.assigned_layers,
-                is_api_layer=False,
-            )
-            try:
-                applied = bool(
-                    self.model.apply_quantization_from_config(  # type: ignore[attr-defined]
-                        self.model_metadata.model_config,
-                        model_metadata=self.model_metadata,
-                    )
-                )
-                logger.info(
-                    "[QUANT] applied=%s for model=%s",
-                    applied,
+            with self.tracer.frame("memory", "model.load"):
+                self.model = get_ring_model(
                     self.model_metadata.model_type,
+                    self.model_metadata.model_config,
+                    assigned_layers=self.assigned_layers,
+                    is_api_layer=False,
                 )
+                try:
+                    applied = bool(
+                        self.model.apply_quantization_from_config(  # type: ignore[attr-defined]
+                            self.model_metadata.model_config,
+                            model_metadata=self.model_metadata,
+                        )
+                    )
+                    logger.info(
+                        "[QUANT] applied=%s for model=%s",
+                        applied,
+                        self.model_metadata.model_type,
+                    )
 
-            except RuntimeError as e:
-                logger.warning("[QUANT] apply failed: %s", e)
-            self.model.eval()
-            self.cache = make_cache(
-                self.model,
-                kv_mode=self.config.kv_cache.mode,
-                kv_bits=self.config.kv_cache.bits,
-                kv_group=self.config.kv_cache.group_size,
-            )
+                except RuntimeError as e:
+                    logger.warning("[QUANT] apply failed: %s", e)
+                self.model.eval()
+
+            with self.tracer.frame("memory", "make_cache"):
+                self.cache = make_cache(
+                    self.model,
+                    kv_mode=self.config.kv_cache.mode,
+                    kv_bits=self.config.kv_cache.bits,
+                    kv_group=self.config.kv_cache.group_size,
+                )
 
             try:
                 has_start = 0 in self.assigned_layers
@@ -424,7 +440,8 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             self.api_callback_address = req.api_callback_address
 
             if self.next_node:
-                await self._connect_next_node()
+                with self.tracer.frame("network", "connect.next_node"):
+                    await self._connect_next_node()
             else:
                 logger.warning("Node %s: No next node configured", self.node_id)
 
@@ -491,7 +508,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 success=True,
                 message="Model loaded successfully",
                 layers_loaded=req.layers,
-                load_time_ms=load_time_ms,
+                load_time_ms=0.0,
             )
 
         except Exception as e:
@@ -537,23 +554,24 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             self._assigned_set = set()
 
             # Clear memory pools
-            if self.weight_cache:
-                # Stop any in-flight prefetch and close layer manager resources
-                try:
-                    self.weight_cache.cancel_all_prefetch()
-                except Exception:
-                    pass
-                # Clear all cached weights
-                for layer_id in list(self._bound_versions.keys()):
+            with self.tracer.frame("memory", "cache.evict"):
+                if self.weight_cache:
+                    # Stop any in-flight prefetch and close layer manager resources
                     try:
-                        self.weight_cache.evict_layer(layer_id)
+                        self.weight_cache.cancel_all_prefetch()
                     except Exception:
                         pass
-                try:
-                    self.weight_cache.layer_manager.close()
-                except Exception:
-                    pass
-                self.weight_cache = None
+                    # Clear all cached weights
+                    for layer_id in list(self._bound_versions.keys()):
+                        try:
+                            self.weight_cache.evict_layer(layer_id)
+                        except Exception:
+                            pass
+                    try:
+                        self.weight_cache.layer_manager.close()
+                    except Exception:
+                        pass
+                    self.weight_cache = None
 
             self.input_pool = None
             self.output_pool = None
@@ -587,12 +605,13 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             return
 
         try:
-            self.cache = make_cache(
-                self.model,  # type: ignore[arg-type]
-                kv_mode=self.config.kv_cache.mode,
-                kv_bits=self.config.kv_cache.bits,
-                kv_group=self.config.kv_cache.group_size,
-            )
+            with self.tracer.frame("memory", "cache.reset"):
+                self.cache = make_cache(
+                    self.model,  # type: ignore[arg-type]
+                    kv_mode=self.config.kv_cache.mode,
+                    kv_bits=self.config.kv_cache.bits,
+                    kv_group=self.config.kv_cache.group_size,
+                )
             logger.info("Node %s: Cache reset successfully", self.node_id)
         except Exception as e:
             logger.error("Node %s: Error resetting cache: %s", self.node_id, e)
@@ -1094,7 +1113,8 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 activation_msg = self.activation_recv_queue.get(timeout=1.0)
 
                 # Process the activation
-                self._process_activation(activation_msg)
+                with self.tracer.frame("compute", "forward"):
+                  self._process_activation(activation_msg)
 
             except Empty:
                 continue

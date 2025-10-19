@@ -13,6 +13,7 @@ def get_ring_model(
     model_config: Any,
     assigned_layers: Optional[List[int]] = None,
     is_api_layer: bool = False,
+    shard_config: Optional[Any] = None,
 ) -> BaseRingModel:
     """Get ring model instance by type.
 
@@ -30,6 +31,7 @@ def get_ring_model(
         model_config=model_config,
         assigned_layers=assigned_layers,
         is_api_layer=is_api_layer,
+        shard_config=shard_config,
     )
 
 

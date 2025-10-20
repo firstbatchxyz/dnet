@@ -67,7 +67,7 @@ class Llama3RingModel(BaseRingModel):
     return hasattr(m, "to_quantized")
 
   def embed(self, x: mx.array):
-    return self.embed_tokens(x) if self.is_api_layer else x
+    return self.embed_tokens(x) 
 
   def normalize(self, x: mx.array):
     return self.norm(x) if self.is_api_layer else x

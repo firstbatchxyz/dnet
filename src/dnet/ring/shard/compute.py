@@ -11,14 +11,16 @@ from ...utils.logger import logger
 from ...utils.serialization import mlx_dtype_map
 from ...utils.time import utc_epoch_now
 from ..data_types import ActivationMessage
+from .attrib import RingShardNodeAttributes
 
 
-class ComputeMixin:
+class ComputeMixin(RingShardNodeAttributes):
     """Split out the hot-path compute from RingShardNode."""
 
     def _process_activation(self, activation_msg: ActivationMessage):
         if (
-            not self._check_model_loaded()
+            not self.model
+            or not self.model_metadata
             or not self.weight_cache
             or not self.input_pool
             or not self.output_pool
@@ -361,7 +363,7 @@ class ComputeMixin:
                         pass
 
                 nxt = last_layer + 1
-                if nxt >= self.model_metadata.num_layers: # End of model
+                if nxt >= self.model_metadata.num_layers:  # End of model
                     try:
                         with self._mlx_lock:
                             y = self.model.normalize(x_cast)

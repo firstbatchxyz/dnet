@@ -39,9 +39,10 @@ from .models import (
     ShardUnloadModelResponse,
 )
 from ...protos import dnet_ring_pb2
+from .attrib import RingShardNodeAttributes
 
 
-class StartupMixin:
+class StartupMixin(RingShardNodeAttributes):
     async def start(self, shutdown_trigger: Any = lambda: asyncio.Future()):
         self.running = True
         # Capture the main event loop for cross-thread scheduling
@@ -134,6 +135,10 @@ class StartupMixin:
         logger.info(
             "[WARMUP] Starting shard warmup with window size %s", self.window_size
         )
+        if not self.model or not self.model_metadata:
+            logger.warning("[WARMUP] No model loaded; skipping warmup")
+            return
+
         batch_size, seq_len = 1, 1
         hidden_size = self.model_metadata.model_config.get("hidden_size", 2560)
         x = mx.zeros((batch_size, seq_len, hidden_size), dtype=mx.bfloat16)
@@ -237,7 +242,7 @@ class StartupMixin:
                 status="ok",
                 node_id=self.node_id,
                 running=self.running,
-                model_loaded=self._check_model_loaded(),
+                model_loaded=self.model is not None,
                 model_path=self.model_path,
                 assigned_layers=self.assigned_layers,
                 queue_size=self.activation_recv_queue.qsize(),
@@ -419,6 +424,7 @@ class StartupMixin:
         self.next_node_stub = None
         return await self._connect_next_node()
 
+    # FIXME: this is not used?
     async def _health_check(self):
         try:
             health_request = dnet_ring_pb2.HealthRequest(requester_id=str(self.node_id))
@@ -432,9 +438,8 @@ class StartupMixin:
             return True
         except Exception as e:
             logger.warning(
-                "Shard node %s failed to ping next node %s: %s",
+                "Shard node %s failed to ping next node %s",
                 self.node_id,
-                self.next_node_address,
                 e,
             )
             return False

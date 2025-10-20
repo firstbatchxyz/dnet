@@ -3,46 +3,24 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import Callable, Optional, Any
+from typing import Optional, Any
 from urllib.parse import urlparse
 
 import grpc
 from grpc import aio as aio_grpc
 import numpy as np
-from mlx.core import Dtype
 
-from dnet.ring.memory_pool import LayerAwareMemoryPool
 from ...utils.grpc_config import GRPC_AIO_OPTIONS
 from ...utils.logger import logger
 from ...utils.time import utc_epoch_now
 from ...utils.serialization import dtype_map, tensor_to_bytes
-from ...utils.model import ModelMetadata
 from ...protos import shard_api_comm_pb2, shard_api_comm_pb2_grpc, dnet_ring_pb2
 from ..data_types import ActivationMessage
 
+from .attrib import RingShardNodeAttributes
 
-class SendMixin:
-    next_node_stub: Optional[Any]
-    activation_computed_queue: asyncio.Queue[ActivationMessage]
-    node_id: int
-    _profile: bool
-    output_pool: LayerAwareMemoryPool
-    running: bool
-    model_metadata: ModelMetadata
-    _prefetch_pending: set[int]
-    _prefetch_active = 0
-    weight_prefetch_queue: asyncio.Queue[int]
-    _wire_dtype_str: str
-    _wire_mx_dtype: Dtype
-    _assigned_set: set[int]
-    window_size: int
 
-    _prefetch_to_ram: Callable[[int], None]
-    _enqueue_weight_prefetch: Callable[[int], None]
-    _prefetch_pause: asyncio.Event
-    _next_local_layers: Callable[[int, int], list[int]]
-    _clear_prefetch_state: Callable[[], None]
-
+class SendMixin(RingShardNodeAttributes):
     @dataclass
     class _StreamCtx:
         nonce: str
@@ -203,9 +181,10 @@ class SendMixin:
                 logger.error("Send worker error: %s", e)
 
     async def _send_activation(self, activation_msg: ActivationMessage):
-        if not self._check_model_loaded() or not self.output_pool:
+        if not self.output_pool or not self.model_metadata:
             logger.error(
-                "Node %s: Cannot send activation - model not loaded", self.node_id
+                "Node %s: Cannot send activation - output pool / model metadata not initialized",
+                self.node_id,
             )
             return
         try:
@@ -220,14 +199,14 @@ class SendMixin:
                         logger.error("Invalid gRPC callback URL for token: %s", cb)
                         return
                     # Ensure API channel/stub
-                    if (getattr(self, "api_channel", None) is None) or (
-                        addr != getattr(self, "api_address", None)
-                    ):
+                    if (self.api_channel is None) or (addr != self.api_address):
+                        # close existing channel if any
                         try:
-                            if getattr(self, "api_channel", None) is not None:
+                            if self.api_channel is not None:
                                 await self.api_channel.close()
                         except Exception:
                             pass
+
                         self.api_address = addr
                         self.api_channel = aio_grpc.insecure_channel(
                             addr, options=GRPC_AIO_OPTIONS
@@ -267,7 +246,9 @@ class SendMixin:
                 return
 
             used_pool = False
-            shaped = getattr(activation_msg, "tensor", None)
+
+            # FIXME: shaped var is a bit weird?
+            shaped = activation_msg.tensor
             if shaped is None:
                 output_buffer = self.output_pool.get_buffer(activation_msg.pool_id)
                 if output_buffer is None:
@@ -305,6 +286,7 @@ class SendMixin:
                 wire_np_dtype = np.float16  # reasonable default fallback
             if isinstance(shaped, np.ndarray):
                 if shaped.dtype != wire_np_dtype:
+                    # FIXME: copy is not found?
                     shaped = shaped.astype(wire_np_dtype, copy=False)
             else:
                 # MLX array -> cast to desired wire dtype
@@ -380,11 +362,10 @@ class SendMixin:
                                     grpc.StatusCode.DEADLINE_EXCEEDED,
                                 }:
                                     logger.warning(
-                                        "SendActivation attempt %s/%s failed (%s); reconnecting to %s",
+                                        "SendActivation attempt %s/%s failed (%s); reconnecting...",
                                         attempt,
                                         max_attempts,
                                         code.name,
-                                        self.next_node_address,  # FIXME: will be `next_node` !
                                     )
                                     await self._reconnect_next_node()  # FIXME: !!!
                                     await asyncio.sleep(min(0.25 * attempt, 1.0))

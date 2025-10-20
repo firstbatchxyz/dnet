@@ -114,6 +114,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
 
         # Offloading/config-derived params
         self._resident_windows = int(self.config.resident_windows)
+        self._recent_windows = []
         self._defer_unload = True
         self._await_next_ready = False
         set_prefetch_mode(self.config.prefetch_mode)
@@ -306,7 +307,11 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
                 has_start = 0 in self.assigned_layers
                 has_end = (self.model_metadata.num_layers - 1) in self.assigned_layers
                 tied = bool(
-                    getattr(getattr(self.model, "config", object()), "tie_word_embeddings", False)
+                    getattr(
+                        getattr(self.model, "config", object()),
+                        "tie_word_embeddings",
+                        False,
+                    )
                 )
 
                 loaded_cnt = 0
@@ -317,7 +322,9 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
                     if tied:
                         # End shard needs embeddings for tied projection
                         if not has_start:
-                            loaded_cnt += load_embeddings(self.model_metadata, self.model)
+                            loaded_cnt += load_embeddings(
+                                self.model_metadata, self.model
+                            )
                         try:
                             setattr(self.model, "force_tied_head", True)
                         except Exception:
@@ -333,9 +340,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
                         int(tied),
                     )
             except Exception as e:
-                logger.warning(
-                    "Failed to load API-layer weights: %s",  e
-                )
+                logger.warning("Failed to load API-layer weights: %s", e)
 
             # Reset prefetch tracking
             self._prefetch_scheduled = set()
@@ -468,17 +473,9 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
                 message=f"Error unloading model: {str(e)}",
             )
 
-    def _check_model_loaded(self) -> bool:
-        """Check if model is loaded.
-
-        Returns:
-            True if model is loaded, False otherwise
-        """
-        return self.model is not None and self.model_metadata is not None
-
     async def reset_cache(self) -> None:
         """Reset LLM KV cache."""
-        if not self._check_model_loaded():
+        if not self.model:
             logger.warning(
                 "Node %s: Cannot reset cache - no model loaded", self.node_id
             )
@@ -497,6 +494,13 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
 
     async def receive_activation(self, request: dnet_ring_pb2.ActivationRequest):
         """Receive activation from previous node and queue for local compute or forward."""
+        if self.input_pool is None:
+            logger.error(
+                "Node %s: Cannot receive activation - input pool not initialized",
+                self.node_id,
+            )
+            return
+
         t_recv = time.perf_counter()
         await self._connect_next_node()
 
@@ -808,7 +812,9 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
                             activation_msg.nonce,
                         )
                         try:
-                            self.input_pool.release(activation_msg.pool_id)
+                            if self.input_pool:
+                                # FIXME: !!!
+                                self.input_pool.release(activation_msg.pool_id)
                         except Exception:
                             pass
                 else:
@@ -825,6 +831,8 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
 
     def _get_or_make_kv(self, nonce: str) -> list:
         """Return a per-nonce KV cache list for this shard's local layers."""
+        if not self.model:
+            raise RuntimeError("Model not initialized")
         try:
             now = time.perf_counter()
             ttl = float(getattr(self, "_kv_ttl_s", 30.0))
@@ -865,6 +873,13 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
 
         Returns None on failure.
         """
+        if self.input_pool is None:
+            logger.error(
+                "Node %s: Cannot prepare activation - input pool not initialized",
+                self.node_id,
+            )
+            return None
+
         try:
             activation = request.activation
             if "|" in activation.dtype:
@@ -1067,6 +1082,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
         except Exception:
             pass
         try:
-            self.weight_cache.cancel_all_prefetch()
+            if self.weight_cache:
+                self.weight_cache.cancel_all_prefetch()
         except Exception:
             pass

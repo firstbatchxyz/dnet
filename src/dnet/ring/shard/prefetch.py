@@ -1,35 +1,17 @@
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import time
 import logging
 from typing import Dict
-from threading import Lock
-from queue import Queue
-
 import mlx.core as mx
 
-from dnet.ring.weight_cache import WeightCache
 
 from ...utils.logger import logger
+from .attrib import RingShardNodeAttributes
 
 
-class PrefetchMixin:
-    _mlx_lock: Lock
-    _prefetch_scheduled: set[int]
-    _prefetch_pending: set[int]
-    _prefetch_pause: asyncio.Event
-    _profile: bool
-    node_id: int
-    running: bool
-    weight_cache: WeightCache
-    weight_prefetch_queue: Queue[int]
-    _materialize_prefetch_default: bool
-    executor: ThreadPoolExecutor
-    _touch_during_compute: bool
-    _compute_busy: asyncio.Event
-
+class PrefetchMixin(RingShardNodeAttributes):
     def _touch_weights(self, layer_id: int, weights: Dict[str, mx.array]) -> None:
         mode = getattr(self, "_prefetch_touch_mode", "none")
         if mode in ("", "none"):

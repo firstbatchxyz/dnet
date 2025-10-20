@@ -79,6 +79,8 @@ from ..shard.models import (
     ShardLoadModelRequest,
     ShardLoadModelResponse,
     ShardProfileResponse,
+    TraceIngestBatch,
+    TraceIngestResponse,
 )
 from ..data_types import StopCondition
 from .servicer import ShardApiServicer
@@ -370,6 +372,34 @@ class RingApiNode:
                     self._stream_completion(req), media_type="text/event-stream"
                 )
             return await self._handle_text_completion(req)
+
+        # Ingest trace buffers and forward to REPL
+        @self.app.post("/trace/ingest")
+        async def trace_ingest(batch: TraceIngestBatch) -> TraceIngestResponse:  # type: ignore
+            logger.debug(f"Received trace buffer.")
+            try:
+                if self._trace_ingest_cb is not None:
+                    self._trace_ingest_cb(batch.model_dump())
+                    return TraceIngestResponse(ok=True, accepted=len(batch.events), batch_seq=batch.batch_seq)
+
+                try:
+                    run_dir = Path("logs/trace/ingest") / batch.run_id
+                    run_dir.mkdir(parents=True, exist_ok=True)
+                    fpath = run_dir / f"{batch.node_id}.jsonl"
+                    with fpath.open("a", encoding="utf-8") as f:
+                        f.write(batch.model_dump_json() + "\n")
+                except Exception:
+                    logger.warning(f"Unable to write trace ingest buffer to temp file {fpath}")
+                return TraceIngestResponse(
+                  ok=True, 
+                  accepted=len(batch.events), 
+                  batch_seq=batch.batch_seq, 
+                  message="no aggregator; appended"
+                )
+            except Exception as e:
+                logger.warning(f"Unable to ingest trace buffer: {e}")
+                return TraceIngestResponse(ok=False, accepted=0, message=str(e))
+
 
     async def _handle_prepare_topology(
         self, req: PrepareTopologyRequest
@@ -1700,3 +1730,7 @@ class RingApiNode:
             logger.warning("Discovery service was not running")
 
         logger.info("API server shutdown complete")
+
+    # REPL helper to install a trace ingestion callback
+    def set_trace_ingest_callback(self, cb: Optional[Callable[[Dict[str, Any]], None]]) -> None:
+        self._trace_ingest_cb = cb

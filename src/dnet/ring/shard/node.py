@@ -62,7 +62,7 @@ from .prefetch import PrefetchMixin
 from .comms import CommsMixin
 from ..weight_cache import WeightCache
 
-from dnet.perf.trace import TraceConfig, Tracer
+from dnet.perf import TraceConfig, Tracer
 
 
 class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
@@ -205,12 +205,14 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         # Debug tracing
         cfg = TraceConfig(
             file="./trace.json",
-            streaming=True,
+            streaming=False,
             include_prefixes = ("src/dnet/"),
             include_c_calls = False,
             budget = 10000,
             enabled = True,
             record_pid_tid = True,
+            aggregate=False,
+            aggregate_url=None, # FIXME: This is set when we get a /profile req 
         )
         self.tracer = Tracer(cfg) 
         self.tracer.start()
@@ -233,7 +235,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         )
 
     async def load_model(self, req: ShardLoadModelRequest) -> ShardLoadModelResponse:
-        """Load model with specified layers.  """
+        """Load model with specified layers"""
         try: # Check if already loaded with same configuration
             if (
                 self.model is not None

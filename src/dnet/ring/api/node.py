@@ -373,14 +373,15 @@ class RingApiNode:
         # Ingest trace buffers and forward to REPL
         @self.app.post("/trace/ingest")
         async def trace_ingest(batch: TraceIngestBatch) -> TraceIngestResponse:  # type: ignore
-            logger.debug(f"Received trace buffer.")
             try:
                 if self._trace_ingest_cb is not None:
+                    logger.debug("Forwarding trace batch to REPL.")
                     self._trace_ingest_cb(batch.model_dump())
-                    return TraceIngestResponse(ok=True, accepted=len(batch.events), batch_seq=batch.batch_seq)
+                    return TraceIngestResponse(ok=True, accepted=len(batch.events))
 
                 try:
                     run_dir = Path("logs/trace/ingest") / batch.run_id
+                    logger.debug(f"callback not available. Dumping trace buffer to file {run_dir}")
                     run_dir.mkdir(parents=True, exist_ok=True)
                     fpath = run_dir / f"{batch.node_id}.jsonl"
                     with fpath.open("a", encoding="utf-8") as f:
@@ -390,7 +391,6 @@ class RingApiNode:
                 return TraceIngestResponse(
                   ok=True, 
                   accepted=len(batch.events), 
-                  batch_seq=batch.batch_seq, 
                   message="no aggregator; appended"
                 )
             except Exception as e:
@@ -1057,6 +1057,7 @@ class RingApiNode:
                             payload_sizes=payload_sizes,
                             max_batch_exp=max_batch_exp,
                             devices=shards,
+                            api_address=f"{this_device.local_ip}:{this_device.server_port}"
                         ).model_dump(),
                         timeout=1000.0,
                     )

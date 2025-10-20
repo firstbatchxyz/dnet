@@ -120,6 +120,7 @@ class REPL(cmd.Cmd):
         http_port or self.state.api_http_port,
         grpc_port or self.state.api_grpc_port
       )
+      self.api_call("set_trace_ingest_callback", self.__trace_cb, timeout=2.0)
     elif cmd[1] == "stop":
       self.stop_api()
     elif cmd[1] == "status":
@@ -331,6 +332,11 @@ class REPL(cmd.Cmd):
 
   # ===== Handle API server
 
+  # Tracer frames ingest callback
+  def __trace_cb(self, data):
+    dprint(str(data))
+    pass
+
   async def _api_main(self) -> None: # main thread loop
     self._api_loop = asyncio.get_running_loop()
     self._api_shutdown_e = asyncio.Event()
@@ -374,7 +380,7 @@ class REPL(cmd.Cmd):
     if not self._api_ready.wait(timeout):
       raise RuntimeError("API Server Timeout.")
     if self._api_exc is not None:
-      raise RuntimeError(f"API Server failed to start: {e}")
+      raise RuntimeError(f"API Server failed to start")
 
   def stop_api(self, timeout: float = 5.0) -> None:
     if not self._api_thread: return
@@ -459,6 +465,7 @@ class REPL(cmd.Cmd):
         "head": "head" if r["head"] else "no",
       }
       sys.stdout.write("  ".join(str(vals[h]).ljust(w[h]) for h in headers))
+      sys.stdout.write("\n")
     sys.stdout.write("\n\n")
     sys.stdout.flush()
       

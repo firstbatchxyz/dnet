@@ -90,26 +90,26 @@ class ComputeMixin(RingShardNodeAttributes):
                     return
 
             # Prepare input activation
-            with self.tracer.frame("compute.thread", "activations.process"):
-                if activation_msg.dtype == "tokens":
-                    # tokens were staged as int32 in the pool; embed locally on start shard
-                    input_size = int(np.prod(activation_msg.shape))
-                    tok_view = input_buffer[:input_size].reshape(activation_msg.shape)
-                    # Convert robustly to MLX int32 and embed (batch=1)
+            with self.tracer.frame("compute.thread", "activations.process") as f:
+                if activation_msg.dtype == "tokens": # embed locally on start shard
+                    f.event("embed_tokens")
+                    numel = int(np.prod(activation_msg.shape))
+                    tok_view = input_buffer[:numel].reshape(activation_msg.shape)
                     toks = mx.array(np.array(tok_view, dtype=np.int32), dtype=mx.int32)
                     x = self.model.embed(toks[None])
                     if x.dtype != self._wire_mx_dtype:
                         x = x.astype(self._wire_mx_dtype)
-                else:
-                    # Prepare input activation using MLX view operations only
-                    input_size = int(np.prod(activation_msg.shape))
-                    x = input_buffer[:input_size].reshape(activation_msg.shape)
-                    # Ensure expected dtype without re-materializing when not needed
-                    try:
+
+                else: # Prepare input activation using MLX view operations only
+                    f.set("activation_dtype", activation_msg.dtype)
+                    numel = int(np.prod(activation_msg.shape))
+                    x = input_buffer[:numel].reshape(activation_msg.shape)
+
+                    try: # Ensure expected dtype 
                         if str(x.dtype) != activation_msg.dtype:
                             x = x.astype(mlx_dtype_map[activation_msg.dtype])
                     except Exception:
-                        pass
+                        logger.warning(f"Unable to update activation dtype")
 
             # Compute windows until boundary (stay local as long as possible)
             current_layer = activation_msg.layer_id + 1
@@ -118,7 +118,8 @@ class ComputeMixin(RingShardNodeAttributes):
                 processed = 0
                 did_early_swap = False
 
-                with self.tracer.frame("compute.thread", "weights.prepare"):
+                with self.tracer.frame("compute.thread", "weights.prepare") as f:
+
                     # Determine contiguous local window starting at current_layer
                     window_layers: List[int] = []
                     _tmp_layer = current_layer
@@ -127,89 +128,89 @@ class ComputeMixin(RingShardNodeAttributes):
                         _tmp_layer += 1
                         processed += 1
 
-                if self._mode == "offload" and window_layers:
-                    prep = self._prepared_by_nonce.get(activation_msg.nonce)
-                    if prep is not None:
-                        layers, fut = prep
-                        if layers == window_layers and fut is not None:
-                            try:
-                                fut.result(timeout=30)
-                            except Exception:
-                                pass
+                    if self._mode == "offload" and window_layers:
+                        prep = self._prepared_by_nonce.get(activation_msg.nonce)
+                        if prep is not None:
+                            layers, fut = prep
+                            if layers == window_layers and fut is not None:
+                                try:
+                                    fut.result(timeout=30)
+                                except Exception:
+                                    pass
 
-                # In sliding_fit with a single resident window, proactively evict only the
-                # non-needed head from the current resident set before loading new weights.
-                # This prevents LRU from evicting the useful tail during materialization.
-                if (
-                    self._mode == "sliding_fit"
-                    and int(self._resident_windows) <= 1
-                    and window_layers
-                ):
-                    try:
-                        resident = []
+                    # In sliding_fit with a single resident window, proactively evict only the
+                    # non-needed head from the current resident set before loading new weights.
+                    # This prevents LRU from evicting the useful tail during materialization.
+                    if (
+                        self._mode == "sliding_fit"
+                        and int(self._resident_windows) <= 1
+                        and window_layers
+                    ):
                         try:
-                            resident = self.weight_cache.get_resident_layers()  # type: ignore[union-attr]
-                        except Exception:
                             resident = []
-                        evicted_cnt = self._delta_swap_eviction(
-                            window_layers, resident, activation_msg, early=True
-                        )
-                        if evicted_cnt > 0:
-                            did_early_swap = True
-                    except Exception:
-                        pass
-
-                # Ensure weights for the window are resident and bind only if arrays changed
-                # if model fits and we've already bound these layers, skip the scan entirely.
-                fast_fit = (
-                    self._mode == "fit"
-                    and len(self._assigned_sorted) <= self.window_size
-                )
-                skip_scan = fast_fit and all(
-                    (wl in self._bound_versions) for wl in window_layers
-                )
-                to_bind: Dict[str, mx.array] = {}
-                if not skip_scan:
-                    t_w_ready = time.perf_counter()
-                    for wl in window_layers:
-                        weights = self.weight_cache.get_weight(wl)
-                        if weights is None:
-                            logger.error("Failed to load weights for layer %s", wl)
-                            self.input_pool.release(activation_msg.pool_id)
-                            return
-                        try:
-                            # Use identity of first array as a cheap version/fingerprint
-                            first_arr = next(iter(weights.values()))
-                            version = id(first_arr)
-                        except StopIteration:
-                            version = -1
-                        if self._bound_versions.get(wl) != version:
-                            for k, v in weights.items():
-                                to_bind[k] = v
-                            self._bound_versions[wl] = version
-                    if self._profile:
-                        t_w_ms = (time.perf_counter() - t_w_ready) * 1000.0
-                        # Only log when non-trivial or binding happened to reduce overhead/noise
-                        if to_bind or t_w_ms > 0.5:
-                            logger.info(
-                                "[PROFILE][WAIT-WEIGHTS] node=%s nonce=%s layers=%s ms=%.3f",
-                                self.node_id,
-                                activation_msg.nonce,
-                                window_layers,
-                                t_w_ms,
+                            try:
+                                resident = self.weight_cache.get_resident_layers()  # type: ignore[union-attr]
+                            except Exception:
+                                resident = []
+                            evicted_cnt = self._delta_swap_eviction(
+                                window_layers, resident, activation_msg, early=True
                             )
+                            if evicted_cnt > 0:
+                                did_early_swap = True
+                        except Exception:
+                            pass
 
-                    # Opportunistically schedule prefetch for the next window to overlap with compute
-                    try:
-                        next_win_pre = self._next_local_layers(
-                            (window_layers[-1] if window_layers else (activation_msg.layer_id)),
-                            self.window_size,
-                        )
-                        for nl in next_win_pre:
-                            self._prefetch_to_ram(nl)
-                            self._enqueue_weight_prefetch(nl)
-                    except Exception:
-                        pass
+                    # Ensure weights for the window are resident and bind only if arrays changed
+                    # if model fits and we've already bound these layers, skip the scan entirely.
+                    fast_fit = (
+                        self._mode == "fit"
+                        and len(self._assigned_sorted) <= self.window_size
+                    )
+                    skip_scan = fast_fit and all(
+                        (wl in self._bound_versions) for wl in window_layers
+                    )
+                    to_bind: Dict[str, mx.array] = {}
+                    if not skip_scan:
+                        t_w_ready = time.perf_counter()
+                        for wl in window_layers:
+                            weights = self.weight_cache.get_weight(wl)
+                            if weights is None:
+                                logger.error("Failed to load weights for layer %s", wl)
+                                self.input_pool.release(activation_msg.pool_id)
+                                return
+                            try:
+                                # Use identity of first array as a cheap version/fingerprint
+                                first_arr = next(iter(weights.values()))
+                                version = id(first_arr)
+                            except StopIteration:
+                                version = -1
+                            if self._bound_versions.get(wl) != version:
+                                for k, v in weights.items():
+                                    to_bind[k] = v
+                                self._bound_versions[wl] = version
+                        if self._profile:
+                            t_w_ms = (time.perf_counter() - t_w_ready) * 1000.0
+                            # Only log when non-trivial or binding happened to reduce overhead/noise
+                            if to_bind or t_w_ms > 0.5:
+                                logger.info(
+                                    "[PROFILE][WAIT-WEIGHTS] node=%s nonce=%s layers=%s ms=%.3f",
+                                    self.node_id,
+                                    activation_msg.nonce,
+                                    window_layers,
+                                    t_w_ms,
+                                )
+
+                        # Opportunistically schedule prefetch for the next window to overlap with compute
+                        try:
+                            next_win_pre = self._next_local_layers(
+                                (window_layers[-1] if window_layers else (activation_msg.layer_id)),
+                                self.window_size,
+                            )
+                            for nl in next_win_pre:
+                                self._prefetch_to_ram(nl)
+                                self._enqueue_weight_prefetch(nl)
+                        except Exception:
+                            pass
 
                 # Execute the window
                 with self.tracer.frame("compute.thread", "execute"):

@@ -9,10 +9,10 @@ from .llama import LlamaRingModel
 from .gpt_oss import GptOssRingModel
 from .qwen3 import Qwen3RingModel
 from .llama3 import Llama3RingModel
-from .llama4 import Llama4RingModel
-from .gpt_oss import GptOssRingModel
-from .glm import GLMRingModel
-from .glm4 import GLM4RingModel
+#from .llama4 import Llama4RingModel
+#from .gpt_oss import GptOssRingModel
+#from .glm import GLMRingModel
+#from .glm4 import GLM4RingModel
 
 
 def get_ring_model(

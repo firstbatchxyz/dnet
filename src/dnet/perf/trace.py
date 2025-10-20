@@ -31,7 +31,7 @@ class TraceConfig:
     record_pid_tid: bool = True
     aggregate: bool = False
     aggregate_url: Optional[str] = None
-    agg_max_events: int = 1000
+    agg_max_events: int = 300 
 
 class _NoopFrame:
     def __enter__(self):
@@ -107,17 +107,21 @@ class Tracer:
         self._agg_thread = None
 
     def _agg_exec(self) -> None:
-        url = self.config.aggregate_url or ""
-        assert url != ""
+        assert self.config.aggregate_url != ""
+        url = "http://" + self.config.aggregate_url + "/trace/ingest"
         client = httpx.Client(timeout=5.0)
         try:
-            while self._agg_enabled and not self._agg_q.empty():
+            logger.debug(f"Aggregation worker thread {self._agg_enabled}, {self._agg_q.empty()}")
+            while self._agg_enabled or not self._agg_q.empty():
                 try:
                     batch = self._agg_q.get(timeout=0.2)
                 except queue.Empty:
                     continue
+                logger.info(f"Sending trace buffer to API : {url}")
                 try:
-                    client.post(url, json=batch)
+                    res = client.post(url, json=batch)
+                    if res.status_code != 200:
+                        logger.error(f"Aggregator POST failed {res.status_code}: {res.text}")
                 except Exception:
                     logger.warning(f"Unable to POST trace aggregation data to {url}")
                 finally:
@@ -127,6 +131,14 @@ class Tracer:
                 client.close()
             except Exception:
                 logger.warining("Unable to close httpx client.")
+
+    # We don't have the API addr at init time
+    def update_api_addr(self, addr):
+        self.config.aggregate_url = addr
+        logger.debug(f"Updated API Address: {self.config.aggregate_url}")
+
+    def update_confi(self, config):
+        pass
 
     def start(self, *, reset: bool = True) -> None:
         self._active = bool(self.config.enabled)
@@ -201,8 +213,9 @@ class Tracer:
 
             if self._agg_enabled:
                 if len(self._events) < self._agg_max_events: return
-                batch = { "run_id": self._agg_run_id,
-                          "node_id": self._agg_node_id or self.config.node_id,
+                logger.debug(f"Queuing tracer frame batch of {len(self._events)}")
+                batch = { "run_id": (self._req_id or "NONE"),
+                          "node_id": (self.config.node_id or "UNKNOWN_NODE"),
                           "events": list(self._events)}
                 try:
                     self._agg_q.put_nowait(batch)

@@ -249,15 +249,14 @@ class StartupMixin:
         async def profile(req: ShardProfileRequest) -> ShardProfileResponse:
             logger.info("Received /profile request")
             try:
-                # Measure latencies
-                latency_results = await self._measure_latency_to_devices(
-                    req.devices, req.thunderbolts, req.payload_sizes
-                )
+                # Since this is the first request we get from API grab the address and store it
+                # TODO: Have a handshake request before this one where we share addresses and state
+                self.api_address = req.api_address
+                self.tracer.update_api_addr(self.api_address)
+                self.tracer.start_aggregator()
 
-                # Profile device using dperf
-                device_profile = await self._profile_device(
-                    req.repo_id, req.max_batch_exp
-                )
+                latency_results = await self._measure_latency_to_devices( req.devices, req.thunderbolts, req.payload_sizes)
+                device_profile = await self._profile_device( req.repo_id, req.max_batch_exp)
 
                 # Overwrite `t_comm` with median latency (subprocess returns a dict)
                 median_latency = calculate_median_latency_seconds(latency_results)
@@ -267,9 +266,7 @@ class StartupMixin:
                         f"Set t_comm to median latency: {device_profile['t_comm']:.6f}s"
                     )
                 else:
-                    logger.warning(
-                        "No valid latency measurements, keeping default t_comm"
-                    )
+                    logger.warning( "No valid latency measurements, keeping default t_comm")
 
                 # Return the dict payload directly
                 return ShardProfileResponse(

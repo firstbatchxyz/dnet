@@ -53,6 +53,7 @@ class ShardUnloadModelResponse(BaseModel):
 class ShardProfileRequest(BaseModel):
     """Request to profile device and measure latencies."""
 
+    api_address: Optional[str] = Field( ..., description="API Address" ) 
     devices: Dict[str, DnetDeviceProperties] = Field(
         ..., description="Device information mapping"
     )
@@ -114,28 +115,24 @@ class HealthResponse(BaseModel):
 # Tracer ingest
 
 class TraceEvent(BaseModel):
-    type: Literal["B", "E", "I"] = Field(..., description="Event type/phase")
+    type: str = Field(..., description="Event type/phase")
     name: str = Field(..., description="Span/mark name")
-    ts: int = Field(..., description="Timestamp in microseconds")
+    ts: float = Field(..., description="Timestamp in microseconds")
     args: Dict[str, Any] = Field(default_factory=dict)
     req_id: Optional[str] = None
     pid: Optional[int] = None
     tid: Optional[int] = None
 
-
 class TraceIngestBatch(BaseModel):
     run_id: str = Field(..., description="Bench run identifier")
     node_id: str = Field(..., description="Shard/service identity")
-    batch_seq: int = Field(..., description="Monotonic batch sequence per node")
     events: List[TraceEvent] = Field(default_factory=list)
-    dropped: Optional[int] = Field(default=0, description="Events dropped on sender")
-    max_ts: Optional[int] = Field(default=None, description="Max ts_us in this batch")
-    last: Optional[bool] = Field(default=False, description="Sender indicates end-of-run")
-    schema_version: int = Field(default=1)
-
+    #dropped: Optional[int] = Field(default=0, description="Events dropped on sender")
+    #max_ts: Optional[int] = Field(default=None, description="Max ts_us in this batch")
+    #last: Optional[bool] = Field(default=False, description="Sender indicates end-of-run")
+    #schema_version: int = Field(default=1)
 
 class TraceIngestResponse(BaseModel):
     ok: bool = True
     accepted: int = 0
-    batch_seq: Optional[int] = None
     message: Optional[str] = None

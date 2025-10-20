@@ -393,6 +393,11 @@ class REPL(cmd.Cmd):
 
   # ===== Handle API server
 
+  # Tracer frames ingest callback
+  def __trace_cb(self, data):
+    dprint(str(data))
+    pass
+
   async def _api_main(self) -> None: # main thread loop
     #logging.disable(logging.CRITICAL)
     self._api_loop = asyncio.get_running_loop()

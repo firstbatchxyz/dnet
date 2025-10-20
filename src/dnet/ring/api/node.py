@@ -1844,4 +1844,5 @@ class RingApiNode:
 
     # REPL helper to install a trace ingestion callback
     def set_trace_ingest_callback(self, cb: Optional[Callable[[Dict[str, Any]], None]]) -> None:
+        logger.debug(f"Registered tracer ingest callback.")
         self._trace_ingest_cb = cb

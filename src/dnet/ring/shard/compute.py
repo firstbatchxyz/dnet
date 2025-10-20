@@ -360,13 +360,8 @@ class ComputeMixin:
                     except Exception:
                         pass
 
-                # Create and enqueue output message: either forward activations or finalize on end role
                 nxt = last_layer + 1
-                if (
-                    nxt >= self.model_metadata.num_layers
-                    and getattr(self, "role", "inter") == "end"
-                ):
-                    # End-shard head+sampling inline; return only token to API
+                if nxt >= self.model_metadata.num_layers: # End of model
                     try:
                         with self._mlx_lock:
                             y = self.model.normalize(x_cast)

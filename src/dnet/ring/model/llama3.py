@@ -70,10 +70,10 @@ class Llama3RingModel(BaseRingModel):
     return self.embed_tokens(x) 
 
   def normalize(self, x: mx.array):
-    return self.norm(x) if self.is_api_layer else x
+    return self.norm(x) 
 
   def lm_project(self, x: mx.array):
-    return self.lm_head(x) if self.is_api_layer else x
+    return self.lm_head(x)
 
   def quantize_layers(self):
     self.quantization = None 
@@ -85,26 +85,24 @@ class Llama3RingModel(BaseRingModel):
     if self.quantization is not None:
       bits = int(self.quantization.get("bits", 8))
       group = int(self.quantization.get("group_size", 64))
-      if self.is_api_layer:
-        try:
-          from mlx.nn.layers.quantized import QuantizedEmbedding
-          self.embed_tokens = QuantizedEmbedding(self.config.vocab_size, 
-                                                 self.config.hidden_size,
-                                                 group_size=group, bits=bits)
+      try:
+        from mlx.nn.layers.quantized import QuantizedEmbedding
+        self.embed_tokens = QuantizedEmbedding(self.config.vocab_size, 
+                                               self.config.hidden_size,
+                                               group_size=group, bits=bits)
 
-          logger.debug(f"API Service initialized to QuantizedEmbedding:" 
-                       f"{self.config.vocab_size}, hidden={self.config.hidden_size}"
-                       f"group_size={group}, bits={bits}")
-        except Exception as e:
-          logger.warning(f"Unable to initialize QuantizedEmbedding: {e}")
+        logger.debug(f"API Service initialized to QuantizedEmbedding:" 
+                     f"{self.config.vocab_size}, hidden={self.config.hidden_size}"
+                     f"group_size={group}, bits={bits}")
+      except Exception as e:
+        logger.warning(f"Unable to initialize QuantizedEmbedding: {e}")
 
-      else:
-        try:
-          nn.quantize(self, bits=bits, group_size=group, class_predicate=Llama3RingModel.class_predicate)
-          logger.debug(f"Quantized the model: bits={bits}, group_size={group}")
-          self._converted_to_quantized = True
-        except:
-          self._converted_to_quantized = False 
+      try:
+        nn.quantize(self, bits=bits, group_size=group, class_predicate=Llama3RingModel.class_predicate)
+        logger.debug(f"Quantized the model: bits={bits}, group_size={group}")
+        self._converted_to_quantized = True
+      except:
+        self._converted_to_quantized = False 
 
   def forward(
     self, 
@@ -167,9 +165,8 @@ class Llama3RingModel(BaseRingModel):
         logger.debug(f"Mapping weight {k} -> {new_key}")
         shard_weights[new_key] = v
         
-      elif self.is_api_layer:
-        if (k.startswith("embed_tokens") or k.startswith("lm_head") or k.startswith("norm")):
-          shard_weights[k] = v
+      elif (k.startswith("embed_tokens") or k.startswith("lm_head") or k.startswith("norm")):
+        shard_weights[k] = v
         
     if shard_weights:
       try:

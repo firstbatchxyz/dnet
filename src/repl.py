@@ -393,11 +393,6 @@ class REPL(cmd.Cmd):
 
   # ===== Handle API server
 
-  # Tracer frames ingest callback
-  def __trace_cb(self, data):
-    dprint(str(data))
-    pass
-
   async def _api_main(self) -> None: # main thread loop
     #logging.disable(logging.CRITICAL)
     self._api_loop = asyncio.get_running_loop()
@@ -654,6 +649,72 @@ class REPL(cmd.Cmd):
       sys.stdout.flush()
     except Exception as e:
       logger.error(f"{e}")
+
+  # ------- Trace aggregation helpers 
+
+  def do_trace(self, cmd):
+    if len(cmd) < 2:
+      dprint(f"Tracing is currently {"ON" if self._trace_cfg.enabled else "OFF"}\n")
+    elif cmd[1] in ("on", "ON"):
+      self._trace_cfg.enabled = True
+      if self._api_running:
+        self.api_call("_forward_trace_config", self._trace_cfg) # Send trace config to all shards
+      dprint("Tracing is now ON\n")
+    elif cmd[1] in ("off", "OFF"):
+      self._trace_cfg.enabled = False 
+      if self._api_running:
+        self.api_call("_forward_trace_config", self._trace_cfg) # Send trace config to all shards
+      dprint("Tracing is not OFF\n")
+    elif cmd[1] == "focus":
+      #self.api_call("_forward_trace_config", self._trace_cfg) # Send trace config to all shards
+      dprint("Subsystems not yet implemented.\n")
+    elif cmd[1] == "stream":
+      if len(cmd) == 2:
+        dprint(f"Trace is {"streaming to file: "+str(self._trace_cfg.file) if self._trace_cfg.streaming else "not streaming."}\n")
+      elif cmd[2] == "on":
+        self._trace_cfg.streaming = True
+        dprint(f"Streaming trace frames to {self._trace_cfg.file}\n")
+      elif cmd[2] == "off":
+        self._trace_cfg.streaming = False 
+        dprint("Trace streaming is OFF.\n")
+    elif cmd[1] == "set":
+      if len(cmd) == 2:
+        dprint("Use: trace set [BUDGET], eg. 2000\n")
+      else:
+        dprint("Not implemented yet\n")
+      # FIXME: Implement
+    elif cmd[1] == "status":
+      dprint(f"Frames: {len(self._trace_agg._req)}\n")
+
+    elif cmd[1] == "annotate":
+      self.print_trace_annotate("NONE")
+
+  # Trace callback registered with API Thread
+  def __trace_cb(self, data):
+    self._trace_agg.enqueue(data)
+
+  def __print_tr(self, symbol, ms, counts):
+    sym = "    " + symbol.ljust(40, ' ')
+    pms = f"{ms:.10}".ljust(10, ' ') 
+    cns = f"{counts}".ljust(4, ' ')
+    sys.stdout.write(f"{sym} {pms} {cns}\n")
+
+  def print_trace_annotate(
+    self,
+    run_id: str = "run",
+    mapping: Optional[Dict[str, str]] = None,
+    repeats: int = 0,
+  ) -> List[Dict[str, Any]]:
+    names = " "*17 + "symbol" + " "*21 + "ms" + " "*4 + "counts"
+    dots = "   " + "."*41 + " " + "."*10 + " " + "."*4
+    dprint(f"{names}\n{dots}\n\n")
+    sums = self._trace_agg._req[run_id].sums_by_name
+    cnts = self._trace_agg._req[run_id].counts_by_name
+    for n, d in sums.items():
+      self.__print_tr(n, d, cnts[n])
+
+  def get_trace_roots(self, run_id: str, req_id: str) -> List[Dict[str, Any]]:
+    return self._trace_agg.roots(run_id, req_id)
 
   def _print_nodes_table(self, rows: List[Any]) -> None:
     headers = ["name", "role", "addr", "http", "grpc", "status", "head"]

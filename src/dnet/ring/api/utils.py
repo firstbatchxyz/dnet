@@ -230,8 +230,6 @@ def compute_layer_assignments(
         for name in device_names
     ]
 
-    # FIXME: move this to elsewhere
-
 
 def optimize_device_ordering(
     shard_profiles: Dict[str, DeviceProfile],

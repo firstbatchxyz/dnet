@@ -1,11 +1,13 @@
 
 import os
 import sys
+import logging
 import cmd
+import time
 import argparse
 import subprocess
 from dataclasses import dataclass
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Dict
 
 import asyncio
 import inspect
@@ -15,13 +17,20 @@ import concurrent.futures
 from dnet.ring.api import RingApiNode 
 from dnet.ring.shard import RingShardNode 
 from dnet.utils.network import NodeAddress
-from dnet.utils.logger import logger
+#from dnet.utils.logger import logger
+from dnet.ring.api.api_logging import get_api_logger
 from dnet.utils.model import ( 
   ModelMetadata, 
   get_model_metadata, 
   load_api_layer_weights,
   get_safetensor_details,
 )
+
+logger = get_api_logger()
+
+from dnet.perf.trace import TraceConfig, Tracer
+from dnet.perf.utils import TraceAggregator
+#from dnet.perf.bench import 
 
 # Handle restricted repos
 from importlib import import_module
@@ -57,22 +66,39 @@ class REPL(cmd.Cmd):
 
   def __init__(self, model="NULL", nodes=1):
     assert nodes >= 1 and nodes < 10, "Invalid number of local nodes. Must be 0 < num < 10."
-
     super().__init__()
+
+    # State
     self.state = REPLState()
     self.state.model = model
     self.state.running_port += 2
     self.state.num_local_nodes = nodes
 
+    # API Thread
     self._node: Optional[RingApiNode] = None
     self._api_thread: Optional[threading.Thread] = None 
     self._api_ready = threading.Event()
     self._api_running = threading.Event()
+    self._api_searching = threading.Event() # Track mDNS searching 
     self._api_loop: Optional[asyncio.AbstractEventLoop] = None
     self._api_shutdown_e: Optional[asyncio.Event] = None
     self._api_exc: Optional[BaseException] = None
 
-    self._api_searching = threading.Event() # Track mDNS searching 
+    # Tracing
+    self._trace_cfg = TraceConfig(
+      enabled=False,
+      streaming=False,
+      budget=3000,
+      aggregate=True,
+      agg_max_events=50,
+    )
+
+    self._tracing = threading.Event()
+    self._tracer = None
+    self._trace_file = f"trace-{time.strftime("%Y%m%d-%H%M%S")}" 
+    self._trace_cursor = 0 # keep track of registered events in buffer 
+    self._trace_agg = TraceAggregator()
+
 
   def loop(self): # Main tty loop
     sys.stdout.write(self.WELCOME) 
@@ -82,7 +108,7 @@ class REPL(cmd.Cmd):
 
       if cmd == "":
         self.print_state()
-      elif cmd in [".exit", "exit", "quit", "q"]:
+      elif cmd in [".exit", "exit", "quit"]:
         self.handle_terminate_signal()
       elif cmd in [".help", "help", "h"]:
         self.print_help()
@@ -96,10 +122,13 @@ class REPL(cmd.Cmd):
       elif cmd.startswith("nodes"):
         self.print_mdns_nodes()
         continue
+      elif cmd.startswith(("trace", ".trace")):
+        self.do_trace(cmd.split(" "))
+        continue
       elif cmd.startswith(("topo", ".topo")):
         self.do_topo(cmd.split(" "))
         continue
-      elif cmd.startswith((".model", "model", "m")):
+      elif cmd.startswith((".model", "model", "m ")):
         cmd.split(" ")
         path = self._handle_model_pull(cmd[1])
         if path:
@@ -121,6 +150,7 @@ class REPL(cmd.Cmd):
         grpc_port or self.state.api_grpc_port
       )
       self.api_call("set_trace_ingest_callback", self.__trace_cb, timeout=2.0)
+
     elif cmd[1] == "stop":
       self.stop_api()
     elif cmd[1] == "status":
@@ -182,12 +212,12 @@ class REPL(cmd.Cmd):
               ["Examples  > model meta-llama/Meta-Llama-3-8B"])
     _print_hf("nodes list ", "List mDNS discovered nodes.")
     _print_hf("log [LEVEL]", "Set the logging level.")
-    dprint("\033[1m\n    API Server Control:\n\033[0m")
+    dprint("\033[1m\n    Controlling the API Server:\n\033[0m")
     _print_hf("api start [http_port=8080] [grpc_port=50500]", "Start the API server in a separate thread. Use provided ports if given.")
     _print_hf("api stop ", "Signal clean shutdown of the API server.")
     _print_hf("api status ", "Prints the status of the API server.")
     _print_hf("api log ", "Print latest logs to the current terminal.")
-    dprint("\033[1m\n    Building a topology:\n\033[0m")
+    dprint("\033[1m\n    Topology construction:\n\033[0m")
     _print_hf("search ", "Returns the current state of mDNS search.")
     _print_hf("search [on/off] ", "Toggle mDNS search across the local network.")
     _print_hf("nodes list ", "List all nodes in the current topology (including local ones).")
@@ -195,15 +225,19 @@ class REPL(cmd.Cmd):
     _print_hf("nodes ", "List mDNS discovered nodes.")
     _print_hf("topo [AUTO/SETUP]", "Toggle between automatic and manual topology creation.")
     _print_hf("topo add [NODE]", "Add [NODE] to the topology.")
-    _print_hf("topo remove [NODE]", "Add [NODE] to the topology.")
-    sys.stdout.write("\033[1m\n    Building a schedule:\n\033[0m")
-    _print_hf("sched create", "Automatic search for best schedule given the active topology and the loaded model.")
-    _print_hf("sched assign [LAYER] [NODE]", "Assign the layer with index [LAYER] to [NODE].",
-              ["Example   > sched assign 10 benny_234"])
-    _print_hf("schedule assign [START-END] [NODE]", "Assign the layer range between [START] and [END] to [NODE].",
-              ["Example   > sched assign 0-12 benny_234"])
-    sys.stdout.write("\033[1m\n    Benchmarking and profiling:\n\033[0m")
-    _print_hf("profile [REPO]", "Estimate the total FLOPS of the model from [REPO]")
+    _print_hf("topo remove [NODE]", "Remove [NODE] from the topology.")
+    sys.stdout.write("\033[1m\n    Scheduling:\n\033[0m")
+    _print_hf("sched auto ", "Automatic search for best schedule given the active topology and the loaded model.")
+    _print_hf("sched assign [INDEX] [NODE]", "Assign the layer range between [START] and [END] to [NODE].",
+              ["Example: > sched assign 10 benny_234",
+               "         > sched assign 0-12 benny_234"])
+    sys.stdout.write("\033[1m\n    Benchmarking, Tracing and Profiling:\n\033[0m")
+    _print_hf("trace [ON|OFF][PATH][SYSTEM] ", "Trace [SYSTEM] and output to file at [PATH].")
+    _print_hf("trace status ", "See status of the trace, eg. number of frames captured")
+    _print_hf("trace focus [SUBSYSTEM] ", "Focus the trace on [SUBSYSTEM]. Do 'trace focus' for a list of available subsystems.")
+    _print_hf("trace stream [ON|OFF] ", "Stream the trace spans to current terminal.")
+    _print_hf("trace set [BUDGET] ", "Set the maximum amount of recoded events.")
+    _print_hf("profile [REPO] ", "Estimate the total FLOPS of the model from [REPO]")
     _print_hf("bench [REPO]", "Benchmark the system using the model from [REPO]")
     _print_hf("bench [KERNEL]", "Behcnmark the system using base kernel [KERNEL]")
     _print_hf("bench [NODE]", "Behcnmark the network latency between the current system and [NODE]")
@@ -332,11 +366,6 @@ class REPL(cmd.Cmd):
 
   # ===== Handle API server
 
-  # Tracer frames ingest callback
-  def __trace_cb(self, data):
-    dprint(str(data))
-    pass
-
   async def _api_main(self) -> None: # main thread loop
     self._api_loop = asyncio.get_running_loop()
     self._api_shutdown_e = asyncio.Event()
@@ -380,7 +409,33 @@ class REPL(cmd.Cmd):
     if not self._api_ready.wait(timeout):
       raise RuntimeError("API Server Timeout.")
     if self._api_exc is not None:
-      raise RuntimeError(f"API Server failed to start")
+      raise RuntimeError(f"API Server failed to start: {self._api_exc}")
+    # Register REPL aggregator callback on the API node
+    try:
+      self.api_call("set_trace_ingest_callback", self._trace_agg.enqueue, timeout=5)
+    except Exception:
+      pass
+
+    # Silence API server logs on the REPL console: drop records emitted from the API thread
+    try:
+      class _DropApiOnConsole(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+          # Only drop records coming from the API thread so other threads keep logging
+          tname = getattr(record, "threadName", "") or ""
+          return tname != "api_server"
+
+      root = logging.getLogger()
+      for h in list(root.handlers):
+        if isinstance(h, logging.StreamHandler) and getattr(h, "stream", None) in (sys.stdout, sys.stderr):
+          if not any(isinstance(f, _DropApiOnConsole) for f in getattr(h, "filters", [])):
+            h.addFilter(_DropApiOnConsole())
+
+      # Also quiet Hypercorn logs explicitly (HTTP server used by API)
+      logging.getLogger("hypercorn").setLevel(logging.CRITICAL)
+      logging.getLogger("hypercorn.error").setLevel(logging.CRITICAL)
+      logging.getLogger("hypercorn.access").setLevel(logging.CRITICAL)
+    except Exception:
+      pass
 
   def stop_api(self, timeout: float = 5.0) -> None:
     if not self._api_thread: return
@@ -440,6 +495,72 @@ class REPL(cmd.Cmd):
         f.set_exception(e)
     self._api_loop.call_soon_threadsafe(runner)
     return f.result(timeout)
+
+  # ------- Trace aggregation helpers 
+
+  def do_trace(self, cmd):
+    if len(cmd) < 2:
+      dprint(f"Tracing is currently {"ON" if self._trace_cfg.enabled else "OFF"}\n")
+    elif cmd[1] in ("on", "ON"):
+      self._trace_cfg.enabled = True
+      if self._api_running:
+        self.api_call("_forward_trace_config", self._trace_cfg) # Send trace config to all shards
+      dprint("Tracing is now ON\n")
+    elif cmd[1] in ("off", "OFF"):
+      self._trace_cfg.enabled = False 
+      if self._api_running:
+        self.api_call("_forward_trace_config", self._trace_cfg) # Send trace config to all shards
+      dprint("Tracing is not OFF\n")
+    elif cmd[1] == "focus":
+      #self.api_call("_forward_trace_config", self._trace_cfg) # Send trace config to all shards
+      dprint("Subsystems not yet implemented.\n")
+    elif cmd[1] == "stream":
+      if len(cmd) == 2:
+        dprint(f"Trace is {"streaming to file: "+str(self._trace_cfg.file) if self._trace_cfg.streaming else "not streaming."}\n")
+      elif cmd[2] == "on":
+        self._trace_cfg.streaming = True
+        dprint(f"Streaming trace frames to {self._trace_cfg.file}\n")
+      elif cmd[2] == "off":
+        self._trace_cfg.streaming = False 
+        dprint("Trace streaming is OFF.\n")
+    elif cmd[1] == "set":
+      if len(cmd) == 2:
+        dprint("Use: trace set [BUDGET], eg. 2000\n")
+      else:
+        dprint("Not implemented yet\n")
+      # FIXME: Implement
+    elif cmd[1] == "status":
+      dprint(f"Frames: {len(self._trace_agg._req)}\n")
+
+    elif cmd[1] == "annotate":
+      self.print_trace_annotate("NONE")
+
+  # Trace callback registered with API Thread
+  def __trace_cb(self, data):
+    self._trace_agg.enqueue(data)
+
+  def __print_tr(self, symbol, ms, counts):
+    sym = "    " + symbol.ljust(40, ' ')
+    pms = f"{ms:.10}".ljust(10, ' ') 
+    cns = f"{counts}".ljust(4, ' ')
+    sys.stdout.write(f"{sym} {pms} {cns}\n")
+
+  def print_trace_annotate(
+    self,
+    run_id: str = "run",
+    mapping: Optional[Dict[str, str]] = None,
+    repeats: int = 0,
+  ) -> List[Dict[str, Any]]:
+    names = " "*17 + "symbol" + " "*21 + "ms" + " "*4 + "counts"
+    dots = "   " + "."*41 + " " + "."*10 + " " + "."*4
+    dprint(f"{names}\n{dots}\n\n")
+    sums = self._trace_agg._req[run_id].sums_by_name
+    cnts = self._trace_agg._req[run_id].counts_by_name
+    for n, d in sums.items():
+      self.__print_tr(n, d, cnts[n])
+
+  def get_trace_roots(self, run_id: str, req_id: str) -> List[Dict[str, Any]]:
+    return self._trace_agg.roots(run_id, req_id)
 
   def _print_nodes_table(self, rows: List[Any]) -> None:
     headers = ["name", "role", "addr", "http", "grpc", "status", "head"]

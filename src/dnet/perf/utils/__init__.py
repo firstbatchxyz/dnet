@@ -1,2 +1,1 @@
-
-from aggregator import TraceAggregator
+from .aggregator import TraceAggregator

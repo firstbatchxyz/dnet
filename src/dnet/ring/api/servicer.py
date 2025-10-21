@@ -6,7 +6,8 @@ import grpc
 
 from ...protos import shard_api_comm_pb2 as pb2
 from ...protos import shard_api_comm_pb2_grpc as pb2_grpc
-from ...utils.logger import logger
+from .api_logging import get_api_logger
+logger = get_api_logger()
 
 if TYPE_CHECKING:
     pass

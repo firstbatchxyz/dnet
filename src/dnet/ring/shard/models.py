@@ -1,6 +1,6 @@
 """Shard models for dnet ring topology endpoints."""
 
-from typing import Any, Dict, List, Optional, Literal
+from typing import Any, Dict, List, Optional, Literal, Tuple
 from pydantic import BaseModel, Field
 from dnet_p2p import DnetDeviceProperties, ThunderboltConnection
 
@@ -93,8 +93,24 @@ class HealthResponse(BaseModel):
     instance: Optional[str] = Field(default=None, description="Shard name")
 
 
-# Tracer ingest
+# Tracer 
 
+class TraceConfigRequest(BaseModel):
+    file: str = Field(..., description="File for trace streaming")
+    streaming: bool = Field(..., description="Toggle for trace streaming to file")
+    include_prefixes: List[str] = Field(default=("src/dnet/"), description="")
+    include_c_calls: bool = Field(default=False, description="")
+    budget: int = Field(default=0, description="Max amount of traces in memory")
+    enabled: bool = Field(default=False, description="Start or stop tracing")
+    node_id: Optional[str] = Field(default="NONE", description="")
+    record_pid_tid: bool = Field(default=True, descriptino="") 
+    aggregate: bool = Field(default=True, description="")
+    aggregate_url: Optional[str] = Field(default=None, description="")
+    agg_max_events: int = Field(default=300, description="Threshold for sending frames to API")
+
+class TraceConfigResponse(BaseModel):
+    ok: bool = True
+    
 class TraceEvent(BaseModel):
     type: str = Field(..., description="Event type/phase")
     name: str = Field(..., description="Span/mark name")

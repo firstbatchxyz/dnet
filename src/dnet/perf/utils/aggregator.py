@@ -104,6 +104,7 @@ class TraceAggregator:
     def enqueue(self, batch: Dict[str, Any]) -> None:
         run_id = batch.get("run_id")
         node_id = batch.get("node_id")
+        logger.debug(f"Enquing trace buffer from {run_id}, {node_id}")
         if not run_id or not node_id:
             return
         events = batch.get("events") or []

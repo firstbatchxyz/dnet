@@ -20,6 +20,8 @@ from dnet_p2p import (
     discover_thunderbolt_connection,
 )
 
+from dnet.perf.trace import TraceConfig
+
 from ...protos.dnet_ring_pb2_grpc import add_DnetRingServiceServicer_to_server
 from .servicer import ShardServicer
 from ...utils.logger import logger
@@ -37,6 +39,8 @@ from .models import (
     ShardProfileRequest,
     ShardProfileResponse,
     ShardUnloadModelResponse,
+    TraceConfigRequest,
+    TraceConfigResponse,
 )
 from ...protos import dnet_ring_pb2
 
@@ -247,14 +251,7 @@ class StartupMixin:
 
         @self.app.post("/profile")
         async def profile(req: ShardProfileRequest) -> ShardProfileResponse:
-            logger.info("Received /profile request")
             try:
-                # Since this is the first request we get from API grab the address and store it
-                # TODO: Have a handshake request before this one where we share addresses and state
-                self.api_address = req.api_address
-                self.tracer.update_api_addr(self.api_address)
-                self.tracer.start_aggregator()
-
                 latency_results = await self._measure_latency_to_devices( req.devices, req.thunderbolts, req.payload_sizes)
                 device_profile = await self._profile_device( req.repo_id, req.max_batch_exp)
 
@@ -276,6 +273,32 @@ class StartupMixin:
             except Exception as e:
                 logger.error(f"Error in /profile endpoint: {e}")
                 raise
+
+        @self.app.post("/trace")
+        async def setup_trace(req: TraceConfigRequest) -> TraceConfigResponse:
+          try:
+            cfg = TraceConfig(
+              file=req.file,
+              streaming=req.streaming,
+              include_prefixes=req.include_prefixes,
+              include_c_calls=req.include_c_calls,
+              budget=req.budget,
+              enabled=req.enabled,
+              node_id=req.node_id,
+              record_pid_tid=req.record_pid_tid,
+              aggregate=req.aggregate,
+              aggregate_url=req.aggregate_url,
+              agg_max_events=req.agg_max_events,
+            )
+            self.tracer.config = cfg
+            logger.info("Updated tracer config.")
+            self.api_address = cfg.aggregate_url
+            self.tracer.start_aggregator()
+            logger.debug(cfg)
+            return TraceConfigResponse(ok=True)
+          except Exception as e:
+            logger.error(f"Unable to setup tracing on shard: {e}")
+            return TraceConfigResponse(ok=False)
 
         @self.app.post("/load_model")
         async def load_model_endpoint(

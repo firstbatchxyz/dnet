@@ -55,7 +55,6 @@ class PrefetchMixin(RingShardNodeAttributes):
                             self.weight_cache.prefetch_to_ram,
                             layer_id,
                         )
-                        pass
                 finally:
                     self._prefetch_active = max(0, self._prefetch_active - len(batch))
 

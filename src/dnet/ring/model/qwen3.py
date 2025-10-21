@@ -32,7 +32,6 @@ class Qwen3RingModel(BaseRingModel):
         self.is_api_layer = is_api_layer
         self.config = config = ModelArgs.from_dict(model_config)
 
-        pass
 
         # Create embed, norm, head
         if "quantization" in model_config:
@@ -46,7 +45,6 @@ class Qwen3RingModel(BaseRingModel):
                 self.embed_tokens = QuantizedEmbedding(
                     config.vocab_size, config.hidden_size, group_size=group, bits=bits
                 )
-                pass
             except Exception as _e:
                 logger.warning(
                     "QuantizedEmbedding unavailable (%s); using dense Embedding", _e
@@ -67,7 +65,6 @@ class Qwen3RingModel(BaseRingModel):
         self.is_quantized = "quantization" in model_config
         if self.is_quantized:
             self.quantization_config = model_config["quantization"]
-            pass
 
         # Create TransformerBlocks for assigned layers
         for i, layer in enumerate(sorted(assigned_layers or [])):
@@ -117,12 +114,10 @@ class Qwen3RingModel(BaseRingModel):
         self._lazy_params = bool(getattr(shard_config, "lazy_params", False))
         # Do not shrink params for quantized models; conversion relies on real shapes
         if self.is_quantized and self._lazy_params:
-            pass
             self._lazy_params = False
         if (not self.is_api_layer) and self._lazy_params:
             try:
                 self._shrink_all_params()
-                pass
             except Exception as _e:
                 logger.warning(f"Lazy-param shrink failed: {_e}")
 
@@ -285,15 +280,7 @@ class Qwen3RingModel(BaseRingModel):
                 
                 shard_weights[new_key] = value
 
-            elif key.startswith("embed_tokens"):
-                shard_weights[key] = value
-
-                
-            elif key.startswith("norm"):
-                shard_weights[key] = value
-                
-
-            elif key.startswith("lm_head") and not self.config.tie_word_embeddings:
+            elif key.startswith("embed_tokens") or key.startswith("norm") or key.startswith("lm_head") and not self.config.tie_word_embeddings:
                 shard_weights[key] = value
             
         try:

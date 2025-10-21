@@ -389,7 +389,7 @@ def get_model_metadata(model_path) -> ModelMetadata:
     except Exception:
         cfg_layers = -1
     if cfg_layers > 0:
-        bad = [i for i in weight_info.keys() if i < 0 or i >= cfg_layers]
+        bad = [i for i in weight_info if i < 0 or i >= cfg_layers]
         if bad:
             raise RuntimeError(
                 f"Layer indices out of range for model (num_hidden_layers={cfg_layers}): {sorted(set(bad))}"

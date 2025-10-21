@@ -182,7 +182,6 @@ class RecieveResultRequest(BaseModel):
 class RecieveResultResponseModel(JSONResponse):
     """Response for result receipt."""
 
-    pass
 
 
 # FIXME: can we do better?

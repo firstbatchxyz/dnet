@@ -159,7 +159,6 @@ class WeightCache:
         with self.lock:
             if layer_id in self.reference_counts:
                 self.reference_counts[layer_id] -= 1
-                pass
 
     def prefetch_to_ram(self, layer_id: int):
         """Asynchronously hint the OS to prefetch layer pages into RAM.

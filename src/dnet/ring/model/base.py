@@ -26,7 +26,6 @@ class BaseRingModel(nn.Module, metaclass=ABCMeta):
         Returns:
             Embedded representations
         """
-        pass
 
     @abstractmethod
     def normalize(self, x: mx.array) -> mx.array:
@@ -38,7 +37,6 @@ class BaseRingModel(nn.Module, metaclass=ABCMeta):
         Returns:
             Normalized hidden states
         """
-        pass
 
     @abstractmethod
     def lm_project(self, x: mx.array) -> mx.array:
@@ -50,7 +48,6 @@ class BaseRingModel(nn.Module, metaclass=ABCMeta):
         Returns:
             Logits over vocabulary
         """
-        pass
 
     @abstractmethod
     def forward(self, x: mx.array, cache: Optional[Any] = None) -> mx.array:
@@ -63,7 +60,6 @@ class BaseRingModel(nn.Module, metaclass=ABCMeta):
         Returns:
             Model output
         """
-        pass
 
     @abstractmethod
     def apply_single_layer(
@@ -83,7 +79,6 @@ class BaseRingModel(nn.Module, metaclass=ABCMeta):
         Returns:
             Layer output
         """
-        pass
 
     @property
     @abstractmethod
@@ -93,7 +88,6 @@ class BaseRingModel(nn.Module, metaclass=ABCMeta):
         Returns:
             Layer container (e.g., ModuleList)
         """
-        pass
 
     @property
     @abstractmethod
@@ -103,7 +97,6 @@ class BaseRingModel(nn.Module, metaclass=ABCMeta):
         Returns:
             Tuple of (num_heads, dim_per_head)
         """
-        pass
 
     @property
     @abstractmethod
@@ -113,7 +106,6 @@ class BaseRingModel(nn.Module, metaclass=ABCMeta):
         Returns:
             Number of KV heads
         """
-        pass
 
     @property
     @abstractmethod
@@ -123,4 +115,3 @@ class BaseRingModel(nn.Module, metaclass=ABCMeta):
         Returns:
             Number of layers
         """
-        pass

@@ -270,28 +270,29 @@ class CommsMixin(RingShardNodeAttributes):
                             )
                             f.event("reset_api")
 
-                        try:
-                            req = shard_api_comm_pb2.TokenRequest(
-                                nonce=activation_msg.nonce,
-                                token_id=int(getattr(activation_msg, "token_id", -1)),
-                                timestamp=utc_epoch_now(),
-                            )
-                            resp = await self.api_stub.SendToken(req)  # type: ignore
-                            rpc_ms = (time.perf_counter() - t_rpc) * 1000.0
-                            if not resp.success:
-                                logger.error(
-                                    "API SendToken failed for %s: %s",
-                                    activation_msg.nonce,
-                                    resp.message,
+                        with self.tracer.frame("grpc", "token_request") as fr:
+                            try:
+                                req = shard_api_comm_pb2.TokenRequest(
+                                    nonce=activation_msg.nonce,
+                                    token_id=int(getattr(activation_msg, "token_id", -1)),
+                                    timestamp=utc_epoch_now(),
                                 )
-                            if self._profile:
-                                logger.info(
-                                    "[PROFILE][TX-TOKEN][gRPC] node=%s nonce=%s token=%s rpc_ms=%.2f",
-                                    self.node_id,
-                                    activation_msg.nonce,
-                                    int(getattr(activation_msg, "token_id", -1)),
-                                    rpc_ms,
-                                )
+                                resp = await self.api_stub.SendToken(req)  # type: ignore
+                                rpc_ms = (time.perf_counter() - t_rpc) * 1000.0
+                                if not resp.success:
+                                    logger.error(
+                                        "API SendToken failed for %s: %s",
+                                        activation_msg.nonce,
+                                        resp.message,
+                                    )
+                                if self._profile:
+                                    logger.info(
+                                        "[PROFILE][TX-TOKEN][gRPC] node=%s nonce=%s token=%s rpc_ms=%.2f",
+                                        self.node_id,
+                                        activation_msg.nonce,
+                                        int(getattr(activation_msg, "token_id", -1)),
+                                        rpc_ms,
+                                    )
                         except Exception as e:
                             logger.exception("Error sending token via gRPC: %s", e)
                     else:
@@ -495,6 +496,8 @@ class CommsMixin(RingShardNodeAttributes):
                             )
                 else:
                     logger.error("Cannot forward activation - no next node configured; end shard should sample inline.")
+
+            # Final layer not annotated with 'is_final'
             else:
                 logger.error(
                     "Final activation reached send path unexpectedly; sampling should occur on end shard."

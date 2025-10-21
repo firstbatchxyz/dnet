@@ -92,6 +92,7 @@ class ComputeMixin(RingShardNodeAttributes):
             # Prepare input activation
             with self.tracer.frame("compute.thread", "activations.process") as f:
                 if activation_msg.dtype == "tokens": # embed locally on start shard
+                    logger.debug(f"Embedding tokens.")
                     f.event("embed_tokens")
                     numel = int(np.prod(activation_msg.shape))
                     tok_view = input_buffer[:numel].reshape(activation_msg.shape)
@@ -395,6 +396,7 @@ class ComputeMixin(RingShardNodeAttributes):
                         except Exception as e:
                             logger.error("End-shard sampling failed: %s", e)
                             return
+
                         output_msg = ActivationMessage(
                             nonce=activation_msg.nonce,
                             layer_id=last_layer,

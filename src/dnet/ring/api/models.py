@@ -2,7 +2,7 @@
 
 import base64
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union, Literal
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
@@ -41,35 +41,61 @@ class RingInferenceError(BaseModel):
 
 # ------------------------
 # Chat API
+# OpenAI compatible:
+# - https://platform.openai.com/docs/api-reference/chat
+# - https://platform.openai.com/docs/api-reference/chat/object
+# -
 # ------------------------
 
 
 class ChatMessage(BaseModel):
     """A single message in a chat conversation."""
 
-    role: str  # "system" | "user" | "assistant"
+    role: str  # "system" | "user" | "assistant" | "tool" | "developer" # TODO: use Literal?
     content: str
 
 
-class ChatBaseParams(BaseModel):
-    """Base parameters for chat/completion requests."""
+class ChatParams(BaseModel):
+    """Parameters for chat requests, used by:
+    - `ChatRequestModel` with messages
+    - `CompletionRequestModel` with prompt
 
-    model: Optional[str] = "default_model"
-    temperature: Optional[float] = Field(default=1.0, ge=0)
-    top_p: Optional[float] = Field(default=1.0, ge=0, le=1)
-    repetition_penalty: Optional[float] = Field(default=1.0, ge=0)
-    repetition_context_size: Optional[int] = Field(default=20, ge=0)
-    logit_bias: Optional[Dict[int, float]] = Field(default_factory=dict)
+    The attributes are given in the order they appear on docs, with unused ones commented out.
+    """
 
-
-class ChatParams(ChatBaseParams):
-    """Extended parameters for chat requests."""
-
-    stream: bool = Field(default=False)
-    max_tokens: int = Field(default=100, ge=0)
-    logit_bias: Dict[int, float] = Field(default_factory=dict)
-    logprobs: int = Field(default=-1)
+    # messages / prompt
+    model: str
+    # audio: Optional[ChatAudioParams] = Field(default=None)  # NOTE: unused
+    # frequency_penalty: float = Field(default=0.0, ge=-2.0, le=2.0)  # NOTE: unused
+    # logit_bias: Optional[Dict[int, float]] = Field(default=None) # NOTE: unused
+    logprobs: int = Field(default=-1)  # FIXME: bool
+    max_tokens: int = Field(
+        default=100, ge=0
+    )  # NOT using `max_completion_tokens` because that is for `O-` models only
+    # metadata: Optional[Dict[str, Any]] = Field(default=None)  # NOTE: unused, we dont store metadata
+    # modalities: Optional[List[str]] = Field(default=None)  # NOTE: unused
+    # parallel_tool_calls: bool = Field(default=False)  # NOTE: unused
+    # prediction: NOT USED
+    # presence_penalty: float = Field(default=0.0, ge=-2.0, le=2.0)  # NOTE: unused
+    # prompt_cache_key: Optional[str] = Field(default=None)  # NOTE: unused
+    # TODO: response_format:
+    # safety_identifier: Optional[str] = Field(default=None)  # NOTE: unused
+    # service_tier: Optional[str] = Field(default=None)  # NOTE: unused
     stop: Union[str, List[str]] = Field(default_factory=list)
+    # store: bool = Field(default=False)  # NOTE: unused
+    stream: bool = Field(default=False)
+    # stream_options:  # NOTE: unused
+    temperature: float = Field(default=1.0, ge=0, le=2)
+    # tool_choice: # NOTE: unused, later with tool calling
+    # tools: # NOTE: unused, later with tool calling
+    top_logprobs: Optional[int] = Field(..., ge=0, le=20)  # TODO: used?
+    top_p: float = Field(default=1.0, ge=0, le=1)
+    verbosity: Literal["low", "medium", "high"] = Field(default="medium")  # TODO: used?
+    # web_search_options:  # NOTE: unused, later with web search
+
+    ## NON-OPENAI PARAMETERS ##
+    repetition_penalty: float = Field(default=1.0, ge=0)  # FIXME: what is this?
+    repetition_context_size: int = Field(default=20, ge=0)  # FIXME: what is this?
     profile: bool = Field(default=False)
 
     def __init__(self, **data: Any):
@@ -93,8 +119,15 @@ class ChatRequestModel(ChatParams):
     messages: List[ChatMessage]
 
 
-class ChatLogProp(BaseModel):
+class ChatLogProbsMessage(BaseModel):
+    pass
+
+
+class ChatLogProbs(BaseModel):
     """Log probabilities for chat completion."""
+
+    content: None
+    message: None
 
     token_logprobs: Optional[List[float]] = Field(default_factory=list)
     top_logprobs: Optional[List[Dict[int, float]]] = Field(default_factory=list)
@@ -106,17 +139,24 @@ class ChatChoice(BaseModel):
 
     index: int
     message: ChatMessage
-    logprop: ChatLogProp
+    logprobs: ChatLogProbs
     finish_reason: Optional[ChatCompletionReason] = None
 
 
 class ChatResponseModel(BaseModel):
-    """Response model for chat completions."""
+    """Response model for chat completions.
 
-    id: str
-    object: str = Field(default="chat.completion")
-    model: str = Field(default="default_model")
-    choices: List[ChatChoice]
+    Compatible with [OpenAI](https://platform.openai.com/docs/api-reference/chat/object), except the following fields:
+
+    -"""
+
+    choices: List[ChatChoice] = Field(
+        ..., description="List of chat completion choices."
+    )
+    created: int = Field(..., description="The Unix timestamp (in seconds) of when the chat completion was created.")  # fmt: skip
+    id: str = Field(..., description="Unique identifier for the chat completion.")
+    model: str = Field(default="default_model", description="The model used for the chat completion.")  # fmt: skip
+    object: Literal["chat.completion"] = "chat.completion"
     usage: Optional[Dict[str, Any]] = None
     metrics: Optional[Dict[str, Any]] = None
 

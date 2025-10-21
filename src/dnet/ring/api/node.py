@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from grpc import aio as aio_grpc
 import hypercorn.asyncio as aio_hypercorn
-from mlx_lm.tokenizer_utils import load_tokenizer
+from mlx_lm.tokenizer_utils import load_tokenizer, TokenizerWrapper
 
 from dnet_p2p import (
     DnetDeviceProperties,
@@ -47,10 +47,9 @@ from .utils import (
     optimize_device_ordering,
 )
 from .models import (
-    ChatBaseParams,
     ChatChoice,
     ChatCompletionReason,
-    ChatLogProp,
+    ChatLogProbs,
     ChatMessage,
     ChatRequestModel,
     ChatResponseModel,
@@ -114,7 +113,7 @@ class RingApiNode:
         # Model state (loaded dynamically)
         self.model_metadata: Optional[ModelMetadata] = None
         self.model: Optional[Any] = None
-        self.tokenizer: Optional[Any] = None
+        self.tokenizer: Optional[TokenizerWrapper] = None
         self.generate_step: Optional[Any] = None
         self.model_name: Optional[str] = None
 
@@ -1073,9 +1072,7 @@ class RingApiNode:
             hasattr(self.tokenizer, "chat_template")
             and self.tokenizer.chat_template is not None  # type: ignore
         ):
-            message_dicts = [
-                {"role": msg.role, "content": msg.content} for msg in messages
-            ]
+            message_dicts = [msg.model_dump() for msg in messages]
             try:
                 prompt = self.tokenizer.apply_chat_template(  # type: ignore
                     message_dicts,
@@ -1133,14 +1130,7 @@ class RingApiNode:
                 node_origin=f"localhost:{self.http_port}",
                 prompt=prompt,
                 pending_requests=self.pending_requests,
-                params=ChatBaseParams(
-                    model=req.model,
-                    temperature=req.temperature,
-                    top_p=req.top_p,
-                    repetition_penalty=req.repetition_penalty,
-                    repetition_context_size=req.repetition_context_size,
-                    logit_bias=req.logit_bias,
-                ),
+                params=req,
             ),  # type: ignore
             arange(req.max_tokens or 0),
         ):
@@ -1300,7 +1290,7 @@ class RingApiNode:
                     index=0,
                     finish_reason=finish_reason,
                     message=ChatMessage(role="assistant", content=text),
-                    logprop=ChatLogProp(
+                    logprobs=ChatLogProbs(
                         token_logprobs=token_logprobs or [],
                         top_logprobs=top_logprobs or [],
                         tokens=tokens,
@@ -1327,7 +1317,7 @@ class RingApiNode:
             ]
             prompt_text = await self._convert_chat(req.messages)
             prompt = mx.array(self.tokenizer.encode(prompt_text))  # type: ignore
-            detok = self.tokenizer.detokenizer
+            detok = self.tokenizer.detokenizer  # type: ignore
             detok.reset()
             # Initial role delta
             chunk = {
@@ -1348,15 +1338,8 @@ class RingApiNode:
                     node_origin=f"localhost:{self.http_port}",  # FIXME: Not sure of this, grpc-http port mix
                     prompt=prompt,
                     pending_requests=self.pending_requests,
-                    params=ChatBaseParams(
-                        model=req.model,
-                        temperature=req.temperature,
-                        top_p=req.top_p,
-                        repetition_penalty=req.repetition_penalty,
-                        repetition_context_size=req.repetition_context_size,
-                        logit_bias=req.logit_bias,
-                    ),  # type: ignore
-                ),
+                    params=req,
+                ),  # type: ignore
                 arange(req.max_tokens or 0),
             ):
                 tokens.append(token)
@@ -1409,14 +1392,7 @@ class RingApiNode:
                     node_origin=f"localhost:{self.http_port}",  # FIXME: Not sure of this, grpc-http port mix
                     prompt=prompt,
                     pending_requests=self.pending_requests,
-                    params=ChatBaseParams(
-                        model=req.model,
-                        temperature=req.temperature,
-                        top_p=req.top_p,
-                        repetition_penalty=req.repetition_penalty,
-                        repetition_context_size=req.repetition_context_size,
-                        logit_bias=req.logit_bias,
-                    ),
+                    params=req,
                 ),  # type: ignore
                 arange(req.max_tokens or 0),
             ):

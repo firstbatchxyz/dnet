@@ -43,7 +43,10 @@ dnet-api = "cli.api:main"
 dnet-shard = "cli.shard:main"
 
 [dependency-groups]
-dev = ["pytest>=8.4.2"]
+dev = [
+  "openai>=2.6.0", # for OpenAI compatibility tests
+  "pytest>=8.4.2",
+]
 
 [build-system]
 requires = ["uv_build>=0.8.17,<0.9.0"]

@@ -33,7 +33,9 @@ class Llama3RingModel(BaseRingModel):
 
     self.embed_tokens = nn.Embedding(self.config.vocab_size, self.config.hidden_size)
     self.norm = nn.RMSNorm(self.config.hidden_size, self.config.rms_norm_eps)
-    self.lm_head = nn.Linear(self.config.hidden_size, self.config.vocab_size, bias=False)
+
+    if not self.config.tie_word_embeddings:
+      self.lm_head = nn.Linear(self.config.hidden_size, self.config.vocab_size, bias=False)
 
     self.layers: List[nn.Module] = []
     self.abs_to_local: Dict[int, int] = {}
@@ -41,8 +43,9 @@ class Llama3RingModel(BaseRingModel):
     for i, l in enumerate(sorted(assigned_layers or [])):
       self.layers.append(TransformerBlock(self.config))
       self.abs_to_local[l] = i
+
     logger.debug(f"Created {len(self.layers)} Transformer layers")
-    logger.debug(f"abs_to_local mapping: {self.abs_to_local}")
+    #logger.debug(f"abs_to_local mapping: {self.abs_to_local}")
 
   @property
   def decoding_layers(self):
@@ -72,8 +75,14 @@ class Llama3RingModel(BaseRingModel):
   def normalize(self, x: mx.array):
     return self.norm(x) 
 
+  # FIXME: Weird MLX bug, lm_head weights are transposed internally for no reason 
   def lm_project(self, x: mx.array):
-    return self.lm_head(x)
+    if self.config.tie_word_embeddings:
+      return self.embed_tokens.as_linear(x)
+    try:
+      return self.lm_head(x)
+    except Exception as e:
+      return mx.matmul(x, self.lm_head.weight)
 
   def quantize_layers(self):
     self.quantization = None 
@@ -127,7 +136,19 @@ class Llama3RingModel(BaseRingModel):
   ):
     if layer_idx not in self.abs_to_local:
       raise RuntimeError(f"Attempted execution of foreign layer {layer_idx}")
-    mask = create_attention_mask(x, cache)
+
+    mask = None
+    sqlen = int(x.shape[1])
+    if sqlen > 1:
+      cached = getattr(self, "_cached_mask_len", None)  
+      cached_mask = getattr(self, "_cached_mask", None)
+      if cached is None or cached != sqlen or not cached_mask:
+        mask = create_attention_mask(x, cache)
+        self._cached_mask = mask
+        self._cached_mask_len = sqlen
+      else:
+        mask = cached_mask
+        
     local_idx = self.abs_to_local[layer_idx]
     logger.debug(f"apply_single_layer: layer:{layer_idx}, local_idx:{local_idx}, input_shape:{x.shape}")
 
@@ -165,7 +186,9 @@ class Llama3RingModel(BaseRingModel):
         logger.debug(f"Mapping weight {k} -> {new_key}")
         shard_weights[new_key] = v
         
-      elif (k.startswith("embed_tokens") or k.startswith("lm_head") or k.startswith("norm")):
+      elif k.startswith("lm_head"):
+        shard_weights[k] = v
+      elif (k.startswith("embed_tokens") or k.startswith("norm")):
         shard_weights[k] = v
         
     if shard_weights:

@@ -131,13 +131,9 @@ class Tracer:
             except Exception:
                 logger.warining("Unable to close httpx client.")
 
-    # We don't have the API addr at init time
     def update_api_addr(self, addr):
         self.config.aggregate_url = addr
         logger.debug(f"Updated API Address: {self.config.aggregate_url}")
-
-    def update_confi(self, config):
-        pass
 
     def start(self, *, reset: bool = True) -> None:
         self._active = bool(self.config.enabled)
@@ -214,8 +210,9 @@ class Tracer:
                 if len(self._events) < self._agg_max_events: return
                 logger.debug(f"Queuing tracer frame batch of {len(self._events)}")
                 batch = { "run_id": (self._req_id or "NONE"),
-                          "node_id": (self.config.node_id or "UNKNOWN_NODE"),
+                          "node_id": (self.config.node_id or "NODE"),
                           "events": list(self._events)}
+                logger.debug(batch)
                 try:
                     self._agg_q.put_nowait(batch)
                 except queue.Full:

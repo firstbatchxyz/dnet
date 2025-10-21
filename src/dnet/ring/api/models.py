@@ -65,15 +65,17 @@ class ChatBaseParams(BaseModel):
 class ChatParams(ChatBaseParams):
     """Extended parameters for chat requests."""
 
-    stream: Optional[bool] = False
-    max_tokens: Optional[int] = Field(default=100, ge=0)
-    logit_bias: Optional[Dict[int, float]] = Field(default_factory=dict)
-    logprobs: Optional[int] = Field(default=-1)
-    stop: Optional[Union[str, List[str]]] = []
-    profile: Optional[bool] = False
+    stream: bool = Field(default=False)
+    max_tokens: int = Field(default=100, ge=0)
+    logit_bias: Dict[int, float] = Field(default_factory=dict)
+    logprobs: int = Field(default=-1)
+    stop: Union[str, List[str]] = Field(default_factory=list)
+    profile: bool = Field(default=False)
 
     def __init__(self, **data: Any):
         super().__init__(**data)
+
+        # FIXME: why do this?
         if isinstance(self.stop, str):
             self.stop = [self.stop]
 

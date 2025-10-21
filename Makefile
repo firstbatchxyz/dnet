@@ -14,9 +14,13 @@ format:
 protos:
 		uv run ./scripts/generate_protos.py
 
-.PHONY: update #         | Update git submodules
+.PHONY: update #       | Update git submodules
 update:
 		git submodule update --init --recursive
+
+.PHONY: test #         | Run tests
+test:
+		uv run pytest -v
 
 .PHONY: help #         | List targets
 help:                                                                                                                    

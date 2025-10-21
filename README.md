@@ -158,11 +158,25 @@ curl http://localhost:8080/v1/devices \
 
 ## Testing
 
-You can lint the code using Ruff:
+You can run Pytest tests via:
 
 ```sh
-uvx ruff check
+uv run pytest -v
 ```
+
+You can check linting and formatting via Ruff:
+
+```sh
+# lint
+uvx ruff check
+
+# format
+uvx ruff format --diff
+```
+
+> [!TIP]
+>
+> If you are using VsCode, we have prepared [tasks](./.vscode/tasks.json) that you can run easily from the <kbd> Command Palette > Tasks: Run Task </kbd>.
 
 ## License
 

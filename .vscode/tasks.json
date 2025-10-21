@@ -1,0 +1,101 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Start API (8080 + 58080)",
+      "type": "shell",
+      "command": "uv",
+      "args": [
+        "run",
+        "dnet-api",
+        "--http-port",
+        "8080",
+        "--grpc-port",
+        "58080"
+      ],
+      "group": "build",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "new",
+        "showReuseMessage": true,
+        "clear": false
+      }
+    },
+    {
+      "label": "Start Shard (8081 + 58081)",
+      "type": "shell",
+      "command": "uv",
+      "args": [
+        "run",
+        "dnet-shard",
+        "--http-port",
+        "8081",
+        "--grpc-port",
+        "58081"
+      ],
+      "group": "build",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "new",
+        "showReuseMessage": true,
+        "clear": false
+      }
+    },
+    {
+      "label": "Health (Shard 8081)",
+      "type": "shell",
+      "command": "curl -s http://localhost:8081/health -H \"Content-Type: application/json\" | bun -p \"Bun.inspect(await Bun.stdin.json(), { colors: true })\""
+    },
+    {
+      "label": "Start Shard (8082 + 58082)",
+      "type": "shell",
+      "command": "uv",
+      "args": [
+        "run",
+        "dnet-shard",
+        "--http-port",
+        "8082",
+        "--grpc-port",
+        "58082"
+      ],
+      "group": "build",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "new",
+        "showReuseMessage": true,
+        "clear": false
+      }
+    },
+    {
+      "label": "Prepare Topology (Qwen/Qwen3-4B-MLX-4bit)",
+      "type": "shell",
+      "command": "curl -X POST http://localhost:8080/v1/prepare_topology -H \"Content-Type: application/json\" -d '{ \"model\": \"Qwen/Qwen3-4B-MLX-4bit\" }' | bun -p \"Bun.inspect(await Bun.stdin.json(), { colors: true })\""
+    },
+    {
+      "label": "Prepare & Load (Qwen/Qwen3-4B-MLX-4bit)",
+      "type": "shell",
+      "command": "uv run ./scripts/prepare_model.py Qwen/Qwen3-4B-MLX-4bit"
+    },
+    {
+      "label": "Get API Devices",
+      "type": "shell",
+      "command": "curl -s http://localhost:8080/v1/devices -H \"Content-Type: application/json\" | bun -p \"Bun.inspect(await Bun.stdin.json(), { colors: true })\""
+    },
+    {
+      "label": "Get API Topology",
+      "type": "shell",
+      "command": "curl -s http://localhost:8080/v1/topology -H \"Content-Type: application/json\" | bun -p \"Bun.inspect(await Bun.stdin.json(), { colors: true })\""
+    },
+    {
+      "label": "Chat Completions (Qwen/Qwen3-4B-MLX-4bit)",
+      "type": "shell",
+      "command": "curl -X POST http://localhost:8080/v1/chat/completions -H \"Content-Type: application/json\" -d '{\"model\":\"Qwen/Qwen3-4B-MLX-4bit\", \"messages\": [{\"role\": \"user\", \"content\": \"What is the capital of France?\"}], \"max_tokens\": 100}' | bun -p \"Bun.inspect(await Bun.stdin.json(), { colors: true })\""
+    }
+  ]
+}

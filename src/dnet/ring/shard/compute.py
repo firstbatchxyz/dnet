@@ -11,14 +11,16 @@ from ...utils.logger import logger
 from ...utils.serialization import mlx_dtype_map
 from ...utils.time import utc_epoch_now
 from ..data_types import ActivationMessage
+from .attrib import RingShardNodeAttributes
 
 
-class ComputeMixin:
+class ComputeMixin(RingShardNodeAttributes):
     """Split out the hot-path compute from RingShardNode."""
 
     def _process_activation(self, activation_msg: ActivationMessage):
         if (
-            not self._check_model_loaded()
+            not self.model
+            or not self.model_metadata
             or not self.weight_cache
             or not self.input_pool
             or not self.output_pool
@@ -172,23 +174,17 @@ class ComputeMixin:
                     pass
                 layer_times_ms: list[tuple[int, float]] = []
                 for i, lyr in enumerate(window_layers):
-                    t_l0 = (
-                        time.perf_counter() if getattr(self, "_profile", False) else 0.0
-                    )
+                    t_l0 = time.perf_counter() if self._profile else 0.0
                     with self._mlx_lock:
                         x = self.model.apply_single_layer(lyr, x, cache=kv)
 
                     # Optional per-n-layer sync for profiling, gated by settings
-                    if getattr(self, "_profile", False) and getattr(
-                        self, "_sync_per_layer", False
-                    ):
+                    if self._profile and self._sync_per_layer:
                         do_sync = True
-                        try:
-                            n = int(getattr(self, "_sync_every_n", 0) or 0)
-                        except Exception:
-                            n = 0
+                        n = self._sync_every_n
                         if n > 0 and (i % n) != 0:
                             do_sync = False
+
                         if do_sync:
                             try:
                                 with self._mlx_lock:
@@ -361,7 +357,7 @@ class ComputeMixin:
                         pass
 
                 nxt = last_layer + 1
-                if nxt >= self.model_metadata.num_layers: # End of model
+                if nxt >= self.model_metadata.num_layers:  # End of model
                     try:
                         with self._mlx_lock:
                             y = self.model.normalize(x_cast)

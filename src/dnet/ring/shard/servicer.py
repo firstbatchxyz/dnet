@@ -158,4 +158,4 @@ class ShardServicer(DnetRingServiceServicer):
 
         except Exception as e:
             logger.error("[STREAM][RX] error: %s", e)
-            await context.abort(grpc.StatusCode.INTERNAL, str(e))
+            context.abort(grpc.StatusCode.INTERNAL, str(e))

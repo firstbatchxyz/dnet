@@ -50,10 +50,10 @@ requires = ["uv_build>=0.8.17,<0.9.0"]
 build-backend = "uv_build"
 
 [tool.pytest.ini_options]
-python_files = ["dnet/**/*_test.py", "tests/*.py"]
+python_files = ["src/dnet/**/*_test.py", "tests/*.py"]
 python_functions = ["test_"]
 log_cli = true
 
 [tool.ruff]
 exclude = [".git", ".venv", "__pycache__", "build", "dist", "lib"]
-line-length = 88 # black
+line-length = 88                                                   # black

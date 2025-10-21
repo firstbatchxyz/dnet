@@ -105,9 +105,7 @@ class WeightCache:
                 # Estimate bytes by summing tensor sizes for the layer
                 try:
                     winfo = self.layer_manager.weight_info.get(layer_id, {})
-                    total_bytes = sum(
-                        getattr(w, "size_bytes", 0) for w in winfo.values()
-                    )
+                    total_bytes = sum(w.size_bytes for w in winfo.values())
                 except Exception:
                     total_bytes = 0
                 # Commit to cache under lock

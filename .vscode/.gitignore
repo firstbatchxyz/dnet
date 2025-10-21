@@ -1,0 +1,5 @@
+*
+
+# ignore everything but itself & tasks
+!.gitignore
+!tasks.json

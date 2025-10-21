@@ -36,7 +36,6 @@ piped_mlx.egg-info/
 .coverage
 
 .idea/
-.vscode/
 .DS_Store
 .ruff_cache/
 .logs/

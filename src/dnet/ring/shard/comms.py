@@ -3,61 +3,49 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import Callable, Optional, Any
+from typing import Mapping, Optional, Any
 from urllib.parse import urlparse
 
 import grpc
 from grpc import aio as aio_grpc
 import numpy as np
-from mlx.core import Dtype
 
-from dnet.ring.memory_pool import LayerAwareMemoryPool
+from dnet_p2p import (
+    DnetDeviceProperties,
+    discover_thunderbolt_connection,
+)
+from dnet_p2p.thunderbolt import ThunderboltConnection
+from dnet.utils.latency import DeviceLatencyResult, LatencyMeasurement, LatencyResults
+
 from ...utils.grpc_config import GRPC_AIO_OPTIONS
 from ...utils.logger import logger
 from ...utils.time import utc_epoch_now
 from ...utils.serialization import dtype_map, tensor_to_bytes
-from ...utils.model import ModelMetadata
 from ...protos import shard_api_comm_pb2, shard_api_comm_pb2_grpc, dnet_ring_pb2
 from ..data_types import ActivationMessage
 
+from .attrib import RingShardNodeAttributes
 
-class SendMixin:
-    next_node_stub: Optional[Any]
-    activation_computed_queue: asyncio.Queue[ActivationMessage]
-    node_id: int
-    _profile: bool
-    output_pool: LayerAwareMemoryPool
-    running: bool
-    model_metadata: ModelMetadata
-    _prefetch_pending: set[int]
-    _prefetch_active = 0
-    weight_prefetch_queue: asyncio.Queue[int]
-    _wire_dtype_str: str
-    _wire_mx_dtype: Dtype
-    _assigned_set: set[int]
-    window_size: int
 
-    _prefetch_to_ram: Callable[[int], None]
-    _enqueue_weight_prefetch: Callable[[int], None]
-    _prefetch_pause: asyncio.Event
-    _next_local_layers: Callable[[int, int], list[int]]
-    _clear_prefetch_state: Callable[[], None]
+@dataclass
+class _StreamCtx:
+    nonce: str
+    queue: asyncio.Queue
+    call: Optional[Any] = None
+    ack_task: Optional[asyncio.Task] = None
+    open: bool = False
+    disabled: bool = False
+    disabled_until: float = 0.0
+    last_seq: int = 0
+    last_activity_t: float = 0.0
 
-    @dataclass
-    class _StreamCtx:
-        nonce: str
-        queue: asyncio.Queue
-        call: Optional[Any] = None
-        ack_task: Optional[asyncio.Task] = None
-        open: bool = False
-        disabled: bool = False
-        disabled_until: float = 0.0
-        last_seq: int = 0
-        last_activity_t: float = 0.0
+
+class CommsMixin(RingShardNodeAttributes):
+    """Communication-related methods for ring shard node."""
 
     async def _ensure_stream(self, nonce: str):
         try:
-            if not getattr(self, "_streaming_enabled", False):
+            if not self._streaming_enabled:
                 return None
             if self.next_node_stub is None:
                 return None
@@ -77,7 +65,7 @@ class SendMixin:
                     pass
                 return ctx
 
-            ctx = SendMixin._StreamCtx(nonce=nonce, queue=asyncio.Queue(maxsize=64))
+            ctx = _StreamCtx(nonce=nonce, queue=asyncio.Queue(maxsize=64))
             if not hasattr(self, "_streams"):
                 self._streams = {}
             self._streams[nonce] = ctx
@@ -150,7 +138,7 @@ class SendMixin:
         idle_s = float(getattr(self, "_stream_idle_s", 2.0))
         while getattr(self, "running", False):
             try:
-                if not getattr(self, "_streaming_enabled", False):
+                if not self._streaming_enabled:
                     await asyncio.sleep(1.0)
                     continue
                 now = asyncio.get_running_loop().time()
@@ -203,9 +191,10 @@ class SendMixin:
                 logger.error("Send worker error: %s", e)
 
     async def _send_activation(self, activation_msg: ActivationMessage):
-        if not self._check_model_loaded() or not self.output_pool:
+        if not self.output_pool or not self.model_metadata:
             logger.error(
-                "Node %s: Cannot send activation - model not loaded", self.node_id
+                "Node %s: Cannot send activation - output pool / model metadata not initialized",
+                self.node_id,
             )
             return
         try:
@@ -220,14 +209,14 @@ class SendMixin:
                         logger.error("Invalid gRPC callback URL for token: %s", cb)
                         return
                     # Ensure API channel/stub
-                    if (getattr(self, "api_channel", None) is None) or (
-                        addr != getattr(self, "api_address", None)
-                    ):
+                    if (self.api_channel is None) or (addr != self.api_address):
+                        # close existing channel if any
                         try:
-                            if getattr(self, "api_channel", None) is not None:
+                            if self.api_channel is not None:
                                 await self.api_channel.close()
                         except Exception:
                             pass
+
                         self.api_address = addr
                         self.api_channel = aio_grpc.insecure_channel(
                             addr, options=GRPC_AIO_OPTIONS
@@ -267,7 +256,9 @@ class SendMixin:
                 return
 
             used_pool = False
-            shaped = getattr(activation_msg, "tensor", None)
+
+            # FIXME: shaped var is a bit weird (is it np_array or mlx_array), @andthattoo shall check
+            shaped = activation_msg.tensor
             if shaped is None:
                 output_buffer = self.output_pool.get_buffer(activation_msg.pool_id)
                 if output_buffer is None:
@@ -303,7 +294,9 @@ class SendMixin:
                 wire_np_dtype = dtype_map[self._wire_dtype_str]
             except Exception:
                 wire_np_dtype = np.float16  # reasonable default fallback
+
             if isinstance(shaped, np.ndarray):
+                logger.warning("Activation tensor is a numpy array!!!")
                 if shaped.dtype != wire_np_dtype:
                     shaped = shaped.astype(wire_np_dtype, copy=False)
             else:
@@ -380,13 +373,12 @@ class SendMixin:
                                     grpc.StatusCode.DEADLINE_EXCEEDED,
                                 }:
                                     logger.warning(
-                                        "SendActivation attempt %s/%s failed (%s); reconnecting to %s",
+                                        "SendActivation attempt %s/%s failed (%s); reconnecting...",
                                         attempt,
                                         max_attempts,
                                         code.name,
-                                        self.next_node_address,  # FIXME: will be `next_node` !
                                     )
-                                    await self._reconnect_next_node()  # FIXME: !!!
+                                    await self._reconnect_next_node()
                                     await asyncio.sleep(min(0.25 * attempt, 1.0))
                                     continue
                                 raise
@@ -501,3 +493,182 @@ class SendMixin:
                     pass
         except Exception as e:
             logger.exception("Error sending activation: %s", e)
+
+    async def _connect_next_node(self) -> bool:
+        """Connect to next node in ring.
+
+        Returns:
+            True if connected or no next node, False on failure
+        """
+        if not self.next_node:
+            logger.info(f"Shard node {self.node_id} is the final shard (no next node)")
+            return True
+
+        if self.next_node_channel:
+            logger.debug(f"Shard node {self.node_id} already connected to next node.")
+            return True
+
+        try:
+            # use thunderbolt here if available
+            this_properties = self.discovery.get_own_properties()
+            thunderbolt_conn = discover_thunderbolt_connection(
+                this_properties,
+                self.next_node,
+            )
+            next_ip = (
+                thunderbolt_conn.ip_addr
+                if thunderbolt_conn
+                else self.next_node.local_ip
+            )
+            address = f"{next_ip}:{self.next_node.shard_port}"
+            logger.info(
+                f"Shard node {this_properties.instance} connecting to next node {self.next_node.instance} at {address}"
+            )
+
+            self.next_node_channel = aio_grpc.insecure_channel(address)
+            from ...protos.dnet_ring_pb2_grpc import DnetRingServiceStub
+
+            self.next_node_stub = DnetRingServiceStub(self.next_node_channel)
+            return True
+        except Exception as e:
+            logger.warning(
+                f"Shard node {self.node_id} failed to connect to next node {address}: {e}"
+            )
+            self.next_node_channel = None
+            self.next_node_stub = None
+            return False
+
+    async def _reconnect_next_node(self) -> bool:
+        try:
+            if self.next_node_channel:
+                await self.next_node_channel.close()
+        except Exception:
+            pass
+        self.next_node_channel = None
+        self.next_node_stub = None
+        return await self._connect_next_node()
+
+    async def _measure_latency_to_devices(
+        self,
+        devices: Mapping[str, DnetDeviceProperties],
+        thunderbolts: Mapping[str, ThunderboltConnection],
+        payload_sizes: list[int],
+    ) -> LatencyResults:
+        """Measure latency to all devices except self.
+
+        Args:
+            devices: Device information mapping
+            thunderbolts: Thunderbolt connection information
+            payload_sizes: List of payload sizes to test
+
+        Returns:
+            Latency measurement results
+        """
+        latency_results_dict: dict[str, DeviceLatencyResult] = {}
+
+        for service_name, device_info in devices.items():
+            # Skip measuring latency to ourselves
+            # FIXME: just equals check should suffice here?
+            if service_name.startswith(self.discovery.instance_name()):
+                logger.debug("Skipping latency measurement to self: %s", service_name)
+                continue
+
+            # Skip measuring latency to API (manager) devices
+            if device_info.is_manager:
+                logger.debug(
+                    "Skipping latency measurement to manager/API: %s", service_name
+                )
+                continue
+
+            try:
+                shard_port = device_info.shard_port
+
+                # Check for Thunderbolt connection
+                if service_name in thunderbolts:
+                    tb_data = thunderbolts[service_name]
+                    service_ip = tb_data.ip_addr
+                    logger.info(
+                        "Using Thunderbolt for %s at %s, connected to instance %s",
+                        service_name,
+                        service_ip,
+                        tb_data.instance,
+                    )
+                else:
+                    # No Thunderbolt, use WiFi
+                    service_ip = device_info.local_ip
+
+                if not shard_port or not service_ip:
+                    logger.warning(
+                        "No shard_port or local_ip for device %s", service_name
+                    )
+                    continue
+
+                # Connect to target shard's gRPC server
+                target_address = f"{service_ip}:{shard_port}"
+                channel = aio_grpc.insecure_channel(target_address)
+                from ...protos.dnet_ring_pb2_grpc import DnetRingServiceStub
+
+                stub = DnetRingServiceStub(channel)
+
+                # Measure latency for each payload size
+                latency_measurements: list[LatencyMeasurement] = []
+                for payload_size in payload_sizes:
+                    # Create dummy payload
+                    dummy_data = b"x" * payload_size
+
+                    start_time = time.perf_counter()
+                    timestamp_ms = int(time.time() * 1000)
+
+                    request = dnet_ring_pb2.LatencyMeasureRequest(
+                        requester_id=str(self.node_id),
+                        payload_size=payload_size,
+                        dummy_data=dummy_data,
+                        timestamp=timestamp_ms,
+                    )
+
+                    response = await stub.MeasureLatency(request)  # type: ignore
+                    end_time = time.perf_counter()
+
+                    if response.success:
+                        latency_ms = (end_time - start_time) * 1000
+                        latency_measurements.append(
+                            LatencyMeasurement(
+                                payload_size=payload_size,
+                                latency_ms=round(latency_ms, 2),
+                                success=True,
+                                error=None,
+                            )
+                        )
+                    else:
+                        latency_measurements.append(
+                            LatencyMeasurement(
+                                payload_size=payload_size,
+                                success=False,
+                                error=response.message,
+                                latency_ms=0,
+                            )
+                        )
+
+                # Store results
+                result = DeviceLatencyResult(
+                    target_node_id=response.node_id if response.success else None,
+                    measurements=latency_measurements,
+                    success=True,
+                    error=None,
+                )
+                latency_results_dict[service_name] = result
+
+                # Close channel
+                await channel.close()
+
+            except Exception as e:
+                logger.error("Error measuring latency to %s: %s", service_name, e)
+                result = DeviceLatencyResult(
+                    target_node_id=None,
+                    success=False,
+                    error=str(e),
+                    measurements=[],
+                )
+                latency_results_dict[service_name] = result
+
+        return LatencyResults(results=latency_results_dict)

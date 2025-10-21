@@ -14,7 +14,6 @@ import mlx.core as mx
 from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from grpc import aio as aio_grpc
-from hypercorn import Config
 import hypercorn.asyncio as aio_hypercorn
 from mlx_lm.tokenizer_utils import load_tokenizer
 
@@ -42,7 +41,11 @@ from ...protos.shard_api_comm_pb2_grpc import (
 
 from ...utils.logger import logger
 from ...utils.model import ModelMetadata, get_model_metadata
-from .utils import create_generate_step_for_ring_with_grpc
+from .utils import (
+    create_generate_step_for_ring_with_grpc,
+    compute_layer_assignments,
+    optimize_device_ordering,
+)
 from .models import (
     ChatBaseParams,
     ChatChoice,
@@ -188,7 +191,7 @@ class RingApiNode:
             return
 
         server = aio_grpc.server()
-        servicer = ShardApiServicer(self)
+        servicer = ShardApiServicer(self)  # type: ignore # FIXME: !!!
         add_ShardApiServiceServicer_to_server(servicer, server)
         listen_addr = f"[::]:{self.grpc_port}"
         server.add_insecure_port(listen_addr)
@@ -202,6 +205,8 @@ class RingApiNode:
         Args:
             shutdown_trigger: Shutdown trigger function
         """
+        from hypercorn import Config
+
         await self._setup_routes()
 
         config = Config.from_mapping(
@@ -213,8 +218,8 @@ class RingApiNode:
         )
 
         self.http_server = asyncio.create_task(
-            aio_hypercorn.serve(  # type: ignore
-                self.app,
+            aio_hypercorn.serve(
+                self.app,  # type: ignore
                 config,
                 shutdown_trigger=shutdown_trigger,
             )
@@ -319,8 +324,12 @@ class RingApiNode:
                 ) from e
 
         @self.app.post("/v1/chat/completions")
-        async def chat_completions(req: ChatRequestModel) -> ChatResponseModel:
-            """Handle chat completion requests."""
+        async def chat_completions(
+            req: ChatRequestModel,
+        ) -> ChatResponseModel:
+            """Handle chat completion requests.
+
+            If streaming is requested, returns a StreamingResponse."""
             if self.model is None:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -331,16 +340,18 @@ class RingApiNode:
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail="Not connected to first shard",
                 )
-            if bool(getattr(req, "stream", False)):
+            if req.stream:
+                # FIXME: return type mismatch here
                 return StreamingResponse(
                     self._stream_chat(req), media_type="text/event-stream"
                 )
-            return await self._handle_chat_completion(req)
+            else:
+                return await self._handle_chat_completion(req)
 
         @self.app.post("/v1/completions")
         async def completions(req: CompletionRequestModel):  # type: ignore
-            """Handle completion requests (not implemented)."""
-            if bool(getattr(req, "stream", False)):
+            """Handle completion requests."""
+            if req.stream:
                 return StreamingResponse(
                     self._stream_completion(req), media_type="text/event-stream"
                 )
@@ -386,7 +397,7 @@ class RingApiNode:
         )
 
         # Optimize device ordering to place Thunderbolt-connected devices adjacently
-        optimized_device_name_order = self._optimize_device_ordering(
+        optimized_device_name_order = optimize_device_ordering(
             shard_profiles, thunderbolt_conns
         )
 
@@ -399,8 +410,8 @@ class RingApiNode:
         ]  # shards ordered w.r.t to the solver
 
         # Compute layer assignments, next service mapping, and prefetch windows
-        layer_assignments = self._compute_layer_assignments(
-            optimized_device_name_order, solution, shards
+        layer_assignments = compute_layer_assignments(
+            optimized_device_name_order, solution.w, solution.k, shards
         )
 
         # Store topology (can be GET'ed later)
@@ -432,6 +443,7 @@ class RingApiNode:
             raise ValueError("Device names must be unique in manual topology")
 
         # Normalize assignments and validate services
+        # FIXME: may not need normalized array here, just use assignments
         services = set(device_names)
         normalized: List[LayerAssignment] = []
         for assignment in req.assignments:
@@ -439,17 +451,10 @@ class RingApiNode:
                 raise ValueError(
                     f"Assignment references unknown service: {assignment.service}"
                 )
-            layers_2d = assignment.layers
-            try:
-                # Accept flat list; wrap to single round
-                if layers_2d and all(isinstance(x, int) for x in layers_2d):  # type: ignore
-                    layers_2d = [layers_2d]  # type: ignore
-            except Exception:
-                pass
             normalized.append(
                 LayerAssignment(
                     service=assignment.service,
-                    layers=layers_2d,
+                    layers=assignment.layers,
                     next_service=assignment.next_service,
                     window_size=assignment.window_size,
                 )
@@ -479,6 +484,7 @@ class RingApiNode:
             )
 
         # If next_service missing and >1 device, compute simple ring by min layer
+        # FIXME: may not need this edge case at all, probably redundant
         if any(a.next_service is None for a in normalized) and len(normalized) > 1:
             order = sorted(
                 normalized,
@@ -495,7 +501,7 @@ class RingApiNode:
                     service=a.service,
                     layers=a.layers,
                     next_service=a.next_service or ring_map.get(a.service),
-                    prefetch_window=a.prefetch_window,
+                    window_size=a.window_size,
                 )
                 for a in normalized
             ]
@@ -528,16 +534,17 @@ class RingApiNode:
         """
         # Decide model and assignments
         if self.topology:
-            model_to_load = self.topology.model
-            assignments_to_use = self.topology.assignments
-            if getattr(req, "model", None) and req.model != model_to_load:
+            topology = self.topology
+
+            if req.model and req.model != self.topology.model:
                 logger.info(
                     "load_model request model %s overridden by topology model %s",
                     req.model,
-                    model_to_load,
+                    self.topology.model,
                 )
         else:
-            if not getattr(req, "model", None):
+            # ensure model is given
+            if not req.model:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=(
@@ -546,25 +553,19 @@ class RingApiNode:
                         "or include 'model' to bootstrap with discovery."
                     ),
                 )
-            # Bootstrap: run discovery-based prepare
-            await self._handle_prepare_topology(PrepareTopologyRequest(model=req.model))
-            model_to_load = self.topology.model  # type: ignore
-            assignments_to_use = self.topology.assignments  # type: ignore
 
+            # Bootstrap: run discovery-based prepare
+            topology = await self._handle_prepare_topology(
+                PrepareTopologyRequest(model=req.model)
+            )
+
+        model_to_load = topology.model
+        assignments_to_use = topology.assignments
+        shards = {dev.instance: dev for dev in topology.devices}
         logger.info("Loading model: %s", model_to_load)
 
-        # Resolve shard endpoints
-        api_properties = self.discovery.get_own_properties()
-        if self.topology and getattr(self.topology, "devices", []):
-            # Build mapping from topology (service/instance -> properties)
-            shards: Dict[str, DnetDeviceProperties] = {
-                getattr(dev, "instance"): dev for dev in self.topology.devices
-            }
-        else:
-            # Fallback to discovery when no topology is configured
-            shards = self._get_shards_from_discovery()
-
         # Notify each shard to load their layers via HTTP
+        api_properties = self.discovery.get_own_properties()
         shard_statuses: List[ShardLoadStatus] = []
         async with httpx.AsyncClient() as http_client:
             for assignment in assignments_to_use:
@@ -605,13 +606,6 @@ class RingApiNode:
                         )
 
                 try:
-                    # Total layers from topology (present after bootstrap)
-                    total_layers = (
-                        self.topology.num_layers
-                        if self.topology
-                        else (max(layers) + 1 if layers else 0)
-                    )
-
                     # Build API callback address (gRPC)
                     api_callback_address = f"{api_properties.local_ip}:{self.grpc_port}"
 
@@ -623,7 +617,7 @@ class RingApiNode:
                         warmup=True,
                         next_node=next_shard,
                         window_size=assignment.window_size,
-                        total_layers=total_layers,
+                        total_layers=topology.num_layers,
                         api_callback_address=api_callback_address,
                     ).model_dump()
 
@@ -692,7 +686,7 @@ class RingApiNode:
                     model=model_to_load,
                     success=False,
                     shard_statuses=shard_statuses,
-                    message=("Error loading API-side model: %s", e),
+                    message=f"Error loading API-side model: {e}",
                 )
         else:
             failed_shards = [
@@ -731,7 +725,7 @@ class RingApiNode:
                     # Call unload_model via HTTP
                     url = f"http://{shard.local_ip}:{shard.server_port}/unload_model"
                     response = await http_client.post(url, timeout=30.0)
-                    result = response.json()
+                    result = response.json()  # FIXME: add shard response type
 
                     shard_statuses.append(
                         ShardUnloadStatus(
@@ -812,13 +806,14 @@ class RingApiNode:
         Falls back to the first device in topology when ownership cannot be
         determined. Returns True on success, False otherwise.
         """
-        if not self.topology or not getattr(self.topology, "devices", []):
+        if not self.topology or not self.topology.devices:
+            logger.error("No topology configured; cannot connect to first shard")
             return False
 
         # Pick the device whose assignment contains layer 0; fallback to index 0
         start_service: str | None = None
         try:
-            for assignment in getattr(self.topology, "assignments", []) or []:
+            for assignment in self.topology.assignments:
                 # Flatten round layers
                 flat = [
                     layer
@@ -831,11 +826,12 @@ class RingApiNode:
         except Exception:
             start_service = None
 
+        # find the start device w.r.t service name
         start_device = None
         if start_service is not None:
             try:
                 for dev in self.topology.devices:
-                    if getattr(dev, "instance", None) == start_service:
+                    if dev.instance == start_service:
                         start_device = dev
                         break
             except Exception:
@@ -903,7 +899,7 @@ class RingApiNode:
             batch_sizes=batch_sizes,
             sequence_length=sequence_length,
         )
-        logger.info("Model profiling completed.")
+        logger.info(f"Model profiling completed for {repo_id}.")
         return load_model_profile_from_dict(asdict(model_profile_split))
 
     async def _collect_shard_profiles(
@@ -1003,81 +999,6 @@ class RingApiNode:
         return shard_profiles, all_thunderbolts
 
     # FIXME: move this to elsewhere
-    def _optimize_device_ordering(
-        self,
-        shard_profiles: Dict[str, DeviceProfile],
-        thunderbolt_conns: Dict[str, Dict[str, ThunderboltConnection]],
-    ) -> List[str]:
-        """Optimize device ordering to place Thunderbolt-connected devices adjacently.
-
-        Args:
-            shard_profiles: Collected shard profiles
-            thunderbolt_conns: Thunderbolt connections mapping (device -> {neighbor -> connection_info})
-
-        Returns:
-            Optimized list of device names with head devices first and Thunderbolt neighbors adjacent
-        """
-        device_names = list(shard_profiles.keys())
-
-        # Find all head devices (multiple shards can run on same machine as API)
-        head_devices = []
-        for device_name, profile_data in shard_profiles.items():
-            if profile_data.is_head:
-                head_devices.append(device_name)
-
-        if not head_devices:
-            logger.warning("No head device found in profiles, using first device")
-            head_devices = [device_names[0]] if device_names else []
-
-        logger.info("Found %d head device(s): %s", len(head_devices), head_devices)
-
-        # FIXME: shards on the same machine should be adjacent too!
-
-        # Build adjacency graph of Thunderbolt connections
-        # Graph: device_name -> set of connected device names
-        tb_graph: Dict[str, set[str]] = {name: set() for name in device_names}
-        for device_name, neighbors in thunderbolt_conns.items():
-            if device_name in tb_graph:
-                for neighbor_name in neighbors.keys():
-                    if neighbor_name in tb_graph:
-                        tb_graph[device_name].add(neighbor_name)
-                        tb_graph[neighbor_name].add(device_name)
-
-        # Greedy ordering: Start with all head devices, then pick neighbors with most TB connections
-        ordered = head_devices.copy()
-        remaining = set(device_names) - set(head_devices)
-
-        while remaining:
-            best_candidate = None
-            best_score = -1
-
-            # For each remaining device, calculate connection score to already-ordered devices
-            for candidate in remaining:
-                # Count Thunderbolt connections to devices already in the order
-                score = sum(
-                    1 for ordered_dev in ordered if ordered_dev in tb_graph[candidate]
-                )
-
-                # Prioritize devices with TB connections, otherwise any device is fine
-                if score > best_score:
-                    best_score = score
-                    best_candidate = candidate
-
-            # Add best candidate (or any remaining if no TB connections exist)
-            if best_candidate:
-                ordered.append(best_candidate)
-                remaining.remove(best_candidate)
-            else:
-                # Fallback: just pick any remaining device
-                next_device = remaining.pop()
-                ordered.append(next_device)
-
-        logger.info("Optimized device ordering: %s", ordered)
-        logger.info("Thunderbolt graph: %s", tb_graph)
-
-        return ordered
-
-    # FIXME: move this to elsewhere
     async def _run_solver(
         self,
         shard_profiles: Dict[str, DeviceProfile],
@@ -1115,113 +1036,6 @@ class RingApiNode:
         )
 
         return solution
-
-    # FIXME: move this to elsewhere
-    def _compute_layer_assignments(
-        self,
-        device_names: List[str],
-        solution: HALDAResult,
-        shards: Dict[str, DnetDeviceProperties],
-    ) -> List[LayerAssignment]:
-        """Compute round-aware layer assignments, next node mapping, and prefetch windows from solver output.
-
-        Args:
-            device_names: Device names in solver order
-            solution: Solver result
-            shards: Discovered shards
-
-        Returns:
-            Tuple of (layer assignments per device per round, next service per device in ring, prefetch window per device)
-        """
-        if len(solution.w) != len(shards) or len(device_names) != len(shards):
-            raise ValueError(
-                f"Device count mismatch: solution={len(solution.w)}, "
-                f"shards={len(shards)}"
-            )
-
-        num_layers = sum(solution.w) * solution.k
-        logger.info(
-            "Distributing %d layers to %d devices in %d rounds",
-            num_layers,
-            len(shards),
-            solution.k,
-        )
-
-        layer_assignments: Dict[str, List[List[int]]] = {
-            name: [[] for _ in range(solution.k)] for name in device_names
-        }
-        current_layer = 0
-        for round_idx in range(solution.k):
-            for device_idx, device_name in enumerate(device_names):
-                for _ in range(solution.w[device_idx]):
-                    layer_assignments[device_name][round_idx].append(current_layer)
-                    current_layer += 1
-        assert current_layer == num_layers, (
-            f"Assigned {current_layer} layers, expected {num_layers}"
-        )
-
-        # Compute next service for each device in ring topology
-        # In ring: dev1 -> dev2 -> ... -> devN -> dev1 (wraps around)
-        # Each shard will detect when processing the final layer and send to API
-        next_service_map: Dict[str, Optional[str]] = {}
-
-        if len(device_names) == 1:
-            # Single device: forwards to itself in a loop
-            next_service_map[device_names[0]] = device_names[0]
-            logger.info(
-                "Ring (single device): %s -> SELF (loops back)", device_names[0]
-            )
-        else:
-            # Multiple devices: each forwards to the next in the ring
-            for i, service_name in enumerate(device_names):
-                if i < len(device_names) - 1:
-                    # Forward to next device
-                    next_service_map[service_name] = device_names[i + 1]
-                else:
-                    # Last device wraps to first device
-                    next_service_map[service_name] = device_names[0]
-
-            # Log ring topology
-            for service_name in device_names:
-                logger.info(
-                    "Ring: %s -> %s", service_name, next_service_map[service_name]
-                )
-
-        # Compute window size for each device: total_layers_per_device / k
-        window_sizes: Dict[str, int] = {}
-        for service_name, rounds_layers in layer_assignments.items():
-            # Flatten to count total layers
-            total_layers = sum(len(round_layers) for round_layers in rounds_layers)
-            if total_layers > 0:
-                window_size = max(1, total_layers // solution.k)
-                window_sizes[service_name] = window_size
-                logger.info(
-                    "Window size for %s: %d (total_layers=%d, k=%d)",
-                    service_name,
-                    window_size,
-                    total_layers,
-                    solution.k,
-                )
-            else:
-                # FIXME: how to handle?
-                logger.error(
-                    "No layers assigned to %s, setting window size to 1",
-                    service_name,
-                )
-                window_sizes[service_name] = 1
-
-        logger.info("Layer assignments (by rounds): %s", layer_assignments)
-        # return layer_assignments, next_service_map, window_size
-
-        return [
-            LayerAssignment(
-                service=name,
-                layers=layer_assignments[name],
-                next_service=next_service_map[name],
-                window_size=window_sizes[name],
-            )
-            for name in device_names
-        ]
 
     async def _handle_chat_completion(self, req: ChatRequestModel) -> ChatResponseModel:
         """Handle chat completion request.
@@ -1301,7 +1115,7 @@ class RingApiNode:
         Returns:
             Chat response
         """
-        profile_enabled = bool(getattr(req, "profile", False))
+        profile_enabled = bool(req.profile)
         t_start = time.perf_counter()
         t_first_token = None
         nonce = f"chatcmpl-{uuid.uuid4()}"
@@ -1541,7 +1355,7 @@ class RingApiNode:
                         repetition_penalty=req.repetition_penalty,
                         repetition_context_size=req.repetition_context_size,
                         logit_bias=req.logit_bias,
-                    ),
+                    ),  # type: ignore
                 ),
                 arange(req.max_tokens or 0),
             ):
@@ -1603,7 +1417,7 @@ class RingApiNode:
                         repetition_context_size=req.repetition_context_size,
                         logit_bias=req.logit_bias,
                     ),
-                ),
+                ),  # type: ignore
                 arange(req.max_tokens or 0),
             ):
                 detok.add_token(token)

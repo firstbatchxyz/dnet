@@ -48,34 +48,26 @@ from ...protos import dnet_ring_pb2
 class StartupMixin:
     async def start(self, shutdown_trigger: Any = lambda: asyncio.Future()):
         self.running = True
-        try: # Capture the main event loop for cross-thread scheduling
-            self._loop = asyncio.get_running_loop()
-        except Exception:
-            self._loop = None
-        await self._start_grpc_server()
-        await self._start_http_server(shutdown_trigger)
-        await asyncio.sleep(0.2)
 
-        self.background_tasks = [
-            asyncio.create_task(self._ingress_worker()),
-            asyncio.create_task(self._prefetch_worker()),
-            asyncio.create_task(self._send_worker()),
-        ]
-        # Start idle sweeper to close silent streams
-        try:
-            if getattr(self, "_streaming_enabled", False) and hasattr(
-                self, "_stream_sweeper"
-            ):
-                self.background_tasks.append(
-                    asyncio.create_task(self._stream_sweeper())
-                )
-        except Exception:
-            pass
+        with self.tracer.frame("startup", "workers"):
+            self.background_tasks = [
+                asyncio.create_task(self._ingress_worker()),
+                asyncio.create_task(self._prefetch_worker()),
+                asyncio.create_task(self._send_worker()) ]
 
-        self.compute_thread = threading.Thread(target=self._compute_worker, daemon=True)
-        self.compute_thread.start()
+            try: # Start idle sweeper to close silent streams
+                if getattr(self, "_streaming_enabled", False) and hasattr(self, "_stream_sweeper"):
+                    self.background_tasks.append( asyncio.create_task(self._stream_sweeper()))
+            except Exception:
+                pass
 
-        self._start_discovery()
+        with self.tracer.frame("startup", "compute"):
+            self.compute_thread = threading.Thread(target=self._compute_worker, daemon=True)
+            self.compute_thread.start()
+
+        with self.tracer.frame("startup", "discovery"):
+            self._start_discovery()
+
         logger.info(
             "Shard node %s started on gRPC port %s HTTP port %s",
             self.node_id,
@@ -294,7 +286,6 @@ class StartupMixin:
             logger.info("Updated tracer config.")
             self.api_address = cfg.aggregate_url
             self.tracer.start_aggregator()
-            logger.debug(cfg)
             return TraceConfigResponse(ok=True)
           except Exception as e:
             logger.error(f"Unable to setup tracing on shard: {e}")

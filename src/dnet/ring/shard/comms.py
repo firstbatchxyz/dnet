@@ -227,76 +227,80 @@ class CommsMixin(RingShardNodeAttributes):
             return
         try:
             if activation_msg.is_final:
-                try:
-                    if self._mode == "offload" and self.window_size > 0:
-                        first_window = self._assigned_sorted[: self.window_size]
-                        if first_window:
-                            loop = asyncio.get_running_loop()
-                            fut = loop.run_in_executor(
-                                self.executor,
-                                self._prepare_window_blocking,
-                                list(first_window),
-                            )
-                            self._prepared_by_nonce[activation_msg.nonce] = (
-                                list(first_window),
-                                fut,
-                            )
-                except Exception:
-                    pass
-                cb = activation_msg.callback_url or ""
-                parsed = urlparse(cb) if cb else None
-                t_rpc = time.perf_counter()
-                if parsed and parsed.scheme == "grpc":
-                    addr = parsed.netloc
-                    if not addr:
-                        logger.error("Invalid gRPC callback URL for token: %s", cb)
-                        return
-                    # Ensure API channel/stub
-                    if (self.api_channel is None) or (addr != self.api_address):
-                        # close existing channel if any
-                        try:
-                            if self.api_channel is not None:
-                                await self.api_channel.close()
-                        except Exception:
-                            pass
-
-                        self.api_address = addr
-                        self.api_channel = aio_grpc.insecure_channel(
-                            addr, options=GRPC_AIO_OPTIONS
-                        )
-                        self.api_stub = shard_api_comm_pb2_grpc.ShardApiServiceStub(
-                            self.api_channel
-                        )
+                with self.tracer.frame("grpc", "send_activation.final") as f:
                     try:
-                        req = shard_api_comm_pb2.TokenRequest(
-                            nonce=activation_msg.nonce,
-                            token_id=int(getattr(activation_msg, "token_id", -1)),
-                            timestamp=utc_epoch_now(),
+                        if self._mode == "offload" and self.window_size > 0:
+                            first_window = self._assigned_sorted[: self.window_size]
+                            if first_window:
+                                loop = asyncio.get_running_loop()
+                                fut = loop.run_in_executor(
+                                    self.executor,
+                                    self._prepare_window_blocking,
+                                    list(first_window),
+                                )
+                                self._prepared_by_nonce[activation_msg.nonce] = (
+                                    list(first_window),
+                                    fut,
+                                )
+                    except Exception:
+                        pass
+                    cb = activation_msg.callback_url or ""
+                    parsed = urlparse(cb) if cb else None
+                    t_rpc = time.perf_counter()
+                    if parsed and parsed.scheme == "grpc":
+                        addr = parsed.netloc
+                        if not addr:
+                            logger.error("Invalid gRPC callback URL for token: %s", cb)
+                            return
+                        # Ensure API channel/stub
+                        if (self.api_channel is None) or (addr != self.api_address):
+                            # close existing channel if any
+                            try:
+                                if self.api_channel is not None:
+                                    await self.api_channel.close()
+                            except Exception:
+                                pass
+
+                            self.api_address = addr
+                            self.api_channel = aio_grpc.insecure_channel(
+                                addr, options=GRPC_AIO_OPTIONS
+                            )
+                            self.api_stub = shard_api_comm_pb2_grpc.ShardApiServiceStub(
+                                self.api_channel
+                            )
+                            f.event("reset_api")
+
+                        with self.tracer.frame("grpc", "token_request") as fr:
+                            try:
+                                req = shard_api_comm_pb2.TokenRequest(
+                                    nonce=activation_msg.nonce,
+                                    token_id=int(getattr(activation_msg, "token_id", -1)),
+                                    timestamp=utc_epoch_now(),
+                                )
+                                resp = await self.api_stub.SendToken(req)  # type: ignore
+                                rpc_ms = (time.perf_counter() - t_rpc) * 1000.0
+                                if not resp.success:
+                                    logger.error(
+                                        "API SendToken failed for %s: %s",
+                                        activation_msg.nonce,
+                                        resp.message,
+                                    )
+                                if self._profile:
+                                    logger.info(
+                                        "[PROFILE][TX-TOKEN][gRPC] node=%s nonce=%s token=%s rpc_ms=%.2f",
+                                        self.node_id,
+                                        activation_msg.nonce,
+                                        int(getattr(activation_msg, "token_id", -1)),
+                                        rpc_ms,
+                                    )
+                        except Exception as e:
+                            logger.exception("Error sending token via gRPC: %s", e)
+                    else:
+                        logger.error(
+                            "No valid gRPC callback for token; cannot deliver nonce=%s",
+                            activation_msg.nonce,
                         )
-                        resp = await self.api_stub.SendToken(req)  # type: ignore
-                        rpc_ms = (time.perf_counter() - t_rpc) * 1000.0
-                        if not resp.success:
-                            logger.error(
-                                "API SendToken failed for %s: %s",
-                                activation_msg.nonce,
-                                resp.message,
-                            )
-                        if self._profile:
-                            logger.info(
-                                "[PROFILE][TX-TOKEN][gRPC] node=%s nonce=%s token=%s rpc_ms=%.2f",
-                                self.node_id,
-                                activation_msg.nonce,
-                                int(getattr(activation_msg, "token_id", -1)),
-                                rpc_ms,
-                            )
-                    except Exception as e:
-                        logger.exception("Error sending token via gRPC: %s", e)
-                else:
-                    logger.error(
-                        "No valid gRPC callback for token; cannot deliver nonce=%s",
-                        activation_msg.nonce,
-                    )
-                return
+                    return
 
             used_pool = False
 
@@ -309,9 +313,6 @@ class CommsMixin(RingShardNodeAttributes):
                         "Failed to get output buffer %s", activation_msg.pool_id
                     )
                     return
-                data_size = int(np.prod(activation_msg.shape))
-                shaped = output_buffer[:data_size].reshape(activation_msg.shape)
-                used_pool = True
 
             if self._profile:
                 logger.info(
@@ -346,156 +347,161 @@ class CommsMixin(RingShardNodeAttributes):
             activation_msg.dtype = self._wire_dtype_str
             t_cast = time.perf_counter()
 
-            if isinstance(shaped, np.ndarray):
-                data = shaped.tobytes(order="C")
-            else:
-                data = tensor_to_bytes(shaped)
+            with self.tracer.frame("grpc", "send_activations.cast_to_dtype") as f:
 
-            ser_ms = (time.perf_counter() - t_ser) * 1000.0
-            cast_ms = (t_cast - t_ser) * 1000.0
+                if isinstance(shaped, np.ndarray):  # Cast to target dtype
+                    if shaped.dtype != wire_np_dtype:
+                        shaped = shaped.astype(wire_np_dtype, copy=False)
+                        f.event("ndarray.cast")
+                    data = shaped.tobytes(order="C")
+                else: 
+                    if str(shaped.dtype) != self._wire_dtype_str: # MLX array 
+                        shaped = shaped.astype(self._wire_mx_dtype)
+                        f.event("mxarray.cast")
+                    data = tensor_to_bytes(shaped)
+
+                activation_msg.dtype = self._wire_dtype_str
 
             nxt = activation_msg.layer_id + 1
-            if (nxt < self.model_metadata.num_layers) and (
-                nxt not in self._assigned_set
-            ):
+            if (nxt < self.model_metadata.num_layers) and (nxt not in self._assigned_set):
                 if self.next_node_stub:
-                    request = activation_msg.to_proto(data)
-                    request.timestamp = utc_epoch_now()
-                    if self._mode == "offload" and self.window_size > 0:
-                        next_window = self._next_local_layers(
-                            activation_msg.layer_id, self.window_size
-                        )
-                        loop = asyncio.get_running_loop()
-                        if next_window:
-                            fut = loop.run_in_executor(
-                                self.executor,
-                                self._prepare_window_blocking,
-                                list(next_window),
+                    with self.tracer.frame("grpc", "send_activation.next") as f:
+                        request = activation_msg.to_proto(data)
+                        request.timestamp = utc_epoch_now()
+                        if self._mode == "offload" and self.window_size > 0:
+                            next_window = self._next_local_layers(
+                                activation_msg.layer_id, self.window_size
                             )
-                            self._prepared_by_nonce[activation_msg.nonce] = (
-                                list(next_window),
-                                fut,
-                            )
-                        else:
-                            first_window = self._assigned_sorted[: self.window_size]
-                            if first_window:
+                            loop = asyncio.get_running_loop()
+                            if next_window:
                                 fut = loop.run_in_executor(
                                     self.executor,
                                     self._prepare_window_blocking,
-                                    list(first_window),
+                                    list(next_window),
                                 )
                                 self._prepared_by_nonce[activation_msg.nonce] = (
-                                    list(first_window),
+                                    list(next_window),
                                     fut,
                                 )
-                    stream_used = False
-                    ctx = await self._ensure_stream(activation_msg.nonce)
-                    if (
-                        ctx
-                        and ctx.open
-                        and not ctx.disabled
-                        and hasattr(dnet_ring_pb2, "ActivationFrame")
-                    ):
-                        try:
-                            ctx.last_seq += 1
-                            frame = dnet_ring_pb2.ActivationFrame(
-                                request=request,
-                                seq=ctx.last_seq,
-                                end_of_request=False,
-                            )
-                            await ctx.queue.put(frame)
-                            ctx.last_activity_t = asyncio.get_running_loop().time()
-                            stream_used = True
-                            if self._profile:
-                                logger.info(
-                                    "[PROFILE][STREAM-ENQ] nonce=%s seq=%s q=%s",
-                                    activation_msg.nonce,
-                                    ctx.last_seq,
-                                    ctx.queue.qsize(),
-                                )
-                        except Exception as e:
-                            logger.warning(
-                                "[STREAM] enqueue failed; fallback to unary: %s", e
-                            )
-                            ctx.disabled = True
-
-                    if not stream_used:
-                        # In fit mode, avoid long unary stalls: use short deadline and min retries
-                        # Streaming should be the norm; unary is a quick safety valve only.
-                        ring_timeout = 3.0 if self._mode == "fit" else 30.0
-                        ring_retries = (
-                            1
-                            if self._mode == "fit"
-                            else max(1, int(self._send_retries))
-                        )
-                        # Emit a clear fallback log with reason/context
-                        if self._profile:
-                            if ctx is None:
-                                reason = "no_stream_ctx"
-                            elif not ctx.open:
-                                reason = "stream_closed"
-                            elif ctx.disabled:
-                                reason = "stream_disabled"
                             else:
-                                reason = "enqueue_failed"
-                            logger.warning(
-                                "[STREAM->UNARY] node=%s nonce=%s reason=%s mode=%s timeout_s=%.1f retries=%d",
+                                first_window = self._assigned_sorted[: self.window_size]
+                                if first_window:
+                                    fut = loop.run_in_executor(
+                                        self.executor,
+                                        self._prepare_window_blocking,
+                                        list(first_window),
+                                    )
+                                    self._prepared_by_nonce[activation_msg.nonce] = (
+                                        list(first_window),
+                                        fut,
+                                    )
+                        stream_used = False
+                        ctx = await self._ensure_stream(activation_msg.nonce)
+                        if (
+                            ctx
+                            and ctx.open
+                            and not ctx.disabled
+                            and hasattr(dnet_ring_pb2, "ActivationFrame")
+                        ):
+                            try:
+                                ctx.last_seq += 1
+                                frame = dnet_ring_pb2.ActivationFrame(
+                                    request=request,
+                                    seq=ctx.last_seq,
+                                    end_of_request=False,
+                                )
+                                await ctx.queue.put(frame)
+                                ctx.last_activity_t = asyncio.get_running_loop().time()
+                                stream_used = True
+                                if self._profile:
+                                    logger.info(
+                                        "[PROFILE][STREAM-ENQ] nonce=%s seq=%s q=%s",
+                                        activation_msg.nonce,
+                                        ctx.last_seq,
+                                        ctx.queue.qsize(),
+                                    )
+                            except Exception as e:
+                                logger.warning(
+                                    "[STREAM] enqueue failed; fallback to unary: %s", e
+                                )
+                                ctx.disabled = True
+
+                        if not stream_used:
+                            # In fit mode, avoid long unary stalls: use short deadline and min retries
+                            # Streaming should be the norm; unary is a quick safety valve only.
+                            ring_timeout = 3.0 if self._mode == "fit" else 30.0
+                            ring_retries = (
+                                1
+                                if self._mode == "fit"
+                                else max(1, int(self._send_retries))
+                            )
+                            # Emit a clear fallback log with reason/context
+                            if self._profile:
+                                if ctx is None:
+                                    reason = "no_stream_ctx"
+                                elif not ctx.open:
+                                    reason = "stream_closed"
+                                elif ctx.disabled:
+                                    reason = "stream_disabled"
+                                    else:
+                                        reason = "enqueue_failed"
+                                    logger.warning(
+                                        "[STREAM->UNARY] node=%s nonce=%s reason=%s mode=%s timeout_s=%.1f retries=%d",
+                                        self.node_id,
+                                        activation_msg.nonce,
+                                        reason,
+                                        self._mode,
+                                        ring_timeout,
+                                        ring_retries,
+                                    )
+                                t0 = time.perf_counter()
+                                last_exc: Optional[Exception] = None
+                                for attempt in range(1, ring_retries + 1):
+                                    try:
+                                        # FIXME: use response here?
+                                        _ = await self.next_node_stub.SendActivation(
+                                            request, timeout=ring_timeout
+                                        )  # type: ignore
+                                        break
+                                    except grpc.aio.AioRpcError as e:  # type: ignore
+                                        last_exc = e
+                                        code = e.code()
+                                        if code in {
+                                            grpc.StatusCode.UNAVAILABLE,
+                                            grpc.StatusCode.CANCELLED,
+                                            grpc.StatusCode.DEADLINE_EXCEEDED,
+                                        }:
+                                            logger.warning(
+                                                "SendActivation attempt %s/%s failed (%s); reconnecting...",
+                                                attempt,
+                                                ring_retries,
+                                                code.name,
+                                            )
+                                            await self._reconnect_next_node()
+                                            await asyncio.sleep(min(0.25 * attempt, 1.0))
+                                            continue
+                                        raise
+                            else:
+                                raise last_exc  # type: ignore
+                            rpc_ms = (time.perf_counter() - t0) * 1000.0
+                            logger.info(
+                                "[PROFILE][TX] node=%s nonce=%s next_layer=%s payload_kb=%.1f serialize_ms=%.3f rpc_ms=%.2f cast_ms=%.3f",
                                 self.node_id,
                                 activation_msg.nonce,
-                                reason,
-                                self._mode,
-                                ring_timeout,
-                                ring_retries,
+                                activation_msg.layer_id + 1,
+                                (len(data) / 1024),
+                                ser_ms,
+                                rpc_ms,
+                                cast_ms,
                             )
-                        t0 = time.perf_counter()
-                        last_exc: Optional[Exception] = None
-                        for attempt in range(1, ring_retries + 1):
-                            try:
-                                # FIXME: use response here?
-                                _ = await self.next_node_stub.SendActivation(
-                                    request, timeout=ring_timeout
-                                )  # type: ignore
-                                break
-                            except grpc.aio.AioRpcError as e:  # type: ignore
-                                last_exc = e
-                                code = e.code()
-                                if code in {
-                                    grpc.StatusCode.UNAVAILABLE,
-                                    grpc.StatusCode.CANCELLED,
-                                    grpc.StatusCode.DEADLINE_EXCEEDED,
-                                }:
-                                    logger.warning(
-                                        "SendActivation attempt %s/%s failed (%s); reconnecting...",
-                                        attempt,
-                                        ring_retries,
-                                        code.name,
-                                    )
-                                    await self._reconnect_next_node()
-                                    await asyncio.sleep(min(0.25 * attempt, 1.0))
-                                    continue
-                                raise
-                        else:
-                            raise last_exc  # type: ignore
-                        rpc_ms = (time.perf_counter() - t0) * 1000.0
-                        logger.info(
-                            "[PROFILE][TX] node=%s nonce=%s next_layer=%s payload_kb=%.1f serialize_ms=%.3f rpc_ms=%.2f cast_ms=%.3f",
-                            self.node_id,
-                            activation_msg.nonce,
-                            activation_msg.layer_id + 1,
-                            (len(data) / 1024),
-                            ser_ms,
-                            rpc_ms,
-                            cast_ms,
-                        )
                 else:
-                    logger.error(
-                        "Cannot forward activation - no next node configured; end shard should sample inline."
-                    )
+                    logger.error("Cannot forward activation - no next node configured; end shard should sample inline.")
+
+            # Final layer not annotated with 'is_final'
             else:
                 logger.error(
                     "Final activation reached send path unexpectedly; sampling should occur on end shard."
                 )
-
                 # Clear scheduling at request end
                 # Sequential offload: prefetch state is unused
 

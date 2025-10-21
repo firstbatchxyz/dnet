@@ -108,7 +108,6 @@ class Tracer:
 
     def _agg_exec(self) -> None:
         assert self.config.aggregate_url != ""
-        url = "http://" + self.config.aggregate_url + "/trace/ingest"
         client = httpx.Client(timeout=5.0)
         try:
             logger.debug(f"Aggregation worker thread {self._agg_enabled}, {self._agg_q.empty()}")
@@ -117,13 +116,13 @@ class Tracer:
                     batch = self._agg_q.get(timeout=0.2)
                 except queue.Empty:
                     continue
-                logger.info(f"Sending trace buffer to API : {url}")
+                logger.info(f"Sending trace buffer to API : {self.config.aggregate_url}")
                 try:
-                    res = client.post(url, json=batch)
+                    res = client.post(self.config.aggregate_url, json=batch)
                     if res.status_code != 200:
                         logger.error(f"Aggregator POST failed {res.status_code}: {res.text}")
-                except Exception:
-                    logger.warning(f"Unable to POST trace aggregation data to {url}")
+                except Exception as e:
+                    logger.warning(f"Unable to POST trace aggregation data to {self.config.aggregate_url}: {e}")
                 finally:
                     self._agg_q.task_done()
         finally:

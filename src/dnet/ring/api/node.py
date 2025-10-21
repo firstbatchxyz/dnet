@@ -39,6 +39,7 @@ from ...protos.shard_api_comm_pb2_grpc import (
     add_ShardApiServiceServicer_to_server,
 )
 
+from .api_logging import get_api_logger
 from ...utils.logger import logger
 from ...utils.banner import print_startup_banner
 from ...utils.latency import LatencyResults, calculate_median_latency_seconds
@@ -81,6 +82,8 @@ from ..shard.models import (
     ShardProfileResponse,
     TraceIngestBatch,
     TraceIngestResponse,
+    TraceConfigRequest,
+    TraceConfigResponse,
 )
 from ..data_types import StopCondition
 from .servicer import ShardApiServicer
@@ -102,6 +105,9 @@ async def azip(*async_iterables):
             yield results
         except StopAsyncIteration:
             break
+
+
+logger = get_api_logger()
 
 
 class RingApiNode:
@@ -158,6 +164,24 @@ class RingApiNode:
             shutdown_trigger: Shutdown trigger function
         """
         self.running = True
+        # Reduce third‑party library noise in this process (keeps REPL TTY clean)
+        try:
+            import logging as _logging
+            for name in (
+                "grpc",
+                "grpc._cython",
+                "asyncio",
+                "hpack",
+                "h2",
+                "hypercorn",
+                "hypercorn.error",
+                "hypercorn.access",
+            ):
+                lg = _logging.getLogger(name)
+                lg.setLevel(_logging.CRITICAL)
+                lg.propagate = False
+        except Exception:
+            pass
 
         await self._start_grpc_server()
         await self._start_discovery()
@@ -206,7 +230,7 @@ class RingApiNode:
 
         config = Config.from_mapping(
             bind=f"0.0.0.0:{self.http_port}",
-            log_level="info",
+            log_level="error",  # keep HTTP server quiet on console
             log_config=None,
             use_reloader=False,
             h2c=True,
@@ -399,6 +423,38 @@ class RingApiNode:
             except Exception as e:
                 logger.warning(f"Unable to ingest trace buffer: {e}")
                 return TraceIngestResponse(ok=False, accepted=0, message=str(e))
+
+    async def _forward_trace_config(self, cfg: Any) -> bool:
+        shards = self._get_shards_from_discovery()
+        this = self.discovery.get_own_properties()
+        api_endpoint = f"http://{this.local_ip}:{this.server_port}/trace/ingest"
+        payload = TraceConfigRequest(
+            file=cfg.file,
+            streaming=cfg.streaming,
+            include_prefixes=cfg.include_prefixes,
+            include_c_calls=cfg.include_c_calls,
+            budget=cfg.budget,
+            enabled=cfg.enabled,
+            node_id=None,
+            record_pid_tid=cfg.record_pid_tid,
+            aggregate=cfg.aggregate,
+            aggregate_url=api_endpoint,
+            agg_max_events=cfg.agg_max_events
+        )
+
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            for name, props in shards.items():
+                url = f"http://{props.local_ip}:{props.server_port}/trace"
+                logger.debug(f"Forwarding trace config to {url}")
+                payload.node_id = name
+                try:
+                    res = await client.post(url, json=dict(payload))
+                    if res.status_code != 200:
+                        logger.warning(f"Failed to POST tracer config to node {name}.")
+                except Exception as e:
+                    logger.warning(f"Failed to POST tracer config: {e}")
+                    return False 
+        return True
 
 
     async def _handle_prepare_topology(

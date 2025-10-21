@@ -107,7 +107,8 @@ class REPL(cmd.Cmd):
       cmd = sys.stdin.readline().strip() 
 
       if cmd == "":
-        self.print_state()
+        #self.print_state()
+        continue
       elif cmd in [".exit", "exit", "quit"]:
         self.handle_terminate_signal()
       elif cmd in [".help", "help", "h"]:

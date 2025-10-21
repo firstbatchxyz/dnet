@@ -540,7 +540,7 @@ class REPL(cmd.Cmd):
   def __trace_cb(self, data):
     self._trace_agg.enqueue(data)
 
-  def __print_tr(self, symbol, ms, counts):
+  def __print_tr(self, row):
     sym = "    " + symbol.ljust(40, ' ')
     pms = f"{ms:.10}".ljust(10, ' ') 
     cns = f"{counts}".ljust(4, ' ')
@@ -552,16 +552,34 @@ class REPL(cmd.Cmd):
     mapping: Optional[Dict[str, str]] = None,
     repeats: int = 0,
   ) -> List[Dict[str, Any]]:
-    names = " "*17 + "symbol" + " "*21 + "ms" + " "*4 + "counts"
-    dots = "   " + "."*41 + " " + "."*10 + " " + "."*4
-    dprint(f"{names}\n{dots}\n\n")
-    sums = self._trace_agg._req[run_id].sums_by_name
-    cnts = self._trace_agg._req[run_id].counts_by_name
-    for n, d in sums.items():
-      self.__print_tr(n, d, cnts[n])
 
-  def get_trace_roots(self, run_id: str, req_id: str) -> List[Dict[str, Any]]:
-    return self._trace_agg.roots(run_id, req_id)
+    rows = self._trace_agg.annotate(run_id)
+    headers = ["name", "total","max","mean","p50","p90","p99","samples"]
+    limits = {"name": 50,}
+    w = {h: max(len(h), min(limits.get(h, 8), max(len(str(r[h])) for r in rows))) for h in headers}
+    w["name"] = max(w["name"], 35)
+
+    line = "  ".join(h.ljust(w[h]) for h in headers); sys.stdout.write("\n")
+    sys.stdout.write(line + "\n")
+    sys.stdout.write("  ".join("."*w[h] for h in headers)); sys.stdout.write("\n")
+    for r in rows:
+      name = str(r["name"])
+      if len(name) > w["name"]: name = name[:w["name"]-1] + "..."
+      vals = {
+        "name": r["name"],
+        "total": r["total"],
+        "max": r["max"],
+        "mean": r["mean"],
+        "p50": r["p50"],
+        "p90": r["p90"],
+        "p99": r["p99"],
+        "samples": r["samples"], 
+      }
+      sys.stdout.write("  " + str(vals[headers[0]]).ljust(w[headers[0]]))
+      sys.stdout.write("  ".join(f"{vals[h]:8.2f}".rjust(w[h]) for h in headers[1:]))
+      sys.stdout.write("\n")
+    sys.stdout.write("\n\n")
+    sys.stdout.flush()
 
   def _print_nodes_table(self, rows: List[Any]) -> None:
     headers = ["name", "role", "addr", "http", "grpc", "status", "head"]

@@ -75,7 +75,7 @@ class ShardConfig:
                 mode="offload",
                 resident_windows=1,
                 lazy_params=True,
-                prefetch_mode="off",
+                prefetch_mode="sequential",  # Use sequential hints without aggressive prefetch
                 wire_dtype="fp16",
                 warmup_windows=1,
                 streaming=False,
@@ -86,7 +86,7 @@ class ShardConfig:
             mode="fit",
             resident_windows=9999,
             lazy_params=False,
-            prefetch_mode="off",
+            prefetch_mode="off",  # Use full prefetching for fit mode
             wire_dtype="fp16",
             warmup_windows=1,
             streaming=False,

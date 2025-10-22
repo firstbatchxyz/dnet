@@ -845,10 +845,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
 
 
     async def admit_frame(self, request: dnet_ring_pb2.ActivationRequest) -> None:
-        """
-        Lightweight admission for streaming:
-        enqueue protobuf frame to ingress queue, then return.
-        """
+        """enqueue protobuf frame to ingress queue"""
         while self.running:
             try:
                 self.ingress_q.put_nowait(request)
@@ -871,7 +868,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 with self.tracer.frame("grpc.ingress", "get.wait"):
                     try:
                         req = await self.ingress_q.get()
-                        logger.debug(f"[DEQUE]Dequeued activation for processing {req}")
+                        logger.debug(f"[DEQUE]Dequeued activation for processing")
                     except asyncio.CancelledError:
                         break
 

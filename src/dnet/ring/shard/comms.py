@@ -226,6 +226,7 @@ class CommsMixin(RingShardNodeAttributes):
             )
             return
         try:
+            logger.debug(f"Sending activation")
             if activation_msg.is_final:
                 with self.tracer.frame("grpc", "send_activation.final") as f:
                     try:
@@ -339,10 +340,11 @@ class CommsMixin(RingShardNodeAttributes):
                 if shaped.dtype != wire_np_dtype:
                     # FIXME: numpy vs mx array here
                     shaped = shaped.astype(wire_np_dtype, copy=False)
-            else:
-                # MLX array -> cast to desired wire dtype
+
+            else: # MLX array -> cast to desired wire dtype
                 if str(shaped.dtype) != self._wire_dtype_str:
                     shaped = shaped.astype(self._wire_mx_dtype)
+
             activation_msg.dtype = self._wire_dtype_str
             t_cast = time.perf_counter()
 
@@ -364,6 +366,7 @@ class CommsMixin(RingShardNodeAttributes):
             nxt = activation_msg.layer_id + 1
             if (nxt < self.model_metadata.num_layers) and (nxt not in self._assigned_set):
                 if self.next_node_stub:
+
                     with self.tracer.frame("grpc", "send_activation.next") as f:
                         request = activation_msg.to_proto(data)
                         request.timestamp = utc_epoch_now()
@@ -428,12 +431,8 @@ class CommsMixin(RingShardNodeAttributes):
                         # Prefer streaming if enabled/available; fallback to unary
                         stream_used = False
                         ctx = await self._ensure_stream(activation_msg.nonce)
-                        if (
-                            ctx
-                            and ctx.open
-                            and not ctx.disabled
-                            and hasattr(dnet_ring_pb2, "ActivationFrame")
-                        ):
+                        if (ctx and ctx.open and not ctx.disabled and hasattr(dnet_ring_pb2, "ActivationFrame")):
+                            logger.debug(f"Sending activation with stream")
                             try:
                                 ctx.last_seq += 1
                                 frame = dnet_ring_pb2.ActivationFrame(
@@ -444,17 +443,8 @@ class CommsMixin(RingShardNodeAttributes):
                                 await ctx.queue.put(frame)
                                 ctx.last_activity_t = asyncio.get_running_loop().time()
                                 stream_used = True
-                                if self._profile:
-                                    logger.info(
-                                        "[PROFILE][STREAM-ENQ] nonce=%s seq=%s q=%s",
-                                        activation_msg.nonce,
-                                        ctx.last_seq,
-                                        ctx.queue.qsize(),
-                                    )
                             except Exception as e:
-                                logger.warning(
-                                    "[STREAM] enqueue failed; fallback to unary: %s", e
-                                )
+                                logger.warning("[STREAM] enqueue failed; fallback to unary: %s", e)
                                 ctx.disabled = True
 
                         if not stream_used:

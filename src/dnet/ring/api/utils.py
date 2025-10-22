@@ -2,8 +2,7 @@
 
 import asyncio
 from typing import AsyncGenerator, Dict, Tuple, Optional
-from dnet_p2p import DnetDeviceProperties
-from dnet_p2p.thunderbolt import ThunderboltConnection
+from dnet_p2p import DnetDeviceProperties, ThunderboltConnection
 import mlx.core as mx
 import numpy as np
 from distilp import DeviceProfile

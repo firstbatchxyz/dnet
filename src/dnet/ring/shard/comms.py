@@ -13,8 +13,8 @@ import numpy as np
 from dnet_p2p import (
     DnetDeviceProperties,
     discover_thunderbolt_connection,
+    ThunderboltConnection,
 )
-from dnet_p2p.thunderbolt import ThunderboltConnection
 from dnet.utils.latency import DeviceLatencyResult, LatencyMeasurement, LatencyResults
 
 from ...utils.grpc_config import GRPC_AIO_OPTIONS

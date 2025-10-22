@@ -21,8 +21,8 @@ from dnet_p2p import (
     DnetDeviceProperties,
     DnetP2P,
     discover_all_thunderbolt_connections,
+    ThunderboltConnection,
 )
-from dnet_p2p.thunderbolt import ThunderboltConnection
 from dperf import profile_model
 from dperf.profiler import ModelProfileSplit
 from distilp import (

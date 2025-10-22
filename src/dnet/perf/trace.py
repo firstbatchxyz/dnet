@@ -212,7 +212,6 @@ class Tracer:
                 batch = { "run_id": (self._req_id or "NONE"),
                           "node_id": (self.config.node_id or "NODE"),
                           "events": list(self._events)}
-                logger.debug(batch)
                 try:
                     self._agg_q.put_nowait(batch)
                 except queue.Full:

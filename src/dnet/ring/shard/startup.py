@@ -286,7 +286,6 @@ class StartupMixin:
             logger.info("Updated tracer config.")
             self.api_address = cfg.aggregate_url
             self.tracer.start_aggregator()
-            logger.debug(cfg)
             return TraceConfigResponse(ok=True)
           except Exception as e:
             logger.error(f"Unable to setup tracing on shard: {e}")

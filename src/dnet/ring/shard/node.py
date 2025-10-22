@@ -811,11 +811,12 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         while self.running:
             try:
                 self.ingress_q.put_nowait(request)
+                logger.debug(f"[ENQUE] Enqueued activation request")
                 return
             except asyncio.QueueFull:
                 await asyncio.sleep(0)
-        # If we reached here, node is stopping; drop admission silently
         return
+
 
     async def _ingress_worker(self):
         """Drains ingress queue and processes frames with heavy work offloaded.
@@ -826,9 +827,10 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         """
         while self.running:
             with self.tracer.frame("grpc", "ingress") as f:
-                with self.tracer.frame("grpc.ingress", "get"):
+                with self.tracer.frame("grpc.ingress", "get.wait"):
                     try:
                         req = await self.ingress_q.get()
+                        logger.debug(f"[DEQUE]Dequeued activation for processing {req}")
                     except asyncio.CancelledError:
                         break
 
@@ -1099,7 +1101,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         while self.running:
             try:
                 # Get activation from queue (blocks until available)
-                with self.tracer.frame("compute", "dequeue"):
+                with self.tracer.frame("compute", "deque.wait"):
                     activation_msg = self.activation_recv_queue.get(timeout=1.0)
 
                 # Process the activation

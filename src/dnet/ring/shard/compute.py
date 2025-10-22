@@ -377,7 +377,8 @@ class ComputeMixin(RingShardNodeAttributes):
                     except Exception:
                         pass
 
-                with self.tracer.frame("compute.thread", "mdns.send"):
+                # Create and enqueue output message: either forward activations or finalize on end role
+                with self.tracer.frame("compute.thread", "grpc.send"):
                     nxt = last_layer + 1
                     if nxt >= self.model_metadata.num_layers:  # End of model
                         try:

@@ -32,6 +32,8 @@ from .models import (
     ShardProfileRequest,
     ShardProfileResponse,
     ShardUnloadModelResponse,
+    TraceConfigRequest,
+    TraceConfigResponse,
 )
 
 from ..model.base import BaseRingModel
@@ -210,7 +212,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             enabled = True,
             record_pid_tid = True,
             aggregate=False,
-            aggregate_url=None, # FIXME: This is set when we get a /profile req 
+            aggregate_url=None, 
         )
         self.tracer = Tracer(cfg) 
         self.tracer.start()
@@ -1532,6 +1534,34 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             except Exception as e:
                 logger.error(f"Error in /profile endpoint: {e}")
                 raise
+
+
+        @self.app.post("/trace")
+        async def setup_trace(req: TraceConfigRequest) -> TraceConfigResponse:
+          logger.debug("Updating trace config")
+          try:
+            cfg = TraceConfig(
+              file=req.file,
+              streaming=req.streaming,
+              include_prefixes=req.include_prefixes,
+              include_c_calls=req.include_c_calls,
+              budget=req.budget,
+              enabled=req.enabled,
+              node_id=req.node_id,
+              record_pid_tid=req.record_pid_tid,
+              aggregate=req.aggregate,
+              aggregate_url=req.aggregate_url,
+              agg_max_events=req.agg_max_events,
+            )
+            self.tracer.config = cfg
+            logger.info("Updated tracer config.")
+            self.api_address = cfg.aggregate_url
+            self.tracer.start_aggregator()
+            return TraceConfigResponse(ok=True)
+          except Exception as e:
+            logger.error(f"Unable to setup tracing on shard: {e}")
+            return TraceConfigResponse(ok=False)
+
 
         @self.app.post("/load_model")
         async def load_model_endpoint(

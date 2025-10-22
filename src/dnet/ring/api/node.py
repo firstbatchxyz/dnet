@@ -176,14 +176,12 @@ class RingApiNode:
         instance = f"api-{token_hex(4)}-{hostname}"
         self.discovery.create_instance(
             instance,
-            hostname,
-            "0.0.0.0",  # Bind to all addresses
             self.http_port,
             self.grpc_port,
             is_manager=True,  # API is a manager
         )
-        self.discovery.start(loglevel="info")
-        logger.info("Discovery service started for API node")
+        self.discovery.start()
+        logger.info(f"Discovery service started for API node {instance}")
 
     async def _start_grpc_server(self) -> None:
         """Start gRPC server for receiving callbacks from shards."""

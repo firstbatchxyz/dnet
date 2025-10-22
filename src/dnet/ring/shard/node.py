@@ -1143,8 +1143,6 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         instance = f"shard-{token_hex(4)}-{hostname}"
         self.discovery.create_instance(
             instance,
-            hostname,
-            "0.0.0.0",  # Binds to all addresses
             self.http_port,  # HTTP port
             self.grpc_port,  # gRPC port
             is_manager=False,  # Shard is never a manager
@@ -1153,7 +1151,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         logger.info(
             "Discovery service started for shard node %s with name %s",
             self.node_id,
-            self.discovery.fullname(),
+            instance,
         )
 
     async def _start_grpc_server(self) -> None:

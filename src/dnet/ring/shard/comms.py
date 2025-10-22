@@ -566,17 +566,16 @@ class CommsMixin(RingShardNodeAttributes):
         """
         latency_results_dict: dict[str, DeviceLatencyResult] = {}
 
-        for service_name, device_info in devices.items():
+        for instance_name, device_info in devices.items():
             # Skip measuring latency to ourselves
-            # FIXME: just equals check should suffice here?
-            if service_name.startswith(self.discovery.instance_name()):
-                logger.debug("Skipping latency measurement to self: %s", service_name)
+            if instance_name == self.discovery.instance_name():
+                logger.debug("Skipping latency measurement to self: %s", instance_name)
                 continue
 
             # Skip measuring latency to API (manager) devices
             if device_info.is_manager:
                 logger.debug(
-                    "Skipping latency measurement to manager/API: %s", service_name
+                    "Skipping latency measurement to manager/API: %s", instance_name
                 )
                 continue
 
@@ -584,12 +583,12 @@ class CommsMixin(RingShardNodeAttributes):
                 shard_port = device_info.shard_port
 
                 # Check for Thunderbolt connection
-                if service_name in thunderbolts:
-                    tb_data = thunderbolts[service_name]
+                if instance_name in thunderbolts:
+                    tb_data = thunderbolts[instance_name]
                     service_ip = tb_data.ip_addr
                     logger.info(
                         "Using Thunderbolt for %s at %s, connected to instance %s",
-                        service_name,
+                        instance_name,
                         service_ip,
                         tb_data.instance,
                     )
@@ -599,7 +598,7 @@ class CommsMixin(RingShardNodeAttributes):
 
                 if not shard_port or not service_ip:
                     logger.warning(
-                        "No shard_port or local_ip for device %s", service_name
+                        "No shard_port or local_ip for device %s", instance_name
                     )
                     continue
 
@@ -656,19 +655,19 @@ class CommsMixin(RingShardNodeAttributes):
                     success=True,
                     error=None,
                 )
-                latency_results_dict[service_name] = result
+                latency_results_dict[instance_name] = result
 
                 # Close channel
                 await channel.close()
 
             except Exception as e:
-                logger.error("Error measuring latency to %s: %s", service_name, e)
+                logger.error("Error measuring latency to %s: %s", instance_name, e)
                 result = DeviceLatencyResult(
                     target_node_id=None,
                     success=False,
                     error=str(e),
                     measurements=[],
                 )
-                latency_results_dict[service_name] = result
+                latency_results_dict[instance_name] = result
 
         return LatencyResults(results=latency_results_dict)

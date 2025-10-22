@@ -68,7 +68,7 @@ class ChatParams(BaseModel):
     # audio: Optional[ChatAudioParams] = Field(default=None)  # NOTE: unused
     # frequency_penalty: float = Field(default=0.0, ge=-2.0, le=2.0)  # NOTE: unused
     # logit_bias: Optional[Dict[int, float]] = Field(default=None) # NOTE: unused
-    logprobs: int = Field(default=-1)  # FIXME: bool
+    logprobs: Optional[bool] = Field(default=False)
     max_tokens: int = Field(
         default=100, ge=0
     )  # NOT using `max_completion_tokens` because that is for `O-` models only
@@ -88,7 +88,7 @@ class ChatParams(BaseModel):
     temperature: float = Field(default=1.0, ge=0, le=2)
     # tool_choice: # NOTE: unused, later with tool calling
     # tools: # NOTE: unused, later with tool calling
-    top_logprobs: Optional[int] = Field(..., ge=0, le=20)  # TODO: used?
+    top_logprobs: int = Field(default=0, ge=0, le=20)
     top_p: float = Field(default=1.0, ge=0, le=1)
     verbosity: Literal["low", "medium", "high"] = Field(default="medium")  # TODO: used?
     # web_search_options:  # NOTE: unused, later with web search
@@ -111,6 +111,12 @@ class ChatParams(BaseModel):
         if v != -1 and not (0 < v <= 10):
             raise ValueError(f"logprobs must be between 1 and 10 but got {v:,}")
         return v
+
+
+class ChatUsage(BaseModel):
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
 
 
 class ChatRequestModel(ChatParams):
@@ -157,13 +163,18 @@ class ChatResponseModel(BaseModel):
     id: str = Field(..., description="Unique identifier for the chat completion.")
     model: str = Field(default="default_model", description="The model used for the chat completion.")  # fmt: skip
     object: Literal["chat.completion"] = "chat.completion"
-    usage: Optional[Dict[str, Any]] = None
+    usage: Optional[ChatUsage] = None
     metrics: Optional[Dict[str, Any]] = None
 
 
 # ------------------------
 # Embeddings API
 # ------------------------
+
+
+class EmbeddingsUsage(BaseModel):
+    prompt_tokens: int
+    total_tokens: int
 
 
 class EmbeddingObject(BaseModel):
@@ -174,12 +185,9 @@ class EmbeddingObject(BaseModel):
         ..., description="List of embedding data objects."
     )
     model: str = Field(..., description="Model name or HuggingFace repo ID.")
-    usage: Optional[Dict[str, Any]] = None
 
 
 class EmbeddingRequestModel(BaseModel):
-    """Request model for embeddings."""
-
     input: Union[str, List[str]] = Field(
         ..., description="Input text or list of texts to embed."
     )
@@ -192,12 +200,10 @@ class EmbeddingRequestModel(BaseModel):
 
 
 class EmbeddingResponseModel(BaseModel):
-    """A single embedding data object."""
-
     object: Literal["list"] = "list"
     data: List[EmbeddingObject]
     model: str
-    usage: Optional[Dict[str, Any]] = None
+    usage: Optional[EmbeddingsUsage] = Field(default=None)
 
 
 # ------------------------
@@ -224,7 +230,7 @@ class CompletionResponseModel(BaseModel):
     """Response model for text completions."""
 
     id: str
-    object: str = "text_completion"
+    object: Literal["text_completion"] = "text_completion"
     model: str
     choices: List[CompletionChoice]
     usage: Optional[Dict[str, Any]] = None

@@ -182,7 +182,7 @@ class RingApiNode:
             self.grpc_port,
             is_manager=True,  # API is a manager
         )
-        self.discovery.start()
+        self.discovery.start(loglevel="info")
         logger.info("Discovery service started for API node")
 
     async def _start_grpc_server(self) -> None:
@@ -1140,9 +1140,10 @@ class RingApiNode:
             detokenizer.add_token(token)
             tokens.append(token)
 
-            if (logprobs is not None) and (req.logprobs > 0) and logprobs.size != 0:
-                sorted_indices = mx.argpartition(-logprobs, kth=req.logprobs - 1)
-                top_indices = sorted_indices[: (req.logprobs or 0)]
+            # store top token logprobs if requested
+            if req.logprobs and (logprobs is not None) and logprobs.size != 0:
+                sorted_indices = mx.argpartition(-logprobs, kth=req.top_logprobs - 1)
+                top_indices = sorted_indices[: (req.top_logprobs or 0)]
                 top_logprobs_array = logprobs[top_indices]
                 top_token_info = zip(
                     top_indices.tolist(),  # type: ignore # FIXME: !!!

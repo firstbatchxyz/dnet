@@ -8,6 +8,8 @@ Similar usage can be seen on [Ollama](https://github.com/ollama/ollama/blob/main
 
 from openai import OpenAI
 
+
+MODEL = "Qwen/Qwen3-4B-MLX-4bit"
 client = OpenAI(
     base_url="http://localhost:8080/v1/",  # dnet API url, with `v1`
     api_key="dria",  # ignored
@@ -17,7 +19,7 @@ client = OpenAI(
 def test_openai_completions():
     """https://platform.openai.com/docs/api-reference/completions/create"""
     completion = client.completions.create(
-        model="llama3.2",
+        model=MODEL,
         prompt="Say this is a test",
         max_tokens=5,
     )
@@ -34,7 +36,7 @@ def test_openai_chat_completions():
                 "content": "Say this is a test",
             }
         ],
-        model="llama3.2",
+        model=MODEL,
     )
 
     print(chat_completion)
@@ -49,7 +51,7 @@ def test_openai_chat_completions_streaming():
                 "content": "Say this is a test",
             }
         ],
-        model="llama3.2",
+        model=MODEL,
         stream=True,
     )
 
@@ -59,6 +61,8 @@ def test_openai_chat_completions_streaming():
 def test_openai_models():
     """https://platform.openai.com/docs/api-reference/models/list"""
     list_completion = client.models.list()
+
+    # should have MODEL in the list
     print(list_completion)
 
 

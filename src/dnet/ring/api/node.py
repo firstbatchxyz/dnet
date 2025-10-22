@@ -52,6 +52,7 @@ from .models import (
     ChatLogProbs,
     ChatMessage,
     ChatRequestModel,
+    ChatParams,
     ChatResponseModel,
     CompletionRequestModel,
     APILoadModelRequest,
@@ -343,7 +344,7 @@ class RingApiNode:
                 # FIXME: return type mismatch here
                 return StreamingResponse(
                     self._stream_chat(req), media_type="text/event-stream"
-                )
+                )  # type: ignore
             else:
                 return await self._handle_chat_completion(req)
 
@@ -1098,7 +1099,7 @@ class RingApiNode:
 
     async def _handle_completion(
         self,
-        req: ChatRequestModel,
+        req: ChatParams,
         prompt: mx.array,
         stop_id_sequences: List[List[int]],
     ) -> ChatResponseModel:
@@ -1209,9 +1210,10 @@ class RingApiNode:
         prompt = mx.array(self.tokenizer.encode(req.prompt))  # type: ignore
         stop_id_sequences: List[List[int]] = [
             self.tokenizer.encode(stop_word, add_special_tokens=False)  # type: ignore
-            for stop_word in (req.stop or [])  # type: ignore
+            for stop_word in (req.stop or [])
         ]
-        chat_resp = await self._handle_completion(req, prompt, stop_id_sequences)  # type: ignore[arg-type]
+        chat_resp = await self._handle_completion(req, prompt, stop_id_sequences)
+        #
         text = chat_resp.choices[0].message.content
         return {
             "id": chat_resp.id,
@@ -1221,7 +1223,7 @@ class RingApiNode:
                 {
                     "index": 0,
                     "text": text,
-                    "logprobs": None,
+                    "logprobs": None,  # TODO: if log probs are given, should have this here
                     "finish_reason": chat_resp.choices[0].finish_reason,
                 }
             ],

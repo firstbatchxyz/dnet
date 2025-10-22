@@ -162,6 +162,45 @@ class ChatResponseModel(BaseModel):
 
 
 # ------------------------
+# Embeddings API
+# ------------------------
+
+
+class EmbeddingObject(BaseModel):
+    """Response model for embeddings."""
+
+    object: Literal["embedding"] = "embedding"
+    data: List[Dict[str, Any]] = Field(
+        ..., description="List of embedding data objects."
+    )
+    model: str = Field(..., description="Model name or HuggingFace repo ID.")
+    usage: Optional[Dict[str, Any]] = None
+
+
+class EmbeddingRequestModel(BaseModel):
+    """Request model for embeddings."""
+
+    input: Union[str, List[str]] = Field(
+        ..., description="Input text or list of texts to embed."
+    )
+    model: str = Field(..., description="Model name or HuggingFace repo ID.")
+    # dimensions:  # NOTE: unused
+    encoding_format: Literal["base64", "float32"] = Field(
+        default="float32", description="Encoding format for the embeddings."
+    )
+    # user:  # NOTE: unused
+
+
+class EmbeddingResponseModel(BaseModel):
+    """A single embedding data object."""
+
+    object: Literal["list"] = "list"
+    data: List[EmbeddingObject]
+    model: str
+    usage: Optional[Dict[str, Any]] = None
+
+
+# ------------------------
 # Completion API
 # ------------------------
 
@@ -227,6 +266,21 @@ class RecieveResultResponseModel(JSONResponse):
 
 # FIXME: can we do better?
 RecieveResultRequestModel = Union[RecieveResultRequest, RingInferenceError]
+
+# ------------------------
+# /v1/models
+# ------------------------
+
+
+class ModelObject(BaseModel):
+    created: int  # file creation timestamp
+    id: str  # repo id
+    object: Literal["model"] = "model"
+    owned_by: Literal["local"] = "local"  # TODO: unless we can get the model owner name
+
+
+type ListModelsResponseModel = list[ModelObject]
+type RetrieveModelResponseModel = ModelObject
 
 
 # ------------------------

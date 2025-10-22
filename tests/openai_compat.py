@@ -14,6 +14,17 @@ client = OpenAI(
 )
 
 
+def test_openai_completions():
+    """https://platform.openai.com/docs/api-reference/completions/create"""
+    completion = client.completions.create(
+        model="llama3.2",
+        prompt="Say this is a test",
+        max_tokens=5,
+    )
+
+    print(completion)
+
+
 def test_openai_chat_completions():
     """https://platform.openai.com/docs/api-reference/chat/create"""
     chat_completion = client.chat.completions.create(

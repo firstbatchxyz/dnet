@@ -19,7 +19,6 @@ def _percentile(xs: List[float], q: float) -> float:
     k = max(0, min(k, len(ys) - 1))
     return ys[k]
 
-
 def collect_stats(times_ms: List[float], *, bytes_total: float = 0.0, tokens_total: float = 0.0) -> Dict[str, Any]:
     if not times_ms:
         return {

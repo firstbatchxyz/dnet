@@ -293,8 +293,8 @@ class CommsMixin(RingShardNodeAttributes):
                                         int(getattr(activation_msg, "token_id", -1)),
                                         rpc_ms,
                                     )
-                        except Exception as e:
-                            logger.exception("Error sending token via gRPC: %s", e)
+                            except Exception as e:
+                                logger.exception("Error sending token via gRPC: %s", e)
                     else:
                         logger.error(
                             "No valid gRPC callback for token; cannot deliver nonce=%s",
@@ -322,7 +322,6 @@ class CommsMixin(RingShardNodeAttributes):
                 )
             t_ser = time.perf_counter()
             t_cast = t_ser
-
             _len_bytes = int(getattr(shaped, "nbytes", 0))
             _do_compress = bool(
                 self._compress and _len_bytes >= self._compress_min_bytes
@@ -360,7 +359,7 @@ class CommsMixin(RingShardNodeAttributes):
                         f.event("mxarray.cast")
                     data = tensor_to_bytes(shaped)
 
-                activation_msg.dtype = self._wire_dtype_str
+            activation_msg.dtype = self._wire_dtype_str
 
             nxt = activation_msg.layer_id + 1
             if (nxt < self.model_metadata.num_layers) and (nxt not in self._assigned_set):
@@ -426,6 +425,38 @@ class CommsMixin(RingShardNodeAttributes):
                                 )
                                 ctx.disabled = True
 
+                        # Prefer streaming if enabled/available; fallback to unary
+                        stream_used = False
+                        ctx = await self._ensure_stream(activation_msg.nonce)
+                        if (
+                            ctx
+                            and ctx.open
+                            and not ctx.disabled
+                            and hasattr(dnet_ring_pb2, "ActivationFrame")
+                        ):
+                            try:
+                                ctx.last_seq += 1
+                                frame = dnet_ring_pb2.ActivationFrame(
+                                    request=request,
+                                    seq=ctx.last_seq,
+                                    end_of_request=False,
+                                )
+                                await ctx.queue.put(frame)
+                                ctx.last_activity_t = asyncio.get_running_loop().time()
+                                stream_used = True
+                                if self._profile:
+                                    logger.info(
+                                        "[PROFILE][STREAM-ENQ] nonce=%s seq=%s q=%s",
+                                        activation_msg.nonce,
+                                        ctx.last_seq,
+                                        ctx.queue.qsize(),
+                                    )
+                            except Exception as e:
+                                logger.warning(
+                                    "[STREAM] enqueue failed; fallback to unary: %s", e
+                                )
+                                ctx.disabled = True
+
                         if not stream_used:
                             # In fit mode, avoid long unary stalls: use short deadline and min retries
                             # Streaming should be the norm; unary is a quick safety valve only.
@@ -443,17 +474,17 @@ class CommsMixin(RingShardNodeAttributes):
                                     reason = "stream_closed"
                                 elif ctx.disabled:
                                     reason = "stream_disabled"
-                                    else:
-                                        reason = "enqueue_failed"
-                                    logger.warning(
-                                        "[STREAM->UNARY] node=%s nonce=%s reason=%s mode=%s timeout_s=%.1f retries=%d",
-                                        self.node_id,
-                                        activation_msg.nonce,
-                                        reason,
-                                        self._mode,
-                                        ring_timeout,
-                                        ring_retries,
-                                    )
+                                else:
+                                    reason = "enqueue_failed"
+                                logger.warning(
+                                    "[STREAM->UNARY] node=%s nonce=%s reason=%s mode=%s timeout_s=%.1f retries=%d",
+                                    self.node_id,
+                                    activation_msg.nonce,
+                                    reason,
+                                    self._mode,
+                                    ring_timeout,
+                                    ring_retries,
+                                )
                                 t0 = time.perf_counter()
                                 last_exc: Optional[Exception] = None
                                 for attempt in range(1, ring_retries + 1):
@@ -481,19 +512,19 @@ class CommsMixin(RingShardNodeAttributes):
                                             await asyncio.sleep(min(0.25 * attempt, 1.0))
                                             continue
                                         raise
-                            else:
-                                raise last_exc  # type: ignore
-                            rpc_ms = (time.perf_counter() - t0) * 1000.0
-                            logger.info(
-                                "[PROFILE][TX] node=%s nonce=%s next_layer=%s payload_kb=%.1f serialize_ms=%.3f rpc_ms=%.2f cast_ms=%.3f",
-                                self.node_id,
-                                activation_msg.nonce,
-                                activation_msg.layer_id + 1,
-                                (len(data) / 1024),
-                                ser_ms,
-                                rpc_ms,
-                                cast_ms,
-                            )
+                                else:
+                                    raise last_exc  # type: ignore
+                                rpc_ms = (time.perf_counter() - t0) * 1000.0
+                                logger.info(
+                                    "[PROFILE][TX] node=%s nonce=%s next_layer=%s payload_kb=%.1f serialize_ms=%.3f rpc_ms=%.2f cast_ms=%.3f",
+                                    self.node_id,
+                                    activation_msg.nonce,
+                                    activation_msg.layer_id + 1,
+                                    (len(data) / 1024),
+                                    ser_ms,
+                                    rpc_ms,
+                                    cast_ms,
+                                )
                 else:
                     logger.error("Cannot forward activation - no next node configured; end shard should sample inline.")
 

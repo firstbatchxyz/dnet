@@ -494,14 +494,6 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                         k,
                     )
 
-            load_time_ms = (time.perf_counter() - start_time) * 1000.0
-            logger.info(
-                "Node %s: Successfully loaded model %s with layers %s in %.2fms",
-                self.node_id,
-                req.model_path,
-                req.layers,
-                load_time_ms,
-            )
 
             return ShardLoadModelResponse(
                 success=True,

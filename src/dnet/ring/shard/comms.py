@@ -13,8 +13,8 @@ import numpy as np
 from dnet_p2p import (
     DnetDeviceProperties,
     discover_thunderbolt_connection,
+    ThunderboltConnection,
 )
-from dnet_p2p.thunderbolt import ThunderboltConnection
 from dnet.utils.latency import DeviceLatencyResult, LatencyMeasurement, LatencyResults
 
 from ...utils.grpc_config import GRPC_AIO_OPTIONS
@@ -296,6 +296,7 @@ class CommsMixin(RingShardNodeAttributes):
             if isinstance(shaped, np.ndarray):
                 logger.warning("Activation tensor is a numpy array!!!")
                 if shaped.dtype != wire_np_dtype:
+                    # FIXME: numpy vs mx array here
                     shaped = shaped.astype(wire_np_dtype, copy=False)
             else:
                 # MLX array -> cast to desired wire dtype
@@ -471,7 +472,10 @@ class CommsMixin(RingShardNodeAttributes):
                 # Enable by setting RING_EXPLICIT_EOR=1 when you emit a true end-of-request signal.
                 try:
                     if self._explicit_eor:
-                        if hasattr(self, "_streams") and activation_msg.nonce in self._streams:
+                        if (
+                            hasattr(self, "_streams")
+                            and activation_msg.nonce in self._streams
+                        ):
                             await self._end_stream(activation_msg.nonce, eor=True)
                 except Exception:
                     pass

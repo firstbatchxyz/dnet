@@ -21,8 +21,8 @@ from dnet_p2p import (
     DnetDeviceProperties,
     DnetP2P,
     discover_all_thunderbolt_connections,
+    ThunderboltConnection,
 )
-from dnet_p2p.thunderbolt import ThunderboltConnection
 from dperf import profile_model
 from dperf.profiler import ModelProfileSplit
 from distilp import (
@@ -47,10 +47,11 @@ from .utils import (
     optimize_device_ordering,
 )
 from .models import (
-    ChatBaseParams,
+    ChatParams,
+    ChatUsage,
     ChatChoice,
     ChatCompletionReason,
-    ChatLogProp,
+    ChatLogProbs,
     ChatMessage,
     ChatRequestModel,
     ChatResponseModel,
@@ -176,8 +177,6 @@ class RingApiNode:
         instance = f"api-{token_hex(4)}-{hostname}"
         self.discovery.create_instance(
             instance,
-            hostname,
-            "0.0.0.0",  # Bind to all addresses
             self.http_port,
             self.grpc_port,
             is_manager=True,  # API is a manager
@@ -344,7 +343,7 @@ class RingApiNode:
                 # FIXME: return type mismatch here
                 return StreamingResponse(
                     self._stream_chat(req), media_type="text/event-stream"
-                )
+                )  # type: ignore
             else:
                 return await self._handle_chat_completion(req)
 
@@ -476,7 +475,6 @@ class RingApiNode:
                     is_manager=False,
                     is_busy=False,
                     instance=d.name,
-                    host=d.local_ip,
                     server_port=d.server_port,
                     shard_port=d.shard_port,
                     local_ip=d.local_ip,
@@ -884,7 +882,7 @@ class RingApiNode:
         devices = self.discovery.get_properties()
         # Normalize keys to the short "instance" form
         normalized: Dict[str, DnetDeviceProperties] = {}
-        for _fullname, props in devices.items():
+        for _instance, props in devices.items():
             if props.is_manager:
                 continue
             normalized[props.instance] = props
@@ -1110,7 +1108,7 @@ class RingApiNode:
 
     async def _handle_completion(
         self,
-        req: ChatRequestModel,
+        req: ChatParams,
         prompt: mx.array,
         stop_id_sequences: List[List[int]],
     ) -> ChatResponseModel:
@@ -1142,14 +1140,7 @@ class RingApiNode:
                 node_origin=f"localhost:{self.http_port}",
                 prompt=prompt,
                 pending_requests=self.pending_requests,
-                params=ChatBaseParams(
-                    model=req.model,
-                    temperature=req.temperature,
-                    top_p=req.top_p,
-                    repetition_penalty=req.repetition_penalty,
-                    repetition_context_size=req.repetition_context_size,
-                    logit_bias=req.logit_bias,
-                ),
+                params=req,
             ),  # type: ignore
             arange(req.max_tokens or 0),
         ):
@@ -1158,9 +1149,9 @@ class RingApiNode:
             detokenizer.add_token(token)
             tokens.append(token)
 
-            if (logprobs is not None) and (req.logprobs > 0) and logprobs.size != 0:
-                sorted_indices = mx.argpartition(-logprobs, kth=req.logprobs - 1)
-                top_indices = sorted_indices[: (req.logprobs or 0)]
+            if (logprobs is not None) and (req.logprobs) and logprobs.size != 0:
+                sorted_indices = mx.argpartition(-logprobs, kth=req.top_logprobs - 1)
+                top_indices = sorted_indices[: (req.top_logprobs or 0)]
                 top_logprobs_array = logprobs[top_indices]
                 top_token_info = zip(
                     top_indices.tolist(),  # type: ignore # FIXME: !!!
@@ -1228,9 +1219,9 @@ class RingApiNode:
         prompt = mx.array(self.tokenizer.encode(req.prompt))  # type: ignore
         stop_id_sequences: List[List[int]] = [
             self.tokenizer.encode(stop_word, add_special_tokens=False)  # type: ignore
-            for stop_word in (req.stop or [])  # type: ignore
+            for stop_word in (req.stop or [])
         ]
-        chat_resp = await self._handle_completion(req, prompt, stop_id_sequences)  # type: ignore[arg-type]
+        chat_resp = await self._handle_completion(req, prompt, stop_id_sequences)
         text = chat_resp.choices[0].message.content
         return {
             "id": chat_resp.id,
@@ -1309,20 +1300,22 @@ class RingApiNode:
                     index=0,
                     finish_reason=finish_reason,
                     message=ChatMessage(role="assistant", content=text),
-                    logprop=ChatLogProp(
+                    logprobs=ChatLogProbs(
                         token_logprobs=token_logprobs or [],
                         top_logprobs=top_logprobs or [],
                         tokens=tokens,
                     ),
                 )
             ],
-            usage={
-                "prompt_tokens": prompt_token_count,
-                "completion_tokens": completion_token_count,
-                "total_tokens": (prompt_token_count or 0)
-                + (completion_token_count or 0),
-            },
+            # FIXME: bit too many `or 0`'s here?
+            usage=ChatUsage(
+                prompt_tokens=prompt_token_count or 0,
+                completion_tokens=completion_token_count or 0,
+                total_tokens=(prompt_token_count or 0) + (completion_token_count or 0),
+            ),
             metrics=metrics,
+            created=int(time.time()),
+            model=self.model_name or "unknown",
         )
 
     def _stream_chat(self, req: ChatRequestModel):
@@ -1332,14 +1325,14 @@ class RingApiNode:
         async def gen():
             stop_id_sequences: List[List[int]] = [
                 self.tokenizer.encode(stop_word, add_special_tokens=False)  # type: ignore
-                for stop_word in (req.stop or [])  # type: ignore
+                for stop_word in (req.stop or [])
             ]
             prompt_text = await self._convert_chat(req.messages)
             prompt = mx.array(self.tokenizer.encode(prompt_text))  # type: ignore
             prompt_tokens = int(len(prompt))  # 1D token count
             t_start = time.perf_counter()
             t_first_token: Optional[float] = None
-            detok = self.tokenizer.detokenizer
+            detok = self.tokenizer.detokenizer  # type: ignore
             detok.reset()
             # Initial role delta
             chunk = {
@@ -1360,15 +1353,8 @@ class RingApiNode:
                     node_origin=f"localhost:{self.http_port}",  # FIXME: Not sure of this, grpc-http port mix
                     prompt=prompt,
                     pending_requests=self.pending_requests,
-                    params=ChatBaseParams(
-                        model=req.model,
-                        temperature=req.temperature,
-                        top_p=req.top_p,
-                        repetition_penalty=req.repetition_penalty,
-                        repetition_context_size=req.repetition_context_size,
-                        logit_bias=req.logit_bias,
-                    ),  # type: ignore
-                ),
+                    params=req,
+                ),  # type: ignore
                 arange(req.max_tokens or 0),
             ):
                 if t_first_token is None:
@@ -1378,7 +1364,7 @@ class RingApiNode:
                 try:
                     delta = detok.delta
                 except Exception:
-                    delta = self.tokenizer.decode([token])
+                    delta = self.tokenizer.decode([token])  # type: ignore
                 chunk = {
                     "id": nonce,
                     "object": "chat.completion.chunk",
@@ -1391,7 +1377,9 @@ class RingApiNode:
                 yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 
                 stop = await self._stopping_criteria(
-                    tokens, stop_id_sequences, self.tokenizer.eos_token_id
+                    tokens,
+                    stop_id_sequences,
+                    self.tokenizer.eos_token_id,  # type: ignore
                 )  # type: ignore
                 if stop.stop_met:
                     break
@@ -1419,8 +1407,12 @@ class RingApiNode:
                     "ttfb_ms": round(((t_first_token or t_end) - t_start) * 1000.0, 3),
                     "token_gen_ms": round(gen_s * 1000.0, 3),
                     "tokens_generated": tokens_generated,
-                    "tps_overall": round((tokens_generated / total_s) if tokens_generated else 0.0, 4),
-                    "tps_decoding": round((tokens_generated / gen_s) if tokens_generated else 0.0, 4),
+                    "tps_overall": round(
+                        (tokens_generated / total_s) if tokens_generated else 0.0, 4
+                    ),
+                    "tps_decoding": round(
+                        (tokens_generated / gen_s) if tokens_generated else 0.0, 4
+                    ),
                 }
                 done["metrics"] = metrics
             yield f"data: {json.dumps(done)}\n\n"
@@ -1437,7 +1429,7 @@ class RingApiNode:
             prompt_tokens = int(len(prompt))
             t_start = time.perf_counter()
             t_first_token: Optional[float] = None
-            detok = self.tokenizer.detokenizer
+            detok = self.tokenizer.detokenizer  # type: ignore
             detok.reset()
             out_tokens = 0
             async for (token, _), _ in azip(
@@ -1446,14 +1438,7 @@ class RingApiNode:
                     node_origin=f"localhost:{self.http_port}",  # FIXME: Not sure of this, grpc-http port mix
                     prompt=prompt,
                     pending_requests=self.pending_requests,
-                    params=ChatBaseParams(
-                        model=req.model,
-                        temperature=req.temperature,
-                        top_p=req.top_p,
-                        repetition_penalty=req.repetition_penalty,
-                        repetition_context_size=req.repetition_context_size,
-                        logit_bias=req.logit_bias,
-                    ),
+                    params=req,
                 ),  # type: ignore
                 arange(req.max_tokens or 0),
             ):
@@ -1464,7 +1449,7 @@ class RingApiNode:
                 try:
                     delta = detok.delta
                 except Exception:
-                    delta = self.tokenizer.decode([token])
+                    delta = self.tokenizer.decode([token])  # type: ignore
                 chunk = {
                     "id": nonce,
                     "object": "text_completion.chunk",
@@ -1496,8 +1481,12 @@ class RingApiNode:
                     "ttfb_ms": round(((t_first_token or t_end) - t_start) * 1000.0, 3),
                     "token_gen_ms": round(gen_s * 1000.0, 3),
                     "tokens_generated": out_tokens,
-                    "tps_overall": round((out_tokens / total_s) if out_tokens else 0.0, 4),
-                    "tps_decoding": round((out_tokens / gen_s) if out_tokens else 0.0, 4),
+                    "tps_overall": round(
+                        (out_tokens / total_s) if out_tokens else 0.0, 4
+                    ),
+                    "tps_decoding": round(
+                        (out_tokens / gen_s) if out_tokens else 0.0, 4
+                    ),
                 }
                 done["metrics"] = metrics
             yield f"data: {json.dumps(done)}\n\n"

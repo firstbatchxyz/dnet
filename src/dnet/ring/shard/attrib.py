@@ -76,6 +76,9 @@ class RingShardNodeAttributes:
     assigned_layers: list[int]
     window_size: int
 
+    _streams: dict[str, Any]
+    _stream_idle_s: float
+
     _assigned_sorted: list[int]
     _bound_versions: dict[int, int]
 

@@ -268,8 +268,12 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
 
             self._mode = "fit" if requested_w >= local_count else "offload"
             self.config = ShardConfig.for_mode(self._mode)  # Reset config
-            set_prefetch_mode(self.config.prefetch_mode)  # Apply new config's prefetch mode
-            self._resident_windows = int(self.config.resident_windows)  # Update resident windows
+            set_prefetch_mode(
+                self.config.prefetch_mode
+            )  # Apply new config's prefetch mode
+            self._resident_windows = int(
+                self.config.resident_windows
+            )  # Update resident windows
             eff_window_size = (
                 local_count
                 if (self._mode == "fit")
@@ -1111,9 +1115,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         ]
         # Start idle sweeper to close silent streams
         try:
-            if self._streaming_enabled and hasattr(
-                self, "_stream_sweeper"
-            ):
+            if self._streaming_enabled and hasattr(self, "_stream_sweeper"):
                 self.background_tasks.append(
                     asyncio.create_task(self._stream_sweeper())
                 )
@@ -1139,17 +1141,15 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         instance = f"shard-{token_hex(4)}-{hostname}"
         self.discovery.create_instance(
             instance,
-            hostname,
-            "0.0.0.0",  # Binds to all addresses
-            self.http_port,  # HTTP port
-            self.grpc_port,  # gRPC port
-            is_manager=False,  # Shard is never a manager
+            self.http_port,
+            self.grpc_port,
+            is_manager=False,  # shard is never a manager
         )
         self.discovery.start()
         logger.info(
             "Discovery service started for shard node %s with name %s",
             self.node_id,
-            self.discovery.fullname(),
+            instance,
         )
 
     async def _start_grpc_server(self) -> None:

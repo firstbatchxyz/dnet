@@ -65,16 +65,13 @@ class ComputeMixin(RingShardNodeAttributes):
         return len(evicted)
 
     def _process_activation(self, activation_msg: ActivationMessage):
-        if (
-            not self.model
+        if ( not self.model
             or not self.model_metadata
             or not self.weight_cache
             or not self.input_pool
             or not self.output_pool
         ):
-            logger.error(
-                "Node %s: Cannot process activation - model not loaded", self.node_id
-            )
+            logger.error("Node %s: Cannot process activation - model not loaded", self.node_id)
             return
 
         try:
@@ -172,7 +169,6 @@ class ComputeMixin(RingShardNodeAttributes):
                     )
                     to_bind: Dict[str, mx.array] = {}
                     if not skip_scan:
-                        t_w_ready = time.perf_counter()
                         for wl in window_layers:
                             weights = self.weight_cache.get_weight(wl)
                             if weights is None:
@@ -267,7 +263,8 @@ class ComputeMixin(RingShardNodeAttributes):
                 """
 
                 for lid in window_layers:
-                    self.weight_cache.decrease_reference(lid)
+                    #self.weight_cache.decrease_reference(lid)
+                    pass
 
                 with self.tracer.frame("compute.thread", "execute.evict_and_unload"):
                     try:

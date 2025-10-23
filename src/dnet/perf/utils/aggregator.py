@@ -304,20 +304,27 @@ class StatsAggregator:
               #        so we need to handle the creation of this better
               stats = self._running_stats[nonce]
 
-              if e.name == "network.ingress": 
-                _cost: lambda e: e.attrs["inflight"] + e.attrs["inwait"] + e.attrs["ms"]
+              if e.name == "network.rx": 
+                # Time in transport, ingress queue and ingress_worker
+                _cost = lambda e: e.attrs["inflight"] + e.attrs["inwait"] + e.attrs["ms"]
                 self._handle_frame(e, stats, _cost)
+                #TODO: change shard in metadata
 
               if e.name == "compute.forward": 
-                _cost = lambda e: e.attrs["ms"] 
+                _cost = lambda e: e.attrs["inwait"] + e.attrs["ms"] # compute queue + execution
                 self._handle_frame(e, stats, _cost)
 
-              if e.name == ""
+              if e.name == "network.tx.send":
+                _cost = lambda e: e.attrs["inwait"] + e.attrs["ms"] # tx queue + sendoff
+                self._handle_frame(e, stats, _cost)
 
-              # Request is finished, construct _RuntimeStats and remove from memory
-              if "final" in self._workers[node_id][nonce] and not self._nonce_round_finish[nonce]:
+              if e.name = "lm_head" and not self._nonce.round_finish[nonce]: # Finish request 
                   self._nonce_round_finish[nonce] = True
-                  if not self._nonce_prefill[nonce]: # This is prefill, append ttft
+
+                  # TODO: Remove frame and stsats from working and append
+                  st_obj = self._running_stats[nonce]
+                  del self._running_stats[nonce]
+                  self._stats.append(st_obj)
 
               acc_ttt = 0 # accumulated time to token
               acc_ttt += shard["network.ingress"][-1]

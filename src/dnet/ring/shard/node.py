@@ -376,6 +376,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                     resident_windows=self._resident_windows,
                     use_mxload_fastpath=self.config.mxload_fastpath,
                     prefetch_mode=self.config.prefetch_mode,
+                    tracer=self.tracer,
                 )
 
             # Load the model
@@ -1159,7 +1160,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                     activation_msg = self.activation_recv_queue.get(timeout=1.0)
 
                 # Process the activation
-                with self.tracer.frame("compute", "forward"):
+                with self.tracer.frame("compute", "forward"): # NOTE: Symbol hardcoded for runtime stats
                     self._process_activation(activation_msg)
 
             except Empty:
@@ -1302,9 +1303,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             pass
 
     def _warmup_shard(self):
-        logger.info(
-            "[WARMUP] Starting shard warmup with window size %s", self.window_size
-        )
+        logger.info("[WARMUP] Starting shard warmup with window size %s", self.window_size)
         if not self.model or not self.model_metadata or not self.weight_cache:
             logger.warning("[WARMUP] No model loaded; skipping warmup")
             return
@@ -1326,10 +1325,9 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         max_windows = max(1, self.config.warmup_windows)
         windows: list[list[int]] = []
         for window_start in range(0, len(self._assigned_sorted), self.window_size):
-            window_end = min(
-                window_start + self.window_size, len(self._assigned_sorted)
-            )
+            window_end = min(window_start + self.window_size, len(self._assigned_sorted))
             windows.append(self._assigned_sorted[window_start:window_end])
+
         for wi, window_layers in enumerate(windows[:max_windows]):
             weights_to_bind = {}
             for layer_id in window_layers:
@@ -1337,6 +1335,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 if weights:
                     for k, v in weights.items():
                         weights_to_bind[k] = v
+
             if weights_to_bind:
                 # Serialize MLX parameter binding
                 with self._mlx_lock:
@@ -1350,6 +1349,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                         mx.eval(_s)
             except Exception:
                 pass
+
             try:
                 for lid in window_layers:
                     self.weight_cache.decrease_reference(lid)
@@ -1570,7 +1570,8 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                     f"total_layers={req.total_layers}, kv_bits={req.kv_bits or 'default'}, "
                     f"api_callback={req.api_callback_address or 'none'}"
                 )
-                result = await self.load_model(req)
+                with self.tracer.frame("memory", "model.load"): # NOTE: Symbol hardcoded for runtime stats
+                    result = await self.load_model(req)
                 return result
 
             except Exception as e:
@@ -1587,7 +1588,8 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             """Unload current model."""
             try:
                 logger.info("HTTP /unload_model")
-                result = await self.unload_model()
+                with self.tracer.frame("memory", "model.unload"): # NOTE: Symbol hardcoded for runtime stats
+                    result = await self.unload_model()
                 return result
 
             except Exception as e:
@@ -1601,29 +1603,30 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         # FIXME: add pydantic type here
         async def warm(request: Request) -> JSONResponse:
             try:
-                body = await request.json()
-                start = int(body.get("start", -1))
-                window = int(body.get("window", self.window_size))
-                if start < 0:
-                    return JSONResponse(
-                        status_code=400, content={"error": "missing/invalid start"}
-                    )
-                start_idx = 0
-                for i, lyr in enumerate(self._assigned_sorted):
-                    if lyr >= start:
-                        start_idx = i
-                        break
-                else:
-                    return JSONResponse(content={"prefetched": []})
-                window_layers = self._assigned_sorted[
-                    start_idx : start_idx + max(1, window)
-                ]
-                for wl in window_layers:
-                    # Prefetch disabled in fit mode; allow only when non-fit and enabled
-                    if self._mode != "fit" and self.config.prefetch_mode != "off":
-                        self._prefetch_to_ram(wl)
-                        self._enqueue_weight_prefetch(wl)
-                return JSONResponse(content={"prefetched": window_layers})
+                with self.tracer.frame("memory", "model.warm"): # NOTE: Symbol hardcoded for runtime stats
+                    body = await request.json()
+                    start = int(body.get("start", -1))
+                    window = int(body.get("window", self.window_size))
+                    if start < 0:
+                        return JSONResponse(
+                            status_code=400, content={"error": "missing/invalid start"}
+                        )
+                    start_idx = 0
+                    for i, lyr in enumerate(self._assigned_sorted):
+                        if lyr >= start:
+                            start_idx = i
+                            break
+                    else:
+                        return JSONResponse(content={"prefetched": []})
+                    window_layers = self._assigned_sorted[
+                        start_idx : start_idx + max(1, window)
+                    ]
+                    for wl in window_layers:
+                        # Prefetch disabled in fit mode; allow only when non-fit and enabled
+                        if self._mode != "fit" and self.config.prefetch_mode != "off":
+                            self._prefetch_to_ram(wl)
+                            self._enqueue_weight_prefetch(wl)
+                    return JSONResponse(content={"prefetched": window_layers})
             except Exception as e:
                 logger.error("/warm failed: %s", e)
                 return JSONResponse(status_code=500, content={"error": str(e)})
@@ -1665,9 +1668,10 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         Returns:
             Device profile information as a plain dict
         """
-        profile_dict = profile_device_via_subprocess(
-            repo_id, max_batch_exp=max_batch_exp, debug=0
-        )
+        with self.tracer.frame("startup", "profile.device"): # NOTE: Symbol hardcoded for runtime stats
+            profile_dict = profile_device_via_subprocess(
+                repo_id, max_batch_exp=max_batch_exp, debug=0
+            )
         logger.info("Device profiling completed for node %s", self.node_id)
         return profile_dict
 

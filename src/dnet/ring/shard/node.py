@@ -218,6 +218,10 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         self.tracer = Tracer(cfg) 
         self.tracer.start()
 
+        # Get in-flight and in-wait time per request
+        self._rx_ingress_t: Dict[str, float] = {} # Mapping of nonce -> perf_counter()
+        self._rx_inflight_t: Dict[str, float] = {} # Track per-request inflight 
+
         # Per-nonce KV caches (concurrent requests)
         self._kv_by_nonce: Dict[str, list] = {}
         self._kv_last_seen: Dict[str, float] = {}
@@ -851,6 +855,10 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         """enqueue protobuf frame to ingress queue"""
         while self.running:
             try:
+                rx_t = time.perf_counter()
+                self._rx_ingress_t[request.nonce] = rx_t 
+                self._rx_inflight_t[request.nonce] = rx_t - request.timestamp 
+
                 self.ingress_q.put_nowait(request)
                 logger.debug(f"[ENQUE] Enqueued activation request")
                 return
@@ -1026,7 +1034,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             activation = request.activation
             if "|" in activation.dtype: # Compressed path: decompress to MLX array and copy to pool
 
-                with self.tracer.frame("grpc.ingress.prepare_activation", "decompress") as f:
+                with self.tracer.frame("network.ingress.prepare_activation", "decompress") as f:
                     try:
                         deq = decompress_tensor_from_protobuf_data(
                             tensor_data=activation.data,
@@ -1062,7 +1070,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                     return activation_msg
 
             elif activation.dtype == "tokens": # Tokens path: parse int32 token IDs and stage them
-                with self.tracer.frame("grpc.ingress.prepare_activation", "tokens") as f:
+                with self.tracer.frame("network.ingress.prepare_activation", "tokens") as f:
                     try:
                         tokens = np.frombuffer(activation.data, dtype=np.int32)
                         shp = (int(len(tokens)),)
@@ -1091,7 +1099,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                     return activation_msg
 
             else: # Dense path: validate size and copy raw bytes view into pool buffer
-                with self.tracer.frame("grpc.ingress.prepare_activation", "default") as f:
+                with self.tracer.frame("network.ingress.prepare_activation", "default") as f:
                     try:
                         expected = (
                             int(np.prod(activation.shape))
@@ -1571,6 +1579,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                     f"total_layers={req.total_layers}, kv_bits={req.kv_bits or 'default'}, "
                     f"api_callback={req.api_callback_address or 'none'}"
                 )
+                self.tracer.mark("model", {"model": req.model_path, "ts": time.perf_counter()}) # Record model name
                 with self.tracer.frame("memory", "model.load"): # NOTE: Symbol hardcoded for runtime stats
                     result = await self.load_model(req)
                 return result

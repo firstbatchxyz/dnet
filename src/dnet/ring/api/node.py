@@ -609,6 +609,7 @@ class RingApiNode:
 
                     # Call load_model via HTTP (window_size unified)
                     url = f"http://{shard_props.local_ip}:{shard_props.server_port}/load_model"
+                    # Let the shard decide warmup based on its computed mode (fit/offload)
                     payload = ShardLoadModelRequest(
                         model_path=model_to_load,
                         layers=layers,

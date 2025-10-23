@@ -71,6 +71,10 @@ class ShardConfig:
     # Default False to avoid loading full multi-layer shard files in offload mode.
     mxload_fastpath: bool = False
 
+    # Activation pool sizes (MB)
+    input_pool_mb: int = 512
+    output_pool_mb: int = 512
+
     @staticmethod
     def for_mode(mode: str) -> "ShardConfig":
         m = (mode or "fit").strip().lower()
@@ -85,7 +89,9 @@ class ShardConfig:
                 warmup_windows=1,
                 streaming=False,
                 compress=False,
-                mxload_fastpath=True
+                mxload_fastpath=True,
+                input_pool_mb=256,
+                output_pool_mb=256,
             )
         # Default: fit-in-memory preset
         return ShardConfig(
@@ -97,4 +103,7 @@ class ShardConfig:
             warmup_windows=1,
             streaming=True,
             compress=False,
+            mxload_fastpath=False,
+            input_pool_mb=512,
+            output_pool_mb=512,
         )

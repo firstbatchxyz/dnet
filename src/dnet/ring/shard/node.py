@@ -258,9 +258,9 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             except Exception:
                 pass
 
-            # Initialize memory pools
-            self.input_pool = LayerAwareMemoryPool(total_memory_mb=512)
-            self.output_pool = LayerAwareMemoryPool(total_memory_mb=512)
+            # Initialize memory pools (configurable)
+            self.input_pool = LayerAwareMemoryPool(total_memory_mb=int(self.config.input_pool_mb))
+            self.output_pool = LayerAwareMemoryPool(total_memory_mb=int(self.config.output_pool_mb))
 
             # Decide mode dynamically from assignment + requested window
             requested_w = int(max(1, int(req.window_size)))
@@ -367,14 +367,16 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             else:
                 logger.warning("Node %s: No next node configured", self.node_id)
 
-            # Warmup if requested (run in executor to avoid blocking event loop)
-            if req.warmup:
+            # Warmup only in fit mode; offload shards skip to avoid front-loading allocations
+            if req.warmup and self._mode == "fit":
                 loop = asyncio.get_running_loop()
                 try:
                     await loop.run_in_executor(self.executor, self._warmup_shard)
                 except Exception:
                     # Fall back to direct call if executor is unavailable
                     self._warmup_shard()
+            elif req.warmup and self._mode != "fit":
+                logger.info("Warmup requested but skipped in offload mode on node %s", self.node_id)
 
             # TODO: Make sure this is the right spot for prefetching
             initial_window = self._assigned_sorted[: self.window_size]

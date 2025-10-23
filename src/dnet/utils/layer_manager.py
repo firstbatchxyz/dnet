@@ -76,14 +76,18 @@ class LayerManager:
         # Extract the name of safetensors associated with the layers
         self.assigned_layers = set(assigned_layers)
 
-        # Open memory-mapped file
-        self.weight_info = weight_info = model_metadata.weight_info
-        filenames = set(
-            wts.filename
-            for layer in assigned_layers
-            for wts in weight_info[layer].values()
-        )
-        self.mapped_files = {fname: MappedFile(fname) for fname in filenames}
+        # Weight metadata
+        self.weight_info = model_metadata.weight_info
+        # Skip pre-mapping in mx.load fast-path; map files only in mmap mode
+        if use_mxload_fastpath:
+            self.mapped_files = {}
+        else:
+            filenames = set(
+                wts.filename
+                for layer in assigned_layers
+                for wts in self.weight_info[layer].values()
+            )
+            self.mapped_files = {fname: MappedFile(fname) for fname in filenames}
 
         self.executor = ThreadPoolExecutor(max_workers=thread_pool_size)
         # Only enable mx.load fast-path for explicitly repacked windows.
@@ -122,6 +126,31 @@ class LayerManager:
         import time as _time
 
         t0 = _time.perf_counter()
+        if self._use_mxload_fastpath:
+            # Read-ahead the per-layer file to warm OS cache; overlaps IO with compute
+            try:
+                info = self.weight_info.get(layer_idx, {})
+                fnames = {wt.filename for wt in info.values()}
+                if not fnames:
+                    return False
+                fname = next(iter(fnames))
+                chunk = 4 * 1024 * 1024
+                with open(fname, "rb", buffering=0) as f:
+                    while True:
+                        b = f.read(chunk)
+                        if not b:
+                            break
+                dt_ms = (_time.perf_counter() - t0) * 1000.0
+                logger.info(
+                    f"[PROFILE][PREFETCH-READ] layer={layer_idx} mode=mxload ms={dt_ms:.2f}"
+                )
+                return True
+            except Exception:
+                dt_ms = (_time.perf_counter() - t0) * 1000.0
+                logger.info(
+                    f"[PROFILE][PREFETCH-READ] layer={layer_idx} mode=mxload ms={dt_ms:.2f} (failed)"
+                )
+                return False
         mode = get_prefetch_mode()
         if mode == "off":
             # Skip any OS advice; treat as success for control flow

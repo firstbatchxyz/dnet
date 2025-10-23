@@ -174,6 +174,12 @@ class ComputeMixin(RingShardNodeAttributes):
                     t_l0 = time.perf_counter() if self._profile else 0.0
                     with self._mlx_lock:
                         x = self.model.apply_single_layer(lyr, x, cache=kv)
+                        # Keep activations in wire dtype to reduce memory pressure
+                        try:
+                            if str(x.dtype) != str(self._wire_mx_dtype):
+                                x = x.astype(self._wire_mx_dtype)
+                        except Exception:
+                            pass
 
                     # Optional per-n-layer sync for profiling, gated by settings
                     if self._profile and self._sync_per_layer:

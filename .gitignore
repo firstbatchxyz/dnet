@@ -34,7 +34,7 @@ piped_mlx.egg-info/
 
 # Coverage
 .coverage
-
+layer_weights/*
 .idea/
 .DS_Store
 .ruff_cache/

@@ -172,18 +172,21 @@ class CommsMixin(RingShardNodeAttributes):
         ):
             try:
                 activation_msg = await self.activation_computed_queue.get()
-                if activation_msg.tx_enq_perf_t and self._profile:
-                    q_wait_ms = (
-                        time.perf_counter() - activation_msg.tx_enq_perf_t
-                    ) * 1000.0
-                    logger.info(
-                        "[PROFILE][QUEUE-TX] node=%s nonce=%s wait_ms=%.3f size=%s",
-                        self.node_id,
-                        activation_msg.nonce,
-                        q_wait_ms,
-                        self.activation_computed_queue.qsize(),
-                    )
-                await self._send_activation(activation_msg)
+                with self.tracer.frame("network", "tx") as f:
+                    if activation_msg.tx_enq_perf_t and self._profile:
+                        f.set("inwait", time.perf_counter() - self._rx_enque_t) 
+                        f.set("nonce", activation_msg.nonce)
+                        q_wait_ms = (
+                            time.perf_counter() - activation_msg.tx_enq_perf_t
+                        ) * 1000.0
+                        logger.info(
+                            "[PROFILE][QUEUE-TX] node=%s nonce=%s wait_ms=%.3f size=%s",
+                            self.node_id,
+                            activation_msg.nonce,
+                            q_wait_ms,
+                            self.activation_computed_queue.qsize(),
+                        )
+                    await self._send_activation(activation_msg)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -247,28 +250,22 @@ class CommsMixin(RingShardNodeAttributes):
                         pass
                     cb = activation_msg.callback_url or ""
                     parsed = urlparse(cb) if cb else None
-                    t_rpc = time.perf_counter()
                     if parsed and parsed.scheme == "grpc":
                         addr = parsed.netloc
                         if not addr:
                             logger.error("Invalid gRPC callback URL for token: %s", cb)
                             return
-                        # Ensure API channel/stub
-                        if (self.api_channel is None) or (addr != self.api_address):
-                            # close existing channel if any
-                            try:
+
+                        if (self.api_channel is None) or (addr != self.api_address): # Ensure API channel/stub
+                            try: # close existing channel if any
                                 if self.api_channel is not None:
                                     await self.api_channel.close()
                             except Exception:
                                 pass
 
                             self.api_address = addr
-                            self.api_channel = aio_grpc.insecure_channel(
-                                addr, options=GRPC_AIO_OPTIONS
-                            )
-                            self.api_stub = shard_api_comm_pb2_grpc.ShardApiServiceStub(
-                                self.api_channel
-                            )
+                            self.api_channel = aio_grpc.insecure_channel( addr, options=GRPC_AIO_OPTIONS)
+                            self.api_stub = shard_api_comm_pb2_grpc.ShardApiServiceStub( self.api_channel)
                             f.event("reset_api")
 
                         with self.tracer.frame("grpc", "token_request") as fr:
@@ -279,20 +276,11 @@ class CommsMixin(RingShardNodeAttributes):
                                     timestamp=utc_epoch_now(),
                                 )
                                 resp = await self.api_stub.SendToken(req)  # type: ignore
-                                rpc_ms = (time.perf_counter() - t_rpc) * 1000.0
                                 if not resp.success:
                                     logger.error(
                                         "API SendToken failed for %s: %s",
                                         activation_msg.nonce,
                                         resp.message,
-                                    )
-                                if self._profile:
-                                    logger.info(
-                                        "[PROFILE][TX-TOKEN][gRPC] node=%s nonce=%s token=%s rpc_ms=%.2f",
-                                        self.node_id,
-                                        activation_msg.nonce,
-                                        int(getattr(activation_msg, "token_id", -1)),
-                                        rpc_ms,
                                     )
                             except Exception as e:
                                 logger.exception("Error sending token via gRPC: %s", e)

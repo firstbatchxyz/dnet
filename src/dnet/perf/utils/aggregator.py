@@ -8,7 +8,6 @@ from collections import defaultdict, deque
 
 from dnet.utils.logger import logger
 from dnet.ring import LayerAssignment, TopologyInfo
-from dnet.perf import _Frame
 
 Key = Tuple[str, Optional[int], Optional[int], str]  # (node_id, pid, tid, req_id)
 
@@ -210,8 +209,8 @@ class _RuntimeStats:
   tokenizer: str            # Tokenizer name
   run_id: str               # ID of session (for later mapping) 
   nonce: List[str]          # List of serviced requests
-  ttft: Dict[str, float]    # Time to first token, map: p50 : 0.0 (ms)
-  itl: Dict[str, float]     # Inter-token latency, mapL p50 : 0.0 (ms)
+  ttft: float               # Time to first token
+  itl: float                # Inter-token latency
   requests: int             # Number of requests serviced
   failed: int               # Number of failed requests
   prompt_tokens: int        # Number of prompt tokens per request (req_id: #)
@@ -229,23 +228,24 @@ class _RuntimeStats:
   assignment: LayerAssignment = None  # Map of layer to shard IDs
 
 
-# NOTE: Hardcodes some high-level trace frame symbols
-def to_runstats(agg: RunAggregator):
-  pass 
-
 # Process stats + handle per-request data
+# NOTE: Hardcodes some high-level trace frame symbols
+# TODO: Use a bitmap to track the stages for each req and prevent double-count
 class StatsAggregator:
     def __init__(self) -> None:
       self._lock = threading.Lock()
 
-      self._max_resident_rq = 50 # per node  FIXME: modify from repl
-      self._workers: Dict[str, Dict[str, Dict[str, _Frame]]] = {} # Store frames per nonce, per node_id 
+      self._max_inflight_rq = 20 # per node  FIXME: modify from repl
+
+      # Frames are kept in here while in-flight, then remove the frame objects and append to _stats 
+      self._workers: Dict[str, Dict[str, Dict[str, Any]]] = {} # Store frames per nonce, per node_id 
 
       self._nonces = []                                  # Tracked nonces (either in-flight or done)
       self._nonce_round_finish: Dict[str, bool] = {}     # Track in-flight rounds
       self._nonce_prefill: Dict[str, bool] = {}          # Track if this round is prefill
       self._running_stats: Dict[str, _RuntimeStats] = {} # Unfinished stat frames
       self._stats: Dict[str, _RuntimeStats] = {}         # Finished stat frames 
+      self._open_frames: Dict[str, Dict[str, Any]]       # We got 'B' event but not 'E' (per nonce)
 
     # Ingest raw data from tracer
     def add(self, data: Dict[str, Any]) -> None:
@@ -256,8 +256,13 @@ class StatsAggregator:
       if not run_id or not node_id: return # Drop the batch
 
       with self._lock:
+          
+          # Ensure we register workers and nodes
           for i, ev in enumerate(events):
-              nonce = ev.attrs["nonce"] or f"ERR_{i}"
+              if "nonce" not in ev.attrs: ev.attrs["nonce"] = f"N_{i}"
+              nonce = ev.attrs["nonce"] 
+
+              new_frames.append(ev)
 
               if node_id not in self._workers:
                 self._workers[node_id] = {}
@@ -265,33 +270,45 @@ class StatsAggregator:
               if nonce not in self._workers[node_id]:
                 self._workers[node_id][nonce] = {}
 
-              if name not in self._workers[node_id][nonce]:
-                self._workers[node_id][nonce][name] = [ev, ]
-                continue
-
               if len(self._workers[node_id]) >= self._max_resident_req: # remove oldest entry
-                del self._workers[self._nonces[0]] 
-                del self._nonces[0]
+                  del self._workers[self._nonces[0]] 
+                  del self._nonces[0]
 
-              self._workers[node_id][name].append(ev)
               self._nonces.push(nonce)
 
-          # Construct RuntimeStats
-          assert "model" in self._frames, "No model found in trace data."
+          # Update in-flight events or register new ones
+          for e in new_events:
+              nonce = e.attrs["nonce"]
+              assert nonce is not None, ""
 
-          rt_stat = self._req.setdefault(run_id, _RuntimeStats)
-          #rt_stat.model = self._workers[0]["model"][-1].attrs["model"] 
-          rt_stat.tokenizer = 
-          rt_stat.run_id = run_id
-          rt_stat.ttft = {}
+              if not node_id and nonce: return # Drop invalid frames
+              stats = self._running_stats[nonce]
 
-          for n in self._nonces: # accumulate new data for each nonce
-            for shard in self._workers:
+              # Register new request
+              if e.name == "compute.embedding": 
+                  #assert "model" in self._frames, "No model found in trace data."
+                  rt_stat = self._running_stats.setdefault(run_id, _RuntimeStats)
+                  #rt_stat.model = self._workers[0]["model"][-1].attrs["model"] 
+                  #rt_stat.tokenizer = 
+                  rt_stat.run_id = run_id
+                  rt_stat.nonce = nonce
+                  rt_stat.ttft = {}
 
+              if e.name == "network.ingress": 
+                  if e.type == "B": self._open_frames[nonce][e.name] = e
+                  n_rt = e.attrs["inflight"] + e.attrs["inwait"] 
+                  n_rt += self._open_frames[nonce][e.name].t0
+                  if self._nonce_prefill[nonce]:
+                      stats.ttft += n_rt 
+                      continue
+                  stats.itl += n_rt
+
+              if f.name == "compute.forward": 
+
+              # Request is finished, construct _RuntimeStats and remove from memory
               if "final" in self._workers[node_id][nonce] and not self._nonce_round_finish[nonce]:
-                self._nonce_round_finish[nonce] = True
-                if not self._nonce_prefill[nonce]: # This is prefill, append ttft
-                
+                  self._nonce_round_finish[nonce] = True
+                  if not self._nonce_prefill[nonce]: # This is prefill, append ttft
 
               acc_ttt = 0 # accumulated time to token
               acc_ttt += shard["network.ingress"][-1]

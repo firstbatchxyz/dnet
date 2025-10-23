@@ -125,10 +125,6 @@ class ChatRequestModel(ChatParams):
     messages: List[ChatMessage]
 
 
-class ChatLogProbsMessage(BaseModel):
-    pass
-
-
 class ChatLogProbs(BaseModel):
     """Log probabilities for chat completion."""
 

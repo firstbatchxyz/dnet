@@ -85,6 +85,7 @@ class ShardConfig:
                 warmup_windows=1,
                 streaming=False,
                 compress=False,
+                mxload_fastpath=True
             )
         # Default: fit-in-memory preset
         return ShardConfig(

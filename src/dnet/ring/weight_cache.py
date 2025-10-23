@@ -28,6 +28,7 @@ class WeightCache:
         prefetch_threads: int = 2,
         *,
         resident_windows: int = 2,
+        use_mxload_fastpath: bool = False,
     ):
         self.assigned_layers = assigned_layers
         # Resident budget: enforce up to N windows resident
@@ -45,6 +46,7 @@ class WeightCache:
             model_metadata,
             assigned_layers,
             thread_pool_size=int(prefetch_threads or 2),
+            use_mxload_fastpath=bool(use_mxload_fastpath),
         )
         self.lock = threading.Lock()
         # Track in-flight materializations so compute can wait on prefetch

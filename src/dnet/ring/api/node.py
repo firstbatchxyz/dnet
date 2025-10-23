@@ -591,8 +591,8 @@ class RingApiNode:
 
                 # Get next node address from next_service in ring (if provided)
                 next_shard = None
-                if getattr(assignment, "next_service", None):
-                    ns = assignment.next_service  # type: ignore[attr-defined]
+                if assignment.next_service is not None:
+                    ns = assignment.next_service
                     if ns in shards:
                         next_shard = shards[ns]
                         logger.info("Shard %s next node in ring: %s", service_name, ns)

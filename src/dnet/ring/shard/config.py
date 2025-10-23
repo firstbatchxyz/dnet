@@ -66,6 +66,11 @@ class ShardConfig:
     # KV cache quantization
     kv_cache: KVCacheConfig = field(default_factory=KVCacheConfig)
 
+    # Weight loading behavior
+    # Enable mx.load fast-path only for explicitly repacked files/windows.
+    # Default False to avoid loading full multi-layer shard files in offload mode.
+    mxload_fastpath: bool = False
+
     @staticmethod
     def for_mode(mode: str) -> "ShardConfig":
         m = (mode or "fit").strip().lower()

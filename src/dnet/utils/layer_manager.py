@@ -63,6 +63,8 @@ class LayerManager:
         model_metadata: ModelMetadata,
         assigned_layers: List[int],
         thread_pool_size: int = 2,
+        *,
+        use_mxload_fastpath: bool = False,
     ):
         """
         Args:
@@ -84,6 +86,9 @@ class LayerManager:
         self.mapped_files = {fname: MappedFile(fname) for fname in filenames}
 
         self.executor = ThreadPoolExecutor(max_workers=thread_pool_size)
+        # Only enable mx.load fast-path for explicitly repacked windows.
+        # Default is False to avoid loading entire multi-layer shard files.
+        self._use_mxload_fastpath = bool(use_mxload_fastpath)
         logger.info(f"Initialized LLM manager with layers {self.assigned_layers}")
 
     def _memadvise_layer(self, layer_idx: int, memadvise: int) -> bool:
@@ -220,7 +225,7 @@ class LayerManager:
             fnames = set()
             info = {}
 
-        if info and (len(fnames) == 1):
+        if self._use_mxload_fastpath and info and (len(fnames) == 1):
             try:
                 # Transient per-file load: pick only keys for this layer
                 collected = 0

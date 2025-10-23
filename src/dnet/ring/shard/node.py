@@ -263,11 +263,14 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             self.output_pool = LayerAwareMemoryPool(total_memory_mb=512)
 
             # Decide mode dynamically from assignment + requested window
-            requested_w = int(max(1, int(getattr(req, "window_size", 1))))
+            requested_w = int(max(1, int(req.window_size)))
             local_count = max(1, len(self.assigned_layers))
 
             self._mode = "fit" if requested_w >= local_count else "offload"
+            # Preserve mxload_fastpath toggle across mode reset
+            prev_fastpath = self.config.mxload_fastpath
             self.config = ShardConfig.for_mode(self._mode)  # Reset config
+            self.config.mxload_fastpath = prev_fastpath
             set_prefetch_mode(
                 self.config.prefetch_mode
             )  # Apply new config's prefetch mode
@@ -287,7 +290,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 self.window_size,
                 requested_w,
                 local_count,
-                getattr(self.config, "mode", "fit"),
+                self.config.mode,
                 self._mode,
             )
 
@@ -298,6 +301,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 window_size=self.window_size,
                 prefetch_threads=self._prefetch_threads,
                 resident_windows=self._resident_windows,
+                use_mxload_fastpath=self.config.mxload_fastpath,
             )
 
             # Load the model
@@ -310,21 +314,18 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             self.model.eval()
             self.cache = make_cache(
                 self.model,
-                kv_mode=getattr(self.config.kv_cache, "mode", None),
-                kv_bits=getattr(self.config.kv_cache, "bits", None),
-                kv_group=getattr(self.config.kv_cache, "group_size", None),
+                kv_mode=self.config.kv_cache.mode,
+                kv_bits=self.config.kv_cache.bits,
+                kv_group=self.config.kv_cache.group_size,
             )
 
             try:
                 has_start = 0 in self.assigned_layers
                 has_end = (self.model_metadata.num_layers - 1) in self.assigned_layers
-                tied = bool(
-                    getattr(
-                        getattr(self.model, "config", object()),
-                        "tie_word_embeddings",
-                        False,
-                    )
-                )
+                try:
+                    tied = bool(self.model.config.tie_word_embeddings)  # type: ignore[attr-defined]
+                except Exception:
+                    tied = False
 
                 loaded_cnt = 0
                 if has_start:
@@ -494,9 +495,9 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         try:
             self.cache = make_cache(
                 self.model,  # type: ignore[arg-type]
-                kv_mode=getattr(self.config.kv_cache, "mode", None),
-                kv_bits=getattr(self.config.kv_cache, "bits", None),
-                kv_group=getattr(self.config.kv_cache, "group_size", None),
+                kv_mode=self.config.kv_cache.mode,
+                kv_bits=self.config.kv_cache.bits,
+                kv_group=self.config.kv_cache.group_size,
             )
             logger.info("Node %s: Cache reset successfully", self.node_id)
         except Exception as e:
@@ -857,9 +858,9 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         if kv is None:
             kv = make_cache(
                 self.model,
-                kv_mode=getattr(self.config.kv_cache, "mode", None),
-                kv_bits=getattr(self.config.kv_cache, "bits", None),
-                kv_group=getattr(self.config.kv_cache, "group_size", None),
+                kv_mode=self.config.kv_cache.mode,
+                kv_bits=self.config.kv_cache.bits,
+                kv_group=self.config.kv_cache.group_size,
             )
             self._kv_by_nonce[nonce] = kv
         try:

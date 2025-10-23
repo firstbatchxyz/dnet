@@ -1195,6 +1195,15 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         x = mx.zeros((batch_size, seq_len, hidden_size), dtype=mx.bfloat16)
         start_time = time.perf_counter()
 
+        # Pause prefetch and ensure MLX ops are serialized during warmup
+        try:
+            self._compute_busy.set()
+        except Exception:
+            pass
+        prev_keep = self._warmup_keep_flag
+        # Avoid unloading during warmup to reduce allocator churn
+        self._warmup_keep_flag = True
+
         max_windows = max(1, self.config.warmup_windows)
         windows: list[list[int]] = []
         for window_start in range(0, len(self._assigned_sorted), self.window_size):
@@ -1210,12 +1219,16 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                     for k, v in weights.items():
                         weights_to_bind[k] = v
             if weights_to_bind:
-                self.model.load_weights(list(weights_to_bind.items()), strict=False)
+                # Serialize MLX parameter binding
+                with self._mlx_lock:
+                    self.model.load_weights(list(weights_to_bind.items()), strict=False)
             try:
                 for layer_id in window_layers:
-                    x = self.model.apply_single_layer(layer_id, x, cache=None)
-                    _s = mx.sum(x)
-                    mx.eval(_s)
+                    # Serialize MLX compute during warmup
+                    with self._mlx_lock:
+                        x = self.model.apply_single_layer(layer_id, x, cache=None)
+                        _s = mx.sum(x)
+                        mx.eval(_s)
             except Exception:
                 pass
             try:
@@ -1223,16 +1236,6 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                     self.weight_cache.decrease_reference(lid)
             except Exception:
                 pass
-            if not self._warmup_keep_flag:
-                try:
-                    if hasattr(self.model, "unload_layers"):
-                        self.model.unload_layers(window_layers)  # type: ignore[attr-defined]
-                except Exception:
-                    pass
-                try:
-                    self.weight_cache.evict_layers(window_layers)
-                except Exception:
-                    pass
         total_time = (time.perf_counter() - start_time) * 1000
         self._warmup_completed = True
         logger.info(
@@ -1241,6 +1244,12 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             min(len(windows), max_windows),
             int(self._warmup_keep_flag),
         )
+        # Restore flags and resume prefetch
+        self._warmup_keep_flag = prev_keep
+        try:
+            self._compute_busy.clear()
+        except Exception:
+            pass
 
     async def _start_http_server(self, shutdown_trigger: Any) -> None:
         """Start HTTP server.

@@ -86,7 +86,7 @@ class ShardConfig:
             mode="fit",
             resident_windows=9999,
             lazy_params=False,
-            prefetch_mode="off",  # Use full prefetching for fit mode
+            prefetch_mode="off",
             wire_dtype="fp16",
             warmup_windows=1,
             streaming=True,

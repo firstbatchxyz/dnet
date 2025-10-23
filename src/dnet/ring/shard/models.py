@@ -2,8 +2,7 @@
 
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
-from dnet_p2p.thunderbolt import ThunderboltConnection
-from dnet_p2p import DnetDeviceProperties
+from dnet_p2p import DnetDeviceProperties, ThunderboltConnection
 
 from dnet.utils.latency import LatencyResults
 

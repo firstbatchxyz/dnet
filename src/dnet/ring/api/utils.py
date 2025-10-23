@@ -2,8 +2,7 @@
 
 import asyncio
 from typing import AsyncGenerator, Dict, Tuple, Optional
-from dnet_p2p import DnetDeviceProperties
-from dnet_p2p.thunderbolt import ThunderboltConnection
+from dnet_p2p import DnetDeviceProperties, ThunderboltConnection
 import mlx.core as mx
 import numpy as np
 from distilp import DeviceProfile
@@ -15,7 +14,7 @@ from dnet.utils.time import utc_epoch_now
 from dnet.ring.common import LayerAssignment
 
 
-from .models import ChatBaseParams
+from .models import ChatParams
 
 
 def create_generate_step_for_ring_with_grpc(
@@ -32,7 +31,7 @@ def create_generate_step_for_ring_with_grpc(
         node_origin: str,
         prompt: mx.array,
         pending_requests: Dict[str, asyncio.Future],
-        params: ChatBaseParams,
+        params: ChatParams,
     ) -> AsyncGenerator[Tuple[mx.array, mx.array], None]:
         repetition_penalty = params.repetition_penalty
         repetition_context_size = params.repetition_context_size or 20

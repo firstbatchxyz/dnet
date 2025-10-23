@@ -65,7 +65,7 @@ class ComputeMixin(RingShardNodeAttributes):
         return len(evicted)
 
     def _process_activation(self, activation_msg: ActivationMessage):
-        if ( not self.model
+        if (not self.model
             or not self.model_metadata
             or not self.weight_cache
             or not self.input_pool
@@ -88,12 +88,21 @@ class ComputeMixin(RingShardNodeAttributes):
 
             # Prepare input activation
             with self.tracer.frame("compute.thread", "activations.process") as f:
+                f.set("nonce", activation_msg.nonce)
                 if activation_msg.dtype == "tokens": # embed locally on start shard
                     f.event("embed_tokens")
                     numel = int(np.prod(activation_msg.shape))
                     tok_view = input_buffer[:numel].reshape(activation_msg.shape)
                     toks = mx.array(np.array(tok_view, dtype=np.int32), dtype=mx.int32)
+
                     x = self.model.embed(toks[None])
+
+                    # NOTE: Used to track start of request in perf stats 
+                    self.tracer.mark("embedding", {
+                      "nonce": actication_msg.nonce,
+                      "prompt_tokens": toks.size,
+                    }) 
+
                     if x.dtype != self._wire_mx_dtype:
                         x = x.astype(self._wire_mx_dtype)
 
@@ -381,6 +390,8 @@ class ComputeMixin(RingShardNodeAttributes):
                             with self._mlx_lock:
                                 y = self.model.normalize(x_cast)
                                 y = self.model.lm_project(y)
+                                self.tracer.mark("lm_head", {"nonce": actication_msg.nonce}) # NOTE: canonical stats end 
+
                             # Greedy sample last position
                             if y.ndim == 3:
                                 logits_2d = y[:, -1, :]

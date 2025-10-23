@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Tuple, Optional, DefaultDict
 from collections import defaultdict, deque
 
 from dnet.utils.logger import logger
+from dnet.ring.common import LayerAssignment, TopologyInformation
 
 Key = Tuple[str, Optional[int], Optional[int], str]  # (node_id, pid, tid, req_id)
 
@@ -205,3 +206,66 @@ class TraceAggregator:
     def roots(self, run_id: str, req_id: str) -> List[Dict[str, Any]]:
         # Call-tree storage is disabled to reduce memory; keep API for compatibility.
         return []
+
+
+# Runtime statistics 
+# Use a RunAggregator to get raw frames per request, then transform into _RuntimeStats 
+
+# Track a single request, use multiple for a full benchmark
+@dataclass
+class _RuntimeStats:
+  model: str                # Model name
+  tokenizer: str            # Tokenizer name
+  run_id: str               # ID of request serviced (for later mapping) 
+  ttft: Dict[str, float]    # Time to first token, map: p50 : 0.0 (ms)
+  itl: Dict[str, float]     # Inter-token latency, mapL p50 : 0.0 (ms)
+  requests: int             # Number of requests serviced
+  failed: int               # Number of failed requests
+  prompt_tokens: int        # Number of prompt tokens per request (req_id: #)
+  generated_tokens: int     # Number of generated tokens per request (req_id: #)
+
+  latencys: Dict[List[str, str, str], int]  # Map of latencys: [node0, node1, p50]: 0.0 
+  latency_per_layer: Dict[int, float]       # Map of {layer: 0.0} 
+  latency_per_shard: Dict[str, float]       # Map of {shard: 0.0}
+  total_latency: int        # Total runtime of requests
+  throughput: float         # aaa 
+
+  topo: TopologyInfo = None           # Topology information for this request (keep here since it might change)
+  assignment: LayerAssignment = None  # Map of layer to shard IDs
+  startup_t: float            # Time to start shard (ms)
+  layer_assignment_t: float   # Time to layer assignment (ms)
+
+
+# NOTE: Hardcodes some high-level trace frame symbols
+def to_runstats(agg: RunAggregator):
+  pass 
+
+# Process stats + handle per-request data
+class StatsAggregator:
+    def __init__(self) -> None:
+      self._req: Dict[str, _RuntimeStats] = {}  # Map req_id : RuntimeStats obj
+      self._lock = threading.Lock()
+
+    # Ingest raw data from tracer
+    def add(self, run: _RuntimeStats) -> bool: 
+      run_id = run.get("run_id") 
+
+    # Return data for total, per req, worker or model (maybe add per layer too?)
+    def stats(
+      self, 
+      req_id: Optional[str], 
+      worker: Optional[str], 
+      model: Optional[str]
+    ):
+
+      if req_id:
+        pass
+
+      elif worker:
+        pass
+
+      elif model:
+        pass
+
+      else: # Return stats of all counters
+        

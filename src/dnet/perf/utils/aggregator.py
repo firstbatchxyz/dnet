@@ -7,7 +7,8 @@ from typing import Any, Dict, List, Tuple, Optional, DefaultDict
 from collections import defaultdict, deque
 
 from dnet.utils.logger import logger
-from dnet.ring.common import LayerAssignment, TopologyInformation
+from dnet.ring import LayerAssignment, TopologyInfo
+from dnet.perf import _Frame
 
 Key = Tuple[str, Optional[int], Optional[int], str]  # (node_id, pid, tid, req_id)
 
@@ -119,22 +120,13 @@ class TraceAggregator:
     def enqueue(self, batch: Dict[str, Any]) -> None:
         run_id = batch.get("run_id")
         node_id = batch.get("node_id")
-        logger.debug(f"Enquing trace buffer from {run_id}, {node_id}")
-        if not run_id or not node_id:
-            return
         events = batch.get("events") or []
-        batch_seq = int(batch.get("batch_seq") or 0)
+        logger.debug(f"Enquing trace buffer from {run_id}, {node_id}")
+        if not run_id or not node_id: return # Drop batch
         with self._lock:
             agg = self._req.setdefault(run_id, RunAggregator())
-            last = agg.last_batch_seq.get(node_id)
-            if (last is not None) and (batch_seq != last + 1):
-                agg.drops += abs(batch_seq - (last + 1))
-            agg.last_batch_seq[node_id] = batch_seq
             for ev in events:
-                try:
-                    agg.ingest_event(node_id, ev)
-                except Exception:
-                    continue
+                agg.ingest_event(node_id, ev)
 
     def annotate(self, run_id: str, *, mapping: Optional[Dict[str, str]] = None, repeats: int = 0) -> List[Dict[str, Any]]:
         with self._lock:
@@ -216,7 +208,8 @@ class TraceAggregator:
 class _RuntimeStats:
   model: str                # Model name
   tokenizer: str            # Tokenizer name
-  run_id: str               # ID of request serviced (for later mapping) 
+  run_id: str               # ID of session (for later mapping) 
+  nonce: List[str]          # List of serviced requests
   ttft: Dict[str, float]    # Time to first token, map: p50 : 0.0 (ms)
   itl: Dict[str, float]     # Inter-token latency, mapL p50 : 0.0 (ms)
   requests: int             # Number of requests serviced
@@ -229,11 +222,11 @@ class _RuntimeStats:
   latency_per_shard: Dict[str, float]       # Map of {shard: 0.0}
   total_latency: int        # Total runtime of requests
   throughput: float         # aaa 
+  startup_t: float            # Time to start shard (ms)
+  layer_assignment_t: float   # Time to layer assignment (ms)
 
   topo: TopologyInfo = None           # Topology information for this request (keep here since it might change)
   assignment: LayerAssignment = None  # Map of layer to shard IDs
-  startup_t: float            # Time to start shard (ms)
-  layer_assignment_t: float   # Time to layer assignment (ms)
 
 
 # NOTE: Hardcodes some high-level trace frame symbols
@@ -243,12 +236,67 @@ def to_runstats(agg: RunAggregator):
 # Process stats + handle per-request data
 class StatsAggregator:
     def __init__(self) -> None:
-      self._req: Dict[str, _RuntimeStats] = {}  # Map req_id : RuntimeStats obj
       self._lock = threading.Lock()
 
+      self._max_resident_rq = 50 # per node  FIXME: modify from repl
+      self._workers: Dict[str, Dict[str, Dict[str, _Frame]]] = {} # Store frames per nonce, per node_id 
+
+      self._nonces = []                                  # Tracked nonces (either in-flight or done)
+      self._nonce_round_finish: Dict[str, bool] = {}     # Track in-flight rounds
+      self._nonce_prefill: Dict[str, bool] = {}          # Track if this round is prefill
+      self._running_stats: Dict[str, _RuntimeStats] = {} # Unfinished stat frames
+      self._stats: Dict[str, _RuntimeStats] = {}         # Finished stat frames 
+
     # Ingest raw data from tracer
-    def add(self, run: _RuntimeStats) -> bool: 
-      run_id = run.get("run_id") 
+    def add(self, data: Dict[str, Any]) -> None:
+      run_id =  data.run_id
+      node_id = data.node_id
+      events =  data.events or []
+      name =    data.name
+      if not run_id or not node_id: return # Drop the batch
+
+      with self._lock:
+          for i, ev in enumerate(events):
+              nonce = ev.attrs["nonce"] or f"ERR_{i}"
+
+              if node_id not in self._workers:
+                self._workers[node_id] = {}
+
+              if nonce not in self._workers[node_id]:
+                self._workers[node_id][nonce] = {}
+
+              if name not in self._workers[node_id][nonce]:
+                self._workers[node_id][nonce][name] = [ev, ]
+                continue
+
+              if len(self._workers[node_id]) >= self._max_resident_req: # remove oldest entry
+                del self._workers[self._nonces[0]] 
+                del self._nonces[0]
+
+              self._workers[node_id][name].append(ev)
+              self._nonces.push(nonce)
+
+          # Construct RuntimeStats
+          assert "model" in self._frames, "No model found in trace data."
+
+          rt_stat = self._req.setdefault(run_id, _RuntimeStats)
+          #rt_stat.model = self._workers[0]["model"][-1].attrs["model"] 
+          rt_stat.tokenizer = 
+          rt_stat.run_id = run_id
+          rt_stat.ttft = {}
+
+          for n in self._nonces: # accumulate new data for each nonce
+            for shard in self._workers:
+
+              if "final" in self._workers[node_id][nonce] and not self._nonce_round_finish[nonce]:
+                self._nonce_round_finish[nonce] = True
+                if not self._nonce_prefill[nonce]: # This is prefill, append ttft
+                
+
+              acc_ttt = 0 # accumulated time to token
+              acc_ttt += shard["network.ingress"][-1]
+              inflight = shard['network.ingress'][]
+
 
     # Return data for total, per req, worker or model (maybe add per layer too?)
     def stats(
@@ -268,4 +316,5 @@ class StatsAggregator:
         pass
 
       else: # Return stats of all counters
+        pass
         

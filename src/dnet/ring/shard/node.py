@@ -850,7 +850,6 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 logger.exception("Error receiving activation: %s", e)
 
 
-
     async def admit_frame(self, request: dnet_ring_pb2.ActivationRequest) -> None:
         """enqueue protobuf frame to ingress queue"""
         while self.running:
@@ -883,13 +882,13 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                     break
 
             # Trace processing of request, in-flight and in-wait times
-            with self.tracer.frame("network.ingress", "process") as f:
+            with self.tracer.frame("network", "ingress") as f:
                 f.set("inflight", self._rx_inflight_t[req.nonce])
                 f.set("inwait", time.perf_counter() - self._rx_ingress_t[req.nonce])
                 f.set("nonce", req.nonce)
 
                 try:
-                    #with self.tracer.frame("grpc.ingress", "connect_next_node"):
+                    #with self.tracer.frame("network.ingress", "connect_next_node"):
                     await self._connect_next_node()
 
                     activation = req.activation
@@ -945,7 +944,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                                 activation_msg.recv_perf_t = t_recv
 
                         # Enqueue for compute (cancellable back-off)
-                        with self.tracer.frame("grpc.ingress", "queue") as fr:
+                        with self.tracer.frame("network.ingress", "enque") as fr:
                             while self.running:
                                 try:
                                     self.activation_recv_queue.put_nowait(activation_msg)
@@ -957,18 +956,15 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                                 except Full:
                                     await asyncio.sleep(0)
                             else:
-                                logger.error(
-                                    "Failed to queue activation %s (node stopping)",
-                                    activation_msg.nonce,
-                                )
+                                logger.error("Failed to queue activation %s (node stopping)", activation_msg.nonce,)
                                 try:
                                     if self.input_pool:
                                         # FIXME: !!!
                                         self.input_pool.release(activation_msg.pool_id)
                                 except Exception:
                                     pass
-                    else:
-                      # Forward to next node (not our layer)
+
+                    else: # Forward to next node (not our layer)
                       logger.debug(
                           "Forwarding activation (layer %s) to next node, nonce: %s",
                           target_layer,

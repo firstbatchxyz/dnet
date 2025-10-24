@@ -274,6 +274,7 @@ class CommsMixin(RingShardNodeAttributes):
                                     nonce=activation_msg.nonce,
                                     token_id=int(getattr(activation_msg, "token_id", -1)),
                                     timestamp=utc_epoch_now(),
+                                    tx_enq_prev_t=time.perf_counter(), 
                                 )
                                 resp = await self.api_stub.SendToken(req)  # type: ignore
                                 if not resp.success:
@@ -355,7 +356,7 @@ class CommsMixin(RingShardNodeAttributes):
             if (nxt < self.model_metadata.num_layers) and (nxt not in self._assigned_set):
                 if self.next_node_stub:
 
-                    with self.tracer.frame("grpc", "send_activation.next") as f:
+                    with self.tracer.frame("network", "send_activation.next") as f:
                         request = activation_msg.to_proto(data)
                         request.timestamp = utc_epoch_now()
                         if self._mode == "offload" and self.window_size > 0:
@@ -415,6 +416,8 @@ class CommsMixin(RingShardNodeAttributes):
                                     "[STREAM] enqueue failed; fallback to unary: %s", e
                                 )
                                 ctx.disabled = True
+
+                        request.tx_enq_prev_t = time.perf_counter() 
 
                         # Prefer streaming if enabled/available; fallback to unary
                         stream_used = False

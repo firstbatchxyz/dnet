@@ -35,6 +35,7 @@ message TokenRequest {
     string nonce = 1;   
     int32 token_id = 2; 
     int64 timestamp = 3;
+    float tx_enq_prev_t = 4;
 }
 
 // Response for token reception

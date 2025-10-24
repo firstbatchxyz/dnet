@@ -29,8 +29,17 @@ from dnet.utils.model import (
 logger = get_api_logger()
 
 from dnet.perf.trace import TraceConfig, Tracer
-from dnet.perf.utils import TraceAggregator
+from dnet.perf.utils import TraceAggregator, StatsAggregator
 #from dnet.perf.bench import 
+from dnet.ring.common import TopologyInfo
+
+from dnet.ring.api.models import (
+  PrepareTopologyManualRequest,
+  PrepareTopologyRequest,
+  PrepareTopologyResponse,
+  APILoadModelRequest,
+  APILoadModelResponse,
+)
 
 # Handle restricted repos
 from importlib import import_module
@@ -58,6 +67,7 @@ class REPLState:
   api_http_port: int = 8080 
   api_grpc_port: int = 50500 
   window_size = 2          # Number of layers per node per visit (also number resident in cache)
+  topo: TopologyInfo = None
 
 
 class REPL(cmd.Cmd):
@@ -92,12 +102,16 @@ class REPL(cmd.Cmd):
       aggregate=True,
       agg_max_events=50,
     )
-
     self._tracing = threading.Event()
     self._tracer = None
     self._trace_file = f"trace-{time.strftime("%Y%m%d-%H%M%S")}" 
     self._trace_cursor = 0 # keep track of registered events in buffer 
     self._trace_agg = TraceAggregator()
+
+    # Runtime stats (ingests data from tracer)
+    self._stats_agg = StatsAggregator()
+    self._stats = threading.Event()
+    self._stats.set() # Trace runtime information by default
 
 
   def loop(self): # Main tty loop
@@ -123,8 +137,14 @@ class REPL(cmd.Cmd):
       elif cmd.startswith("nodes"):
         self.print_mdns_nodes()
         continue
+      elif cmd.startswith("load"):
+        self.load_model()
+        continue
       elif cmd.startswith(("trace", ".trace")):
         self.do_trace(cmd.split(" "))
+        continue
+      elif cmd.startswith(("perf", ".perf")):
+        self.do_perf(cmd.split(" "))
         continue
       elif cmd.startswith(("topo", ".topo")):
         self.do_topo(cmd.split(" "))
@@ -187,8 +207,10 @@ class REPL(cmd.Cmd):
       dprint("Invalid topology command. Type 'help' for a list of valid commands.\n")
       return 
     if cmd[1] == "search":
+      self.print_mdns_nodes()
       pass
-    elif cmd[1] == "auto":
+    elif cmd[1] == "auto" or cmd[1] == "build":
+      self.prepare_topo()
       pass
     elif cmd[1] == "setup":
       pass
@@ -238,7 +260,8 @@ class REPL(cmd.Cmd):
     _print_hf("trace focus [SUBSYSTEM] ", "Focus the trace on [SUBSYSTEM]. Do 'trace focus' for a list of available subsystems.")
     _print_hf("trace stream [ON|OFF] ", "Stream the trace spans to current terminal.")
     _print_hf("trace set [BUDGET] ", "Set the maximum amount of recoded events.")
-    _print_hf("profile [REPO] ", "Estimate the total FLOPS of the model from [REPO]")
+    _print_hf("perf ", "Prints the current state of runtime performance tracking.")
+    _print_hf("perf stat [REQ_ID | WORKER_ID | MODEL] ", "Prints the runtime statistics of target system.")
     _print_hf("bench [REPO]", "Benchmark the system using the model from [REPO]")
     _print_hf("bench [KERNEL]", "Behcnmark the system using base kernel [KERNEL]")
     _print_hf("bench [NODE]", "Behcnmark the network latency between the current system and [NODE]")
@@ -502,43 +525,65 @@ class REPL(cmd.Cmd):
   def do_trace(self, cmd):
     if len(cmd) < 2:
       dprint(f"Tracing is currently {"ON" if self._trace_cfg.enabled else "OFF"}\n")
-    elif cmd[1] in ("on", "ON"):
-      self._trace_cfg.enabled = True
-      if self._api_running:
-        self.api_call("_forward_trace_config", self._trace_cfg) # Send trace config to all shards
-      dprint("Tracing is now ON\n")
-    elif cmd[1] in ("off", "OFF"):
-      self._trace_cfg.enabled = False 
-      if self._api_running:
-        self.api_call("_forward_trace_config", self._trace_cfg) # Send trace config to all shards
-      dprint("Tracing is not OFF\n")
-    elif cmd[1] == "focus":
-      #self.api_call("_forward_trace_config", self._trace_cfg) # Send trace config to all shards
-      dprint("Subsystems not yet implemented.\n")
-    elif cmd[1] == "stream":
-      if len(cmd) == 2:
-        dprint(f"Trace is {"streaming to file: "+str(self._trace_cfg.file) if self._trace_cfg.streaming else "not streaming."}\n")
-      elif cmd[2] == "on":
-        self._trace_cfg.streaming = True
-        dprint(f"Streaming trace frames to {self._trace_cfg.file}\n")
-      elif cmd[2] == "off":
-        self._trace_cfg.streaming = False 
-        dprint("Trace streaming is OFF.\n")
-    elif cmd[1] == "set":
-      if len(cmd) == 2:
-        dprint("Use: trace set [BUDGET], eg. 2000\n")
-      else:
-        dprint("Not implemented yet\n")
-      # FIXME: Implement
-    elif cmd[1] == "status":
-      dprint(f"Frames: {len(self._trace_agg._req)}\n")
+      return
+    
+    match cmd[1]:
+      case s if s in ["on", "ON"]:
+        self._trace_cfg.enabled = True
+        dprint("Tracing is now ON\n")
 
-    elif cmd[1] == "annotate":
-      self.print_trace_annotate("NONE")
+      case s if s in ["off", "OFF"]:
+        self._trace_cfg.enabled = False 
+        dprint("Tracing is now OFF\n")
+
+      case s if s == "focus":
+        dprint("Subsystems not yet implemented.\n")
+
+      case s if s == "stream":
+        if len(cmd) == 2:
+          dprint(f"Trace is {"streaming to file: "+str(self._trace_cfg.file) if self._trace_cfg.streaming else "not streaming."}\n")
+        elif cmd[2] == "on":
+          self._trace_cfg.streaming = True
+          dprint(f"Streaming trace frames to {self._trace_cfg.file}\n")
+        elif cmd[2] == "off":
+          self._trace_cfg.streaming = False 
+          dprint("Trace streaming is OFF.\n")
+
+      case s if s == "set":
+        if len(cmd) == 2:
+          dprint("Use: trace set [BUDGET], eg. 2000\n")
+        else:
+          dprint("Not implemented yet\n")
+
+      case s if s == "annotate":
+        self.print_trace_annotate("NONE")
+
+      case _:
+        dprint("Unknown trace command. Type 'help' for a list of available commands.\n")
+          
+    if self._api_running.is_set() and self._api_ready.is_set():
+      self.api_call("_forward_trace_config", self._trace_cfg) # Send trace config to all shards
+
+  # Performance trackers 
+  def do_perf(self, cmd):
+    if len(cmd) < 2 or cmd[1] == "stat":
+      dprint("Runtime performance metrics are ON by default.\n") 
+      dprint("Turn tracking off with 'perf off'. Do 'perf stat' for statistics on previous requests or 'help' for more commands.\n\n")
+      return
+
+    match cmd[1]:
+      case s if s in "...":
+        pass
+      case _:
+        pass
 
   # Trace callback registered with API Thread
+  # This forwards the tracer frames back to the REPL for printing
   def __trace_cb(self, data):
-    self._trace_agg.enqueue(data)
+    if self._tracing.is_set():
+      self._trace_agg.enqueue(data)
+    if self._stats.is_set():
+      self._stats_agg.add(data)
 
   def __print_tr(self, row):
     sym = "    " + symbol.ljust(40, ' ')
@@ -637,6 +682,31 @@ class REPL(cmd.Cmd):
       self._print_nodes_table(rows)
     except Exception as e:
       dprint(f"Could not list nodes: {e}\n")
+
+  def print_topo(self, topo):
+    line = "="*20+" Topology " + "="*20
+    sys.stdout.write(f"{line}\nModel: {topo.model}\nLayers: {topo.num_layers}\n")
+    sys.stdout.write(f"Devices: {topo.devices}\n\n")
+    # TODO: Better print here
+
+  def prepare_topo(self):
+    req = PrepareTopologyRequest(model="Qwen/Qwen3-4B-MLX-4bit")
+    try:
+      topo = self.api_call("_handle_prepare_topology", req, timeout=30)
+    except Exception as e:
+      dprint(f"Unable to create topology: {e}\n\n")
+      return
+    self.state.topo = topo
+    self.print_topo(topo)
+
+  def load_model(self):
+    req = APILoadModelRequest(model="Qwen/Qwen3-4B-MLX-4bit")
+    try:
+      res = self.api_call("_handle_load_model", req, timeout=30)
+    except Exception as e:
+      dprint(f"Failed to load model: {e}\n\n")
+      return
+    
 
   # ===== Handle shutdown 
 

@@ -422,6 +422,7 @@ class RingApiNode:
                 return TraceIngestResponse(ok=False, accepted=0, message=str(e))
 
     async def _forward_trace_config(self, cfg: Any) -> bool:
+        logger.debug("Forwarding Trace config")
         shards = self._get_shards_from_discovery()
         this = self.discovery.get_own_properties()
         api_endpoint = f"http://{this.local_ip}:{this.server_port}/trace/ingest"
@@ -447,9 +448,9 @@ class RingApiNode:
                 try:
                     res = await client.post(url, json=dict(payload))
                     if res.status_code != 200:
-                        logger.warning(f"Failed to POST tracer config to node {name}.")
+                        logger.error(f"Failed to POST tracer config to {url}.: {res.text}")
                 except Exception as e:
-                    logger.warning(f"Failed to POST tracer config: {e}")
+                    logger.error(f"Failed to POST tracer config: {e}")
                     return False 
         return True
 

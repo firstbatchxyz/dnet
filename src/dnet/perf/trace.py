@@ -224,8 +224,12 @@ class Tracer:
             return _NoopFrame()
         return _Frame(self, f"{scope}.{name}", attrs) 
 
+    # Same as normal frame but signals that this trace is a cannon event (required for runtime stats)
+    def canonical(self, scope: str, name: str, attrs: Optional[Dict[str, Any]] = None):
+      return self.frame(scope, name, attrs)
+
     # Mark an event outside of a frame
-    def mark(self, name: str, **attrs: Any) -> None:
+    def mark(self, name: str, attrs: Any) -> None:
         self._emit({"type": "I", "name": name, "args": attrs})
 
     # Helpers

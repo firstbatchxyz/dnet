@@ -1218,7 +1218,6 @@ class RingApiNode:
         Returns:
             Chat response
         """
-        self.tracer.mark("chat.request.start", {"prompt_tokens": len(req.messages[0].content)})
         stop_id_sequences: List[List[int]] = [
             self.tokenizer.encode(stop_word, add_special_tokens=False)  # type: ignore
             for stop_word in req.stop  # type: ignore
@@ -1292,6 +1291,13 @@ class RingApiNode:
         t_start = time.perf_counter()
         t_first_token = None
         nonce = f"chatcmpl-{uuid.uuid4()}"
+
+        self.tracer.mark("chat.request.start", {
+          "tokenizer": None,
+          "prompt_tokens": prompt.size,
+          "nonce": nonce,
+        })
+
         detokenizer = self.tokenizer.detokenizer  # type: ignore
         detokenizer.reset()
         tokens: List[int] = []
@@ -1348,8 +1354,12 @@ class RingApiNode:
             else detokenizer.text[: -len(stop_sequence_suffix)]
         )
 
+        self.tracer.mark("chat.request.end", { 
+          "generated_tokens": len(tokens), 
+          "nonce": nonce,
+        })
+
         # Build optional metrics
-        self.tracer.mark("chat.request.end")
         metrics = None
         if profile_enabled:
             t_end = time.perf_counter()

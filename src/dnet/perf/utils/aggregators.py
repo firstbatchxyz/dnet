@@ -238,30 +238,27 @@ class StatsAggregator:
       # Frames are kept in here while in-flight, then remove the frame objects and append to _stats 
       self._frames: Dict[str, Dict[str, Dict[str, Any]]] = {} # Store frames per nonce, per node_id 
 
-      self._nonces = []                                  # Tracked nonces (either in-flight or done)
+      self._nonces: List[str] = []                       # Tracked nonces (either in-flight or done)
       self._nonce_round_finish: Dict[str, bool] = {}     # Track in-flight rounds
       self._nonce_prefill: Dict[str, bool] = {}          # Track if this round is prefill
-      self._running_stats: Dict[str, ReqStats] = {} # Unfinished stat frames
-      self._stats: Dict[str, ReqStats] = {}         # Finished stat frames 
+      self._running_stats: Dict[str, ReqStats] = {}      # Unfinished stat frames
+      self._stats: Dict[str, ReqStats] = {}              # Finished stat frames 
       self._open_frames: Dict[str, Dict[str, Any]] = {}  # We got 'B' event but not 'E' (per nonce)
       self._model_per_run: Dict[str, str] = {}           # Track model per run_id
 
     # Ingest raw data from tracer
     def add(self, data: Dict[str, Any]) -> None:
-      run_id =  data["run_id"]
-      node_id = data["node_id"]
+      run_id =  data["run_id"] or "NONE"
+      node_id = data["node_id"] or "NONE"
       events =  data["events"] or []
-      name =    data["name"]
       if not run_id or not node_id: return # Drop the batch
 
       with self._lock:
           
           # Ensure we register workers and nodes
           for i, ev in enumerate(events):
-              if "nonce" not in ev["attrs"]: ev["attrs"]["nonce"] = f"N_{i}"
-              nonce = ev["attrs"]["nonce"] 
-
-              new_frames.append(ev)
+              if "nonce" not in ev["args"]: ev["args"]["nonce"] = f"N_"
+              nonce = ev["args"]["nonce"] 
 
               if node_id not in self._frames:
                 self._frames[node_id] = {}
@@ -269,21 +266,24 @@ class StatsAggregator:
               if nonce not in self._frames[node_id]:
                 self._frames[node_id][nonce] = {}
 
-              if len(self._frames[node_id]) >= self._max_resident_req: # remove oldest entry
+              if len(self._frames[node_id]) >= self._max_inflight_req: # remove oldest entry
                   del self._frames[self._nonces[0]] 
                   del self._nonces[0]
-
-              self._nonces.append(nonce)
+              if nonce not in self._nonces:
+                  self._nonces.append(nonce)
 
           # Update in-flight events or register new ones
           for e in events:
-              nonce = e.attrs["nonce"]
+              nonce = e["args"]["nonce"]
               assert nonce is not None, ""
 
-              if not node_id and nonce: return # Drop invalid frames
+              if not node_id or not nonce: return # Drop invalid frames
 
-              if e["name"] == "embedding": # Register new request
-                  rt_stat = self._running_stats.setdefault(nonce, ReqStats(
+              if e["name"] == "chat.request.end":
+                  print(e)
+              if e["name"] == "chat.request.start":
+                  print(e)
+                  self._running_stats[nonce] = ReqStats(
                       model="",
                       tokenizer="", 
                       run_id=run_id,
@@ -291,31 +291,36 @@ class StatsAggregator:
                       ttft=0.0, 
                       itl=[0.0],
                       generated_tokens=0,
-                      prompt_tokens=e.attrs["prompt_tokens"],
+                      prompt_tokens=e["args"]["prompt_tokens"],
                       latencies={},
                       latency_per_layer={},
                       latency_per_shard={},
                       total_latency=0.0,
                       assignment=None,
                       topo=None,
-                  ))
+                  )
+              if e["name"] == "embedding": # Register new request
+                  pass
 
               # FIXME: We might receive other frames then "embed" from shards
               #        so we need to handle the creation of this better
+              if nonce not in self._running_stats: 
+                  continue 
+
               stats = self._running_stats[nonce]
 
               if e["name"] == "network.rx": 
                 # Time in transport, ingress queue and ingress_worker
-                _cost = lambda e: e["attrs"]["inflight"] + e["attrs"]["inwait"] + e["attrs"]["ms"]
+                _cost = lambda e: e["args"]["inflight"] + e["args"]["inwait"] + e["args"]["ms"]
                 self._handle_frame(e, nonce, stats, _cost)
                 #TODO: change shard in metadata
 
               if e["name"] == "compute.forward": 
-                _cost = lambda e: e["attrs"]["inwait"] + e.attrs["ms"] # compute queue + execution
+                _cost = lambda e: e["args"]["inwait"] + e["args"]["ms"] # compute queue + execution
                 self._handle_frame(e, nonce, stats, _cost)
 
                 # Finish request
-                if "lm_head" in e.attrs and not self._nonce_round_finish[nonce]:
+                if "lm_head" in e["args"] and not self._nonce_round_finish[nonce]:
                   self._nonce_round_finish[nonce] = True
                   st_obj = self._running_stats[nonce]
                   self._stats[nonce] = st_obj
@@ -324,7 +329,7 @@ class StatsAggregator:
                   # TODO: Handle latency of transfer back to API
                   
               if e["name"] == "network.tx.send":
-                _cost = lambda e: e["attrs"]["inwait"] + e["attrs"]["ms"] # tx queue + sendoff
+                _cost = lambda e: e["args"]["inwait"] + e["args"]["ms"] # tx queue + sendoff
                 self._handle_frame(e, nonce, stats, _cost)
 
     # Handle cost aggregation of frames

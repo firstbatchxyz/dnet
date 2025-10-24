@@ -225,8 +225,12 @@ class Tracer:
             return _NoopFrame()
         return _Frame(self, f"{scope}.{name}", attrs) 
 
+    # Same as normal frame but signals that this trace is a cannon event (required for runtime stats)
+    def canonical(self, scope: str, name: str, attrs: Optional[Dict[str, Any]] = None):
+      return self.frame(scope, name, attrs)
+
     # Mark an event outside of a frame
-    def mark(self, name: str, **attrs: Any) -> None:
+    def mark(self, name: str, attrs: Any) -> None:
         self._emit({"type": "I", "name": name, "args": attrs})
 
     # Helpers
@@ -247,7 +251,7 @@ class Tracer:
                 with open(outfile, "w", encoding="utf-8") as f:
                     f.write(out)
             else:
-                self._emit({"type": "PROFILE", "name": "cprofile", "args": {"sort": sort, "limit": limit, "report": out}})
+                self._emit({"type": "PROFILE", "name": "cprofile", "attrs": {"sort": sort, "limit": limit, "report": out}})
 
     @contextmanager
     def callgraph(
@@ -281,13 +285,13 @@ class Tracer:
                 key = f"{filename}:{code.co_firstlineno}:{name}"
                 if event == "call":
                     stack.append((key, time.perf_counter()))
-                    self._emit({"type": "B", "name": f"py.{name}", "args": {"file": filename, "line": code.co_firstlineno}})
+                    self._emit({"type": "B", "name": f"py.{name}", "attrs": {"file": filename, "line": code.co_firstlineno}})
                     emitted += 1
                 else:
                     if stack and stack[-1][0] == key:
                         _, t0 = stack.pop()
                         dt_ms = (time.perf_counter() - t0) * 1000.0
-                        self._emit({"type": "E", "name": f"py.{name}", "args": {"ms": round(dt_ms, 3)}})
+                        self._emit({"type": "E", "name": f"py.{name}", "attrs": {"ms": round(dt_ms, 3)}})
                         emitted += 1
             elif inc_c and event in ("c_call", "c_return"):
                 func = getattr(arg, "__name__", None)
@@ -295,10 +299,10 @@ class Tracer:
                 if not func:
                     return
                 if event == "c_call":
-                    self._emit({"type": "B", "name": f"c.{mod}.{func}", "args": {}})
+                    self._emit({"type": "B", "name": f"c.{mod}.{func}", "attrs": {}})
                     emitted += 1
                 else:
-                    self._emit({"type": "E", "name": f"c.{mod}.{func}", "args": {}})
+                    self._emit({"type": "E", "name": f"c.{mod}.{func}", "attrs": {}})
                     emitted += 1
 
         prev = sys.getprofile()

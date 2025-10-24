@@ -89,6 +89,7 @@ from ..data_types import StopCondition
 from .servicer import ShardApiServicer
 from ..common import TopologyInfo, LayerAssignment
 
+from dnet.perf import Tracer, TraceConfig
 
 async def arange(count: int):
     """Async range generator."""
@@ -151,11 +152,26 @@ class RingApiNode:
         except Exception:
             pass
 
+        cfg = TraceConfig(
+            file="./trace.json",
+            streaming=False,
+            include_prefixes = ("src/dnet/"),
+            include_c_calls = False,
+            budget = 10000,
+            enabled = True,
+            record_pid_tid = True,
+            aggregate=False,
+            aggregate_url=None, 
+        )
+        self.tracer = Tracer(cfg) 
+        self.tracer.start()
+
         logger.info(
             "API node initialized on HTTP port %s, gRPC port %s",
             self.http_port,
             self.grpc_port,
         )
+
 
     async def start(self, shutdown_trigger: Any = lambda: asyncio.Future()) -> None:
         """Start the API node.
@@ -404,6 +420,11 @@ class RingApiNode:
                 if self._trace_ingest_cb is not None:
                     logger.debug("Forwarding trace batch to REPL.")
                     self._trace_ingest_cb(batch.model_dump())
+
+                    _t_batch = { "run_id": "NONE", "node_id": "API", "events": list(self.tracer._events) }
+                    self.tracer._events.clear()
+                    self._trace_ingest_cb(_t_batch) # FIXME: Move this 
+
                     return TraceIngestResponse(ok=True, accepted=len(batch.events))
 
                 try:
@@ -425,6 +446,7 @@ class RingApiNode:
                 return TraceIngestResponse(ok=False, accepted=0, message=str(e))
 
     async def _forward_trace_config(self, cfg: Any) -> bool:
+        logger.debug("Forwarding Trace config")
         shards = self._get_shards_from_discovery()
         this = self.discovery.get_own_properties()
         api_endpoint = f"http://{this.local_ip}:{this.server_port}/trace/ingest"
@@ -450,9 +472,9 @@ class RingApiNode:
                 try:
                     res = await client.post(url, json=dict(payload))
                     if res.status_code != 200:
-                        logger.warning(f"Failed to POST tracer config to node {name}.")
+                        logger.error(f"Failed to POST tracer config to {url}.: {res.text}")
                 except Exception as e:
-                    logger.warning(f"Failed to POST tracer config: {e}")
+                    logger.error(f"Failed to POST tracer config: {e}")
                     return False 
         return True
 
@@ -1387,6 +1409,13 @@ class RingApiNode:
         t_start = time.perf_counter()
         t_first_token = None
         nonce = f"chatcmpl-{uuid.uuid4()}"
+
+        self.tracer.mark("chat.request.start", {
+          "tokenizer": None,
+          "prompt_tokens": prompt.size,
+          "nonce": nonce,
+        })
+
         detokenizer = self.tokenizer.detokenizer  # type: ignore
         detokenizer.reset()
         tokens: List[int] = []
@@ -1405,6 +1434,8 @@ class RingApiNode:
             ),  # type: ignore
             arange(req.max_tokens or 0),
         ):
+            self.tracer.mark("request.round", {"req_id": nonce,"t0": time.time_ns()})
+
             if profile_enabled and t_first_token is None:
                 t_first_token = time.perf_counter()
             detokenizer.add_token(token)
@@ -1442,6 +1473,11 @@ class RingApiNode:
             if stop_sequence_suffix is None
             else detokenizer.text[: -len(stop_sequence_suffix)]
         )
+
+        self.tracer.mark("chat.request.end", { 
+          "generated_tokens": len(tokens), 
+          "nonce": nonce,
+        })
 
         # Build optional metrics
         metrics = None

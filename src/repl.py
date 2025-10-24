@@ -666,6 +666,9 @@ class REPL(cmd.Cmd):
         self._trace_cfg.enabled = False 
         dprint("Tracing is now OFF\n")
 
+      case s if s in ["status"]:
+        dprint(f"Captured {len(self._trace_agg._req)} frames.\n")
+
       case s if s == "focus":
         dprint("Subsystems not yet implemented.\n")
 
@@ -702,7 +705,10 @@ class REPL(cmd.Cmd):
       return
 
     match cmd[1]:
-      case s if s in "...":
+      case s if s in "stats":
+        print(f"{self._stats_agg._nonces}")
+        print(f"{self._stats_agg._running_stats}")
+        print(f"{self._stats_agg._stats}")
         pass
       case _:
         pass
@@ -710,10 +716,13 @@ class REPL(cmd.Cmd):
   # Trace callback registered with API Thread
   # This forwards the tracer frames back to the REPL for printing
   def __trace_cb(self, data):
-    if self._tracing.is_set():
-      self._trace_agg.enqueue(data)
-    if self._stats.is_set():
-      self._stats_agg.add(data)
+    try:
+      if self._tracing.is_set():
+        self._trace_agg.enqueue(data)
+      if self._stats.is_set():
+        self._stats_agg.add(data)
+    except Exception as e:
+      print(f"Unable to ingest trace buffer into REPL: {e}")
 
   def __print_tr(self, symbol, ms, counts):
     sym = "    " + symbol.ljust(40, ' ')

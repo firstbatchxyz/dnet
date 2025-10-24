@@ -655,43 +655,65 @@ class REPL(cmd.Cmd):
   def do_trace(self, cmd):
     if len(cmd) < 2:
       dprint(f"Tracing is currently {"ON" if self._trace_cfg.enabled else "OFF"}\n")
-    elif cmd[1] in ("on", "ON"):
-      self._trace_cfg.enabled = True
-      if self._api_running:
-        self.api_call("_forward_trace_config", self._trace_cfg) # Send trace config to all shards
-      dprint("Tracing is now ON\n")
-    elif cmd[1] in ("off", "OFF"):
-      self._trace_cfg.enabled = False 
-      if self._api_running:
-        self.api_call("_forward_trace_config", self._trace_cfg) # Send trace config to all shards
-      dprint("Tracing is not OFF\n")
-    elif cmd[1] == "focus":
-      #self.api_call("_forward_trace_config", self._trace_cfg) # Send trace config to all shards
-      dprint("Subsystems not yet implemented.\n")
-    elif cmd[1] == "stream":
-      if len(cmd) == 2:
-        dprint(f"Trace is {"streaming to file: "+str(self._trace_cfg.file) if self._trace_cfg.streaming else "not streaming."}\n")
-      elif cmd[2] == "on":
-        self._trace_cfg.streaming = True
-        dprint(f"Streaming trace frames to {self._trace_cfg.file}\n")
-      elif cmd[2] == "off":
-        self._trace_cfg.streaming = False 
-        dprint("Trace streaming is OFF.\n")
-    elif cmd[1] == "set":
-      if len(cmd) == 2:
-        dprint("Use: trace set [BUDGET], eg. 2000\n")
-      else:
-        dprint("Not implemented yet\n")
-      # FIXME: Implement
-    elif cmd[1] == "status":
-      dprint(f"Frames: {len(self._trace_agg._req)}\n")
+      return
+    
+    match cmd[1]:
+      case s if s in ["on", "ON"]:
+        self._trace_cfg.enabled = True
+        dprint("Tracing is now ON\n")
 
-    elif cmd[1] == "annotate":
-      self.print_trace_annotate("NONE")
+      case s if s in ["off", "OFF"]:
+        self._trace_cfg.enabled = False 
+        dprint("Tracing is now OFF\n")
+
+      case s if s == "focus":
+        dprint("Subsystems not yet implemented.\n")
+
+      case s if s == "stream":
+        if len(cmd) == 2:
+          dprint(f"Trace is {"streaming to file: "+str(self._trace_cfg.file) if self._trace_cfg.streaming else "not streaming."}\n")
+        elif cmd[2] == "on":
+          self._trace_cfg.streaming = True
+          dprint(f"Streaming trace frames to {self._trace_cfg.file}\n")
+        elif cmd[2] == "off":
+          self._trace_cfg.streaming = False 
+          dprint("Trace streaming is OFF.\n")
+
+      case s if s == "set":
+        if len(cmd) == 2:
+          dprint("Use: trace set [BUDGET], eg. 2000\n")
+        else:
+          dprint("Not implemented yet\n")
+
+      case s if s == "annotate":
+        self.print_trace_annotate("NONE")
+
+      case _:
+        dprint("Unknown trace command. Type 'help' for a list of available commands.\n")
+          
+    if self._api_running.is_set() and self._api_ready.is_set():
+      self.api_call("_forward_trace_config", self._trace_cfg) # Send trace config to all shards
+
+  # Performance trackers 
+  def do_perf(self, cmd):
+    if len(cmd) < 2 or cmd[1] == "stat":
+      dprint("Runtime performance metrics are ON by default.\n") 
+      dprint("Turn tracking off with 'perf off'. Do 'perf stat' for statistics on previous requests or 'help' for more commands.\n\n")
+      return
+
+    match cmd[1]:
+      case s if s in "...":
+        pass
+      case _:
+        pass
 
   # Trace callback registered with API Thread
+  # This forwards the tracer frames back to the REPL for printing
   def __trace_cb(self, data):
-    self._trace_agg.enqueue(data)
+    if self._tracing.is_set():
+      self._trace_agg.enqueue(data)
+    if self._stats.is_set():
+      self._stats_agg.add(data)
 
   def __print_tr(self, symbol, ms, counts):
     sym = "    " + symbol.ljust(40, ' ')

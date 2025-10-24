@@ -86,6 +86,7 @@ from ..data_types import StopCondition
 from .servicer import ShardApiServicer
 from ..common import TopologyInfo, LayerAssignment
 
+from dnet.perf import Tracer, TraceConfig
 
 async def arange(count: int):
     """Async range generator."""
@@ -148,11 +149,26 @@ class RingApiNode:
         except Exception:
             pass
 
+        cfg = TraceConfig(
+            file="./trace.json",
+            streaming=False,
+            include_prefixes = ("src/dnet/"),
+            include_c_calls = False,
+            budget = 10000,
+            enabled = True,
+            record_pid_tid = True,
+            aggregate=False,
+            aggregate_url=None, 
+        )
+        self.tracer = Tracer(cfg) 
+        self.tracer.start()
+
         logger.info(
             "API node initialized on HTTP port %s, gRPC port %s",
             self.http_port,
             self.grpc_port,
         )
+
 
     async def start(self, shutdown_trigger: Any = lambda: asyncio.Future()) -> None:
         """Start the API node.
@@ -401,6 +417,11 @@ class RingApiNode:
                 if self._trace_ingest_cb is not None:
                     logger.debug("Forwarding trace batch to REPL.")
                     self._trace_ingest_cb(batch.model_dump())
+
+                    _t_batch = { "run_id": "NONE", "node_id": "API", "events": list(self.tracer._events) }
+                    #self.tracer._events.clear()
+                    self._trace_ingest_cb(_t_batch) # FIXME: Move this 
+
                     return TraceIngestResponse(ok=True, accepted=len(batch.events))
 
                 try:
@@ -1197,6 +1218,7 @@ class RingApiNode:
         Returns:
             Chat response
         """
+        self.tracer.mark("chat.request.start")
         stop_id_sequences: List[List[int]] = [
             self.tokenizer.encode(stop_word, add_special_tokens=False)  # type: ignore
             for stop_word in req.stop  # type: ignore
@@ -1327,6 +1349,7 @@ class RingApiNode:
         )
 
         # Build optional metrics
+        self.tracer.mark("chat.request.end")
         metrics = None
         if profile_enabled:
             t_end = time.perf_counter()

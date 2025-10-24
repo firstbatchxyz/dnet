@@ -25,7 +25,12 @@ class ActivationMessage:
     recv_perf_t: float = 0.0
     enq_perf_t: float = 0.0
     # TX queue enqueue time (perf_counter seconds)
+    rx_enq_perf_t: float = 0.0
     tx_enq_perf_t: float = 0.0
+    rx_ingress_t: float = 0.0
+    rx_inflight_t: float = 0.0
+    ex_enq_t: float = 0.0
+    tx_enq_t: float = 0.0
     # Final token path (end-shard sampling)
     is_final: bool = False
     token_id: int = -1

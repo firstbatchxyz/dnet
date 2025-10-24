@@ -218,12 +218,6 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         self.tracer = Tracer(cfg) 
         self.tracer.start()
 
-        # Get in-flight and in-wait time per request
-        self._rx_ingress_t: Dict[str, float] = {}  # Timestamp we enqued the request  
-        self._rx_inflight_t: Dict[str, float] = {} # Per-request inflight time
-        self._ex_enque_t: Dict[str, float] = {}    # req is queued for execution 
-        self._tx_enque_t: Dict[str, float] = {}    # req is queued for sendoff
-
         # Per-nonce KV caches (concurrent requests)
         self._kv_by_nonce: Dict[str, list] = {}
         self._kv_last_seen: Dict[str, float] = {}
@@ -781,7 +775,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                     while self.running:
                         try:
                             self.activation_recv_queue.put_nowait(activation_msg)
-                            self._ex_enque_t[activation_msg.nonce] = time.perf_counter()
+                            activatino_msg.ex_enq_t = time.perf_counter()
                             logger.debug("Queued activation for processing: nonce %s", activation_msg.nonce)
                             break
                         except Full:
@@ -803,8 +797,8 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         while self.running:
             try:
                 rx_t = time.perf_counter()
-                self._rx_ingress_t[request.nonce] = rx_t 
-                self._rx_inflight_t[request.nonce] = rx_t - request.timestamp 
+                request.rx_enq_t = rx_t
+                request.rx_inflight_t = rx_t - request.timestamp
 
                 self.ingress_q.put_nowait(request)
                 logger.debug(f"[ENQUE] Enqueued activation request")
@@ -831,8 +825,8 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
 
             # Trace processing of request, in-flight and in-wait times
             with self.tracer.frame("network", "rx") as f:
-                f.set("inwait", time.perf_counter() - self._rx_ingress_t[req.nonce])
-                f.set("inflight", self._rx_inflight_t[req.nonce])
+                f.set("inwait", time.perf_counter() - req.rx_enq_t)
+                f.set("inflight", req.rx_inflight_t)
                 f.set("nonce", req.nonce)
 
                 try:
@@ -1115,7 +1109,9 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
 
                 # Process the activation
                 with self.tracer.frame("compute", "forward") as f: # NOTE: Symbol hardcoded for runtime stats
-                    f.set("inwait", time.perf_counter() - self._ex_enque_t)
+                    f.set("inwait", time.perf_counter() - activation_msg.ex_enq_t)
+                    if (self.model_metadata.num_layers - 1) in self.assigned_layers:
+                      f.set("lm_head", True)
                     self._process_activation(activation_msg)
 
             except Empty:

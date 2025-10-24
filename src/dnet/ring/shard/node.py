@@ -802,7 +802,8 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             try:
                 rx_t = time.perf_counter()
                 request.rx_enq_t = rx_t
-                request.rx_inflight_t = rx_t - request.timestamp
+                request.rx_inflight_t = 0.0 if request.tx_enq_prev_t == 0.0 else rx_t - request_enq_prev_t
+                logger.error(f"rx_t {rx_t} --- tx_enq {request.tx_enq_prev_t}")
 
                 self.ingress_q.put_nowait(request)
                 logger.debug(f"[ENQUE] Enqueued activation request")
@@ -1119,9 +1120,14 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 # Process the activation
                 with self.tracer.frame("compute", "forward") as f: # NOTE: Symbol hardcoded for runtime stats
                     f.set("nonce", activation_msg.nonce) 
-                    f.set("inwait", time.perf_counter() - activation_msg.ex_enq_t)
+                    if activation_msg.ex_enq_t == 0.0: # FIXME float comparison
+                      f.set("inwait", 0.0) 
+                    else:
+                      f.set("inwait", time.perf_counter() - activation_msg.ex_enq_t)
+
                     if (self.model_metadata.num_layers - 1) in self.assigned_layers:
                       f.set("lm_head", True)
+
                     self._process_activation(activation_msg)
 
             except Empty:

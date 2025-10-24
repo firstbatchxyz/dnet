@@ -27,6 +27,7 @@ class ActivationMessage:
     # TX queue enqueue time (perf_counter seconds)
     rx_enq_perf_t: float = 0.0
     tx_enq_perf_t: float = 0.0
+    tx_enq_prev_t: float = 0.0
     rx_ingress_t: float = 0.0
     rx_inflight_t: float = 0.0
     ex_enq_t: float = 0.0

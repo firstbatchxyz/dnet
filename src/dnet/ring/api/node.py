@@ -419,7 +419,7 @@ class RingApiNode:
                     self._trace_ingest_cb(batch.model_dump())
 
                     _t_batch = { "run_id": "NONE", "node_id": "API", "events": list(self.tracer._events) }
-                    #self.tracer._events.clear()
+                    self.tracer._events.clear()
                     self._trace_ingest_cb(_t_batch) # FIXME: Move this 
 
                     return TraceIngestResponse(ok=True, accepted=len(batch.events))
@@ -1218,7 +1218,7 @@ class RingApiNode:
         Returns:
             Chat response
         """
-        self.tracer.mark("chat.request.start")
+        self.tracer.mark("chat.request.start", {"prompt_tokens": len(req.messages[0].content)})
         stop_id_sequences: List[List[int]] = [
             self.tokenizer.encode(stop_word, add_special_tokens=False)  # type: ignore
             for stop_word in req.stop  # type: ignore

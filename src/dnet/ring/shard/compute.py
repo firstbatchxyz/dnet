@@ -94,12 +94,11 @@ class ComputeMixin(RingShardNodeAttributes):
                     numel = int(np.prod(activation_msg.shape))
                     tok_view = input_buffer[:numel].reshape(activation_msg.shape)
                     toks = mx.array(np.array(tok_view, dtype=np.int32), dtype=mx.int32)
-
                     x = self.model.embed(toks[None])
 
                     # NOTE: Used to track start of request in perf stats 
                     self.tracer.mark("embedding", {
-                      "nonce": actication_msg.nonce,
+                      "nonce": activation_msg.nonce,
                       "prompt_tokens": toks.size,
                     }) 
 
@@ -390,7 +389,7 @@ class ComputeMixin(RingShardNodeAttributes):
                             with self._mlx_lock:
                                 y = self.model.normalize(x_cast)
                                 y = self.model.lm_project(y)
-                                self.tracer.mark("lm_head", {"nonce": actication_msg.nonce}) # NOTE: canonical stats end 
+                                #self.tracer.mark("lm_head", {"nonce": actication_msg.nonce}) # NOTE: canonical stats end 
 
                             # Greedy sample last position
                             if y.ndim == 3:

@@ -614,10 +614,12 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             logger.error("Node %s: Cannot receive activation - input pool not initialized", self.node_id)
             return
 
-        with self.tracer.frame("network.rx", "connect_next_node"):
+        with self.tracer.frame("network.rx", "connect_next_node") as f:
+            f.set("nonce", request.nonce) 
             await self._connect_next_node()
 
         with self.tracer.frame("network.rx", "process_activation") as f:
+            f.set("nonce", request.nonce) 
             try:
                 activation = request.activation
                 target_layer = activation.layer_id + 1
@@ -691,6 +693,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                                 return
 
                         with self.tracer.frame("network.rx", "alloc.buffer") as fr:
+                            fr.set("nonce", request.nonce) 
                             pool_id = self.input_pool.allocate_for_layer(
                                 layer_id=activation.layer_id,
                                 dtype=deq.dtype,
@@ -714,6 +717,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                     else: # Special token stream support: dtype='tokens' carries int32 token IDs
                         if activation.dtype == "tokens":
                             with self.tracer.frame("network.rx", "token_stream") as fr: 
+                                fr.set("nonce", request.nonce) 
                                 try:
                                     tokens = np.frombuffer(request.activation.data, dtype=np.int32)
                                     shp = (int(len(tokens)), )
@@ -741,6 +745,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
 
                         else:
                             with self.tracer.frame("network.ex", "default") as fr:
+                                fr.set("nonce", request.nonce) 
                                 # Safety: byte length must match shape*dtype
                                 try:
                                     expected = (
@@ -851,7 +856,8 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
 
                 if target_layer in self._assigned_set:
                     # Heavy prep in executor (alloc/copy/decompress)
-                    with self.tracer.frame("grpc.ingress", "prepare"):
+                    with self.tracer.frame("grpc.ingress", "prepare") as fr:
+                        fr.set("nonce", req.nonce) 
                         loop = asyncio.get_running_loop()
                         try:
                             activation_msg = await loop.run_in_executor(
@@ -884,6 +890,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
 
                         # Enqueue for compute 
                         with self.tracer.frame("network.rx", "enque") as fr:
+                            fr.set("nonce", req.nonce) 
                             while self.running:
                                 try:
                                     self.activation_recv_queue.put_nowait(activation_msg)
@@ -973,6 +980,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             if "|" in activation.dtype: # Compressed path: decompress to MLX array and copy to pool
 
                 with self.tracer.frame("network.rx.prepare_activation", "decompress") as f:
+                    f.set("nonce", request.nonce) 
                     try:
                         deq = decompress_tensor_from_protobuf_data(
                             tensor_data=activation.data,
@@ -1009,6 +1017,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
 
             elif activation.dtype == "tokens": # Tokens path: parse int32 token IDs and stage them
                 with self.tracer.frame("network.rx.prepare_activation", "tokens") as f:
+                    f.set("nonce", request.nonce) 
                     try:
                         tokens = np.frombuffer(activation.data, dtype=np.int32)
                         shp = (int(len(tokens)),)
@@ -1038,6 +1047,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
 
             else: # Dense path: validate size and copy raw bytes view into pool buffer
                 with self.tracer.frame("network.rx.prepare_activation", "default") as f:
+                    f.set("nonce", request.nonce) 
                     try:
                         expected = (
                             int(np.prod(activation.shape))
@@ -1108,6 +1118,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
 
                 # Process the activation
                 with self.tracer.frame("compute", "forward") as f: # NOTE: Symbol hardcoded for runtime stats
+                    f.set("nonce", activation_msg.nonce) 
                     f.set("inwait", time.perf_counter() - activation_msg.ex_enq_t)
                     if (self.model_metadata.num_layers - 1) in self.assigned_layers:
                       f.set("lm_head", True)
@@ -1527,7 +1538,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                     f"api_callback={req.api_callback_address or 'none'}"
                 )
                 self.tracer.mark("model", {"model": req.model_path, "ts": time.perf_counter()}) # Record model name
-                with self.tracer.frame("memory", "model.load"): # NOTE: Symbol hardcoded for runtime stats
+                with self.tracer.frame("memory", "model.load") as f: # NOTE: Symbol hardcoded for runtime stats
                     result = await self.load_model(req)
                 return result
 
@@ -1545,7 +1556,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             """Unload current model."""
             try:
                 logger.info("HTTP /unload_model")
-                with self.tracer.frame("memory", "model.unload"): # NOTE: Symbol hardcoded for runtime stats
+                with self.tracer.frame("memory", "model.unload") as f: # NOTE: Symbol hardcoded for runtime stats
                     result = await self.unload_model()
                 return result
 
@@ -1560,7 +1571,9 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         # FIXME: add pydantic type here
         async def warm(request: Request) -> JSONResponse:
             try:
-                with self.tracer.frame("memory", "model.warm"): # NOTE: Symbol hardcoded for runtime stats
+                # FIXME: Append warmup config? Or something to distinguish
+                with self.tracer.frame("memory", "model.warm") as f: # NOTE: Symbol hardcoded for runtime stats
+                    f.set("nonce", request.nonce) 
                     body = await request.json()
                     start = int(body.get("start", -1))
                     window = int(body.get("window", self.window_size))
@@ -1625,7 +1638,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         Returns:
             Device profile information as a plain dict
         """
-        with self.tracer.frame("startup", "profile.device"): # NOTE: Symbol hardcoded for runtime stats
+        with self.tracer.frame("startup", "profile.device") as f: # NOTE: Symbol hardcoded for runtime stats
             profile_dict = profile_device_via_subprocess(
                 repo_id, max_batch_exp=max_batch_exp, debug=0
             )

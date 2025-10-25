@@ -232,8 +232,8 @@ class ReqStats:
 
   # Per-worker data
   compute_per_worker: Dict[str, float] = None
-  inwait_per_worker: Dict[str, float] = None
-  inflight_per_worker: Dict[str, float] = None
+  network_per_worker: Dict[str, float] = None
+  memory_per_worker: Dict[str, float] = None
 
   # Network info
   tx_bytes_per_node: Dict[str, int] = None  # Volume of trafic per node 
@@ -262,6 +262,8 @@ class StatsAggregator:
       self._stats: Dict[str, ReqStats] = {}              # Finished stat frames 
       self._open_frames: Dict[str, Dict[str, Any]] = {}  # We got 'B' event but not 'E' (per nonce)
       self._model_per_run: Dict[str, str] = {}           # Track model per run_id
+
+      self.nodes = [] # Keep track of active nodes 
 
       # Maps of frames to higher-level sub-systems
       self._compute_set = [
@@ -353,12 +355,9 @@ class StatsAggregator:
                       latency_per_shard={},
                       assignment=None,
                       compute_per_worker={},
-                      inwait_per_worker={},
-                      inflight_per_worker={},
+                      network_per_worker={},
+                      memory_per_worker={},
                   )
-
-              if e["name"] == "embedding": # Register new request
-                  pass
 
               # FIXME: We might receive other frames then "embed" from shards
               #        so we need to handle the creation of this better
@@ -366,6 +365,31 @@ class StatsAggregator:
                 continue
 
               stats = self._running_stats[nonce]
+
+              if "node" not in e["args"]: 
+                if e["name"] == "chat.request.end":
+                  print(f"{e}")
+                  st_obj = self._running_stats[nonce]
+                  st_obj.generated_tokens = e["args"]["generated_tokens"]
+                  st_obj.total_tokens += e["args"]["generated_tokens"]
+                  print("Adding to stats")
+                  self._stats[nonce] = st_obj
+                  del self._running_stats[nonce]
+                  #del self._frames[node_id][nonce]
+                  # TODO: Handle latency of transfer back to API
+
+                else:
+                  continue # Drop frames without "node"
+
+              node_id = e["args"]["node"]
+              if node_id not in self.nodes:
+                self.nodes.append(node_id)
+                stats.compute_per_worker[node_id] = 0.0
+                stats.network_per_worker[node_id] = 0.0
+                stats.memory_per_worker[node_id] = 0.0
+
+              if e["name"] in self._memory_set:
+                stats.memory_per_worker[node_id] += e["args"]["ms"] 
 
               if e["name"] == "network.rx": # Time in transport, ingress queue and ingress_worker
                 _cost = lambda e: e["args"]["inflight"] + e["args"]["inwait"] + e["args"]["ms"]
@@ -378,29 +402,20 @@ class StatsAggregator:
                 except Exception as e:
                   print(f"{e}")
 
-              try:
-                if e["name"] == "chat.request.end":
-                  st_obj = self._running_stats[nonce]
-                  st_obj.generated_tokens = e["args"]["generated_tokens"]
-                  st_obj.total_tokens += e["args"]["generated_tokens"]
-                  print("Adding to stats")
-                  self._stats[nonce] = st_obj
-                  del self._running_stats[nonce]
-                  #del self._frames[node_id][nonce]
-                  # TODO: Handle latency of transfer back to API
+              if e["name"] in self._compute_set: # Aggregate for compute total
+                stats.compute_per_worker[node_id] += e["args"]["ms"] 
 
+              if e["name"] in self._network_set:
+                stats.network_per_worker[node_id] += e["args"]["ms"] 
 
-                if e["name"] == "network.tx.send":
-                  _cost = lambda e: e["args"]["inwait"] + e["args"]["ms"] # tx queue + sendoff
-
-              except Exception as e:
-                print(f"{e}")
+              if e["name"] in self._memory_set:
+                stats.memory_per_worker[node_id] += e["args"]["ms"] 
 
     # Handle cost aggregation of frames
     def _handle_round(self, e: Any, nonce, stats: ReqStats, _cost_fnc: Any):
       try:
-        logger.error(f"TTFT: {e["args"]["t0"]} - {stats.ttft}")
         if self._nonce_prefill[nonce]:
+          logger.error(f"TTFT: {stats.ttft}")
           stats.ttft = (e["args"]["t0"] - stats.ttft) * 1000.0
           self._nonce_prefill[nonce] = False
         else:
@@ -429,11 +444,6 @@ class StatsAggregator:
         (1, "inter_token_latency", "ms"),
         (0, -1, ""),
         (1, "estimated_compute", "GFLOPs"),
-        (1, "compute_time_per_worker", "ms"),
-        (1, "inwait_time_per_worker", "ms"),
-        (1, "inflight_time_per_worker", "ms"),
-        (0, -1, ""),
-        (1, "network_latency", "ms"),
       ]
 
       # FIXME: Allow filtering by these
@@ -477,6 +487,7 @@ class StatsAggregator:
                   sys.stdout.write(f"\t# {statistics.median(stats.itl):.3f} s/tok\n")
 
                 case "inter_token_latency":
+                  assert len(stats.itl) > 1, "Not enough trace frames"
                   itl = stats.itl[:-1] # FIXME: last element is super big
                   median = statistics.median(itl)
                   p90 = statistics.quantiles(itl, n=100)[89]
@@ -488,11 +499,18 @@ class StatsAggregator:
                 case "estimated_compute":
                   sys.stdout.write(f"UNKNOWN".rjust(20)+" GFLOPs".ljust(5)+"\testimated_flops\n")
 
-                case "compute_time_per_worker":
-                  pass
-
                 case _:
                   pass
+
+          for i, n in enumerate(self.nodes):
+            comp = stats.compute_per_worker[n]
+            net = stats.network_per_worker[n]
+            mem = stats.memory_per_worker[n]
+            total = comp + net + mem
+            sys.stdout.write(f"\n    node{i} [{n}]\n")
+            sys.stdout.write(f"{comp:.2f}".rjust(20)+"ms".ljust(5)+f"\tcompute_time   # [{(comp/total)*100:0.2f}%]\n")
+            sys.stdout.write(f"{net:.2f}".rjust(20)+"ms".ljust(5)+f"\tnetwork_time   # [{(net/total)*100:0.2f}%]\n")
+            sys.stdout.write(f"{mem:.2f}".rjust(20)+"ms".ljust(5)+f"\tmemory_time    # [{(mem/total)*100:0.2f}%]\n")
 
         except Exception as e:
           logger.error(f"{e}")

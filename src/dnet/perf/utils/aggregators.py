@@ -122,6 +122,7 @@ class TraceAggregator:
         self._lock = threading.Lock()
 
     def enqueue(self, batch: Dict[str, Any]) -> None:
+      try:
         run_id = batch.get("run_id")
         node_id = batch.get("node_id")
         events = batch.get("events") or []
@@ -131,6 +132,8 @@ class TraceAggregator:
             agg = self._req.setdefault(run_id, RunAggregator())
             for ev in events:
                 agg.ingest_event(node_id, ev)
+      except Exception as e:
+        logger.error(f"Trace aggregator enque error: {e}")
 
     def annotate(self, run_id: str, *, mapping: Optional[Dict[str, str]] = None, repeats: int = 0) -> List[Dict[str, Any]]:
         with self._lock:
@@ -259,6 +262,43 @@ class StatsAggregator:
       self._stats: Dict[str, ReqStats] = {}              # Finished stat frames 
       self._open_frames: Dict[str, Dict[str, Any]] = {}  # We got 'B' event but not 'E' (per nonce)
       self._model_per_run: Dict[str, str] = {}           # Track model per run_id
+
+      # Maps of frames to higher-level sub-systems
+      self._compute_set = [
+        "compute.forward",
+        "compute.thread.kvcache.init",
+        "compute.thread.weights.prepare",
+        "compute.thread.activations.process",
+        "compute.thread.activations.load",
+        "compute.thread.execute",
+        "compute.thread.execute.enqueue_prefetch",
+        "compute.thread.execute.evict_and_unload",
+        "compute.thread.cleanup",
+        "compute.thread.mdns.send",
+      ]
+
+      self._network_set = [
+        "network.tx",
+        "network.token_request",
+        "network.rx.prepare",
+        "network.rx.prepare_activation.tokens",
+        "network.rx.enque",
+        "network.send_activation.final",
+        "network.rx",
+        "network.connect.next_node",
+        "network.rx.prefetch",
+      ]
+
+      self._memory_set = [
+        "memory.model.load",
+        "memory.model.load_metadata",
+        "memory.warmup",
+        "memory.weight_cache.init",
+        "memory.prefetch",
+        "memory.memory_pools.init",
+        "memory.cache.reset",
+        "memory.make_cache",
+      ]
 
     # Ingest raw data from tracer
     def add(self, data: Dict[str, Any]) -> None:
@@ -446,7 +486,7 @@ class StatsAggregator:
                   sys.stdout.write(" "*35 +f"{min(itl):.3f} (min), {max(itl):.3f} (max)\n")
 
                 case "estimated_compute":
-                  sys.stdout.write(f"UNKNOWN":rjust(20)+" GFLOPs".ljust(5)+"\testimated_flops\n")
+                  sys.stdout.write(f"UNKNOWN".rjust(20)+" GFLOPs".ljust(5)+"\testimated_flops\n")
 
                 case "compute_time_per_worker":
                   pass

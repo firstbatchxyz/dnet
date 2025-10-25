@@ -174,8 +174,9 @@ class CommsMixin(RingShardNodeAttributes):
                 activation_msg = await self.activation_computed_queue.get()
                 with self.tracer.frame("network", "tx") as f:
                     if activation_msg.tx_enq_perf_t and self._profile:
-                        f.set("inwait", time.perf_counter() - self._rx_enque_t) 
+                        f.set("inwait", time.perf_counter() - activation_msg.tx_enq_t) 
                         f.set("nonce", activation_msg.nonce)
+                        f.set("node", self._instance_name)
                         q_wait_ms = (
                             time.perf_counter() - activation_msg.tx_enq_perf_t
                         ) * 1000.0
@@ -232,6 +233,7 @@ class CommsMixin(RingShardNodeAttributes):
             logger.debug(f"Sending activation")
             if activation_msg.is_final:
                 with self.tracer.frame("grpc", "send_activation.final") as f:
+                    f.set("node", self._instance_name)
                     try:
                         if self._mode == "offload" and self.window_size > 0:
                             first_window = self._assigned_sorted[: self.window_size]
@@ -269,6 +271,7 @@ class CommsMixin(RingShardNodeAttributes):
                             f.event("reset_api")
 
                         with self.tracer.frame("grpc", "token_request") as fr:
+                            fr.set("node", self._instance_name)
                             try:
                                 req = shard_api_comm_pb2.TokenRequest(
                                     nonce=activation_msg.nonce,
@@ -357,6 +360,7 @@ class CommsMixin(RingShardNodeAttributes):
                 if self.next_node_stub:
 
                     with self.tracer.frame("network", "send_activation.next") as f:
+                        f.set("node", self._instance_name)
                         request = activation_msg.to_proto(data)
                         request.timestamp = utc_epoch_now()
                         if self._mode == "offload" and self.window_size > 0:

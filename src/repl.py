@@ -393,7 +393,7 @@ class REPL(cmd.Cmd):
   # ===== Handle API server
 
   async def _api_main(self) -> None: # main thread loop
-    logging.disable(logging.CRITICAL)
+    #logging.disable(logging.CRITICAL)
     self._api_loop = asyncio.get_running_loop()
     self._api_shutdown_e = asyncio.Event()
     self._node = RingApiNode(
@@ -532,10 +532,12 @@ class REPL(cmd.Cmd):
     
     match cmd[1]:
       case s if s in ["on", "ON"]:
+        self._tracing.set()
         self._trace_cfg.enabled = True
         dprint("Tracing is now ON\n")
 
       case s if s in ["off", "OFF"]:
+        self._tracing.clear()
         self._trace_cfg.enabled = False 
         dprint("Tracing is now OFF\n")
 
@@ -562,7 +564,11 @@ class REPL(cmd.Cmd):
           dprint("Not implemented yet\n")
 
       case s if s == "annotate":
-        self.print_trace_annotate("NONE")
+        if len(self._trace_agg._req) < 1:
+          dprint("No trace frames captured. Is tracing enabled?\n")
+          return
+        last = list(self._trace_agg._req.keys())[-1]
+        self.print_trace_annotate(last)
 
       case _:
         dprint("Unknown trace command. Type 'help' for a list of available commands.\n")
@@ -608,33 +614,37 @@ class REPL(cmd.Cmd):
     repeats: int = 0,
   ) -> List[Dict[str, Any]]:
 
-    rows = self._trace_agg.annotate(run_id)
-    headers = ["name", "total","max","mean","p50","p90","p99","samples"]
-    limits = {"name": 50,}
-    w = {h: max(len(h), min(limits.get(h, 8), max(len(str(r[h])) for r in rows))) for h in headers}
-    w["name"] = max(w["name"], 35)
+    try:
+      rows = self._trace_agg.annotate(run_id)
+      logger.debug(f"rows")
+      headers = ["name", "total","max","mean","p50","p90","p99","samples"]
+      limits = {"name": 50,}
+      w = {h: max(len(h), min(limits.get(h, 8), max(len(str(r[h])) for r in rows))) for h in headers}
+      w["name"] = max(w["name"], 35)
 
-    line = "  ".join(h.ljust(w[h]) for h in headers); sys.stdout.write("\n")
-    sys.stdout.write(line + "\n")
-    sys.stdout.write("  ".join("."*w[h] for h in headers)); sys.stdout.write("\n")
-    for r in rows:
-      name = str(r["name"])
-      if len(name) > w["name"]: name = name[:w["name"]-1] + "..."
-      vals = {
-        "name": r["name"],
-        "total": r["total"],
-        "max": r["max"],
-        "mean": r["mean"],
-        "p50": r["p50"],
-        "p90": r["p90"],
-        "p99": r["p99"],
-        "samples": r["samples"], 
-      }
-      sys.stdout.write("  " + str(vals[headers[0]]).ljust(w[headers[0]]))
-      sys.stdout.write("  ".join(f"{vals[h]:8.2f}".rjust(w[h]) for h in headers[1:]))
-      sys.stdout.write("\n")
-    sys.stdout.write("\n\n")
-    sys.stdout.flush()
+      line = "  ".join(h.ljust(w[h]) for h in headers); sys.stdout.write("\n")
+      sys.stdout.write(line + "\n")
+      sys.stdout.write("  ".join("."*w[h] for h in headers)); sys.stdout.write("\n")
+      for r in rows:
+        name = str(r["name"])
+        if len(name) > w["name"]: name = name[:w["name"]-1] + "..."
+        vals = {
+          "name": r["name"],
+          "total": r["total"],
+          "max": r["max"],
+          "mean": r["mean"],
+          "p50": r["p50"],
+          "p90": r["p90"],
+          "p99": r["p99"],
+          "samples": r["samples"], 
+        }
+        sys.stdout.write("  " + str(vals[headers[0]]).ljust(w[headers[0]]))
+        sys.stdout.write("  ".join(f"{vals[h]:8.2f}".rjust(w[h]) for h in headers[1:]))
+        sys.stdout.write("\n")
+      sys.stdout.write("\n\n")
+      sys.stdout.flush()
+    except Exception as e:
+      logger.error(f"{e}")
 
   def _print_nodes_table(self, rows: List[Any]) -> None:
     headers = ["name", "role", "addr", "http", "grpc", "status", "head"]

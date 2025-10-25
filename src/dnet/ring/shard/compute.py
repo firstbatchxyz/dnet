@@ -76,11 +76,13 @@ class ComputeMixin(RingShardNodeAttributes):
 
         try:
             # per-nonce kvcache for concurrent requests
-            with self.tracer.frame("compute.thread", "kvcache.init"):
+            with self.tracer.frame("compute.thread", "kvcache.init") as f:
+                f.set("node", self._instance_name)
                 kv = self._get_or_make_kv(activation_msg.nonce)
 
             # Get input activation from pool
-            with self.tracer.frame("compute.thread", "activations.load"):
+            with self.tracer.frame("compute.thread", "activations.load") as f:
+                f.set("node", self._instance_name)
                 input_buffer = self.input_pool.get_buffer(activation_msg.pool_id)
                 if input_buffer is None:
                     logger.error("Failed to get input buffer %s", activation_msg.pool_id)
@@ -89,6 +91,7 @@ class ComputeMixin(RingShardNodeAttributes):
             # Prepare input activation
             with self.tracer.frame("compute.thread", "activations.process") as f:
                 f.set("nonce", activation_msg.nonce)
+                f.set("node", self._instance_name)
                 if activation_msg.dtype == "tokens": # embed locally on start shard
                     f.event("embed_tokens")
                     numel = int(np.prod(activation_msg.shape))
@@ -124,6 +127,7 @@ class ComputeMixin(RingShardNodeAttributes):
                 did_early_swap = False
 
                 with self.tracer.frame("compute.thread", "weights.prepare") as f:
+                    f.set("node", self._instance_name)
 
                     # Determine contiguous local window starting at current_layer
                     window_layers: List[int] = []
@@ -217,7 +221,8 @@ class ComputeMixin(RingShardNodeAttributes):
                             pass
 
                 # Execute the window
-                with self.tracer.frame("compute.thread", "execute"):
+                with self.tracer.frame("compute.thread", "execute") as f:
+                    f.set("node", self._instance_name)
                     self._beyond_cursor = window_layers[-1] if window_layers else (activation_msg.layer_id)
 
                     try: # Prevent prefetch touching during encode/compute to minimize UMA pressure
@@ -273,7 +278,8 @@ class ComputeMixin(RingShardNodeAttributes):
                     #self.weight_cache.decrease_reference(lid)
                     pass
 
-                with self.tracer.frame("compute.thread", "execute.evict_and_unload"):
+                with self.tracer.frame("compute.thread", "execute.evict_and_unload") as f:
+                    f.set("node", self._instance_name)
                     try:
                         # Sliding-fit delta swap: maintain a single resident set by evicting
                         # only what's needed to fit the next window into the budget. Prefer
@@ -368,7 +374,8 @@ class ComputeMixin(RingShardNodeAttributes):
                     continue
 
                 # Boundary reached — directly pass tensor to TX to avoid extra copy/sync
-                with self.tracer.frame("compute.thread", "execute.enqueue_prefetch"):
+                with self.tracer.frame("compute.thread", "execute.enqueue_prefetch") as f:
+                    f.set("node", self._instance_name)
                     x_cast = x if x.dtype == self._wire_mx_dtype else x.astype(self._wire_mx_dtype)
                     try:
                         self._compute_busy.clear()
@@ -382,7 +389,8 @@ class ComputeMixin(RingShardNodeAttributes):
                         pass
 
                 # Create and enqueue output message: either forward activations or finalize on end role
-                with self.tracer.frame("compute.thread", "grpc.send"):
+                with self.tracer.frame("compute.thread", "grpc.send") as f:
+                    f.set("node", self._instance_name)
                     nxt = last_layer + 1
                     if nxt >= self.model_metadata.num_layers:  # End of model
                         try:

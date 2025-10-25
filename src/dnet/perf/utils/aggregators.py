@@ -3,12 +3,16 @@ from __future__ import annotations
 
 import sys
 import threading
+import statistics 
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Tuple, Optional, DefaultDict
 from collections import defaultdict, deque
 
-from dnet.utils.logger import logger
+#from dnet.utils.logger import logger
+from dnet.ring.api.api_logging import get_api_logger
 from dnet.ring import LayerAssignment, TopologyInfo
+
+logger = get_api_logger()
 
 Key = Tuple[str, Optional[int], Optional[int], str]  # (node_id, pid, tid, req_id)
 
@@ -206,23 +210,31 @@ class TraceAggregator:
 # Track a single request, use multiple for a full benchmark
 @dataclass
 class ReqStats:
-  model: str                # Model name
-  tokenizer: str            # Tokenizer name
-  run_id: str               # ID of session (for later mapping) 
-  nonce: str                # List of serviced requests
-  ttft: float               # Time to first token
-  itl: List[float]          # Inter-token latency per round 
-  prompt_tokens: int        # Number of prompt tokens per request (req_id: #)
-  generated_tokens: int     # Number of generated tokens per request (req_id: #)
-  total_tokens: int         # Total number of tokens processed
+  model: str = ""              # Model name
+  tokenizer: str = ""          # Tokenizer name
+  run_id: str = ""             # ID of session (for later mapping) 
+  nonce: str = ""              # List of serviced requests
+  ttft: float = 0.0            # Time to first token
+  itl: List[float] = None      # Inter-token latency per round 
+  prompt_tokens: int = -1      # Number of prompt tokens per request (req_id: #)
+  generated_tokens: int = -1   # Number of generated tokens per request (req_id: #)
+  total_tokens: int = -1       # Total number of tokens processed
 
-  latencies: List[List[str, str, str, int]] # List of inter-node latencies: [node0, node1, p50, 0.0]
-  latency_per_layer: Dict[int, float]       # Map of {layer: 0.0} 
-  latency_per_shard: Dict[str, float]       # Map of {shard: 0.0}
-  total_latency: int        # Total runtime of requests
-  throughput: float         # aaa 
-  startup_t: float            # Time to start shard (ms)
-  layer_assignment_t: float   # Time to layer assignment (ms)
+  latencies: List[List[str, str, str, int]] = None # List of inter-node latencies: [node0, node1, p50, 0.0]
+  latency_per_layer: Dict[int, float] = None       # Map of {layer: 0.0} 
+  latency_per_shard: Dict[str, float] = None       # Map of {shard: 0.0}
+  total_latency: int = -1                          # Total runtime of requests
+  startup_t: float = 0.0                           # Time to start shard (ms)
+  layer_assignment_t: float = 0.0                  # Time to layer assignment (ms)
+
+  # Per-worker data
+  compute_per_worker: Dict[str, float] = None
+  inwait_per_worker: Dict[str, float] = None
+  inflight_per_worker: Dict[str, float] = None
+
+  # Network info
+  tx_bytes_per_node: Dict[str, int] = None  # Volume of trafic per node 
+  rx_bytes_per_node: Dict[str, int] = None
 
   topo: TopologyInfo = None           # Topology information for this request (keep here since it might change)
   assignment: LayerAssignment = None  # Map of layer to shard IDs
@@ -259,7 +271,6 @@ class StatsAggregator:
         return # Drop the batch
 
       with self._lock:
-          
           # Ensure we register workers and nodes
           for i, ev in enumerate(events):
               if "nonce" not in ev["args"]: ev["args"]["nonce"] = f"N_"
@@ -283,11 +294,9 @@ class StatsAggregator:
               nonce = e["args"]["nonce"]
               assert nonce is not None, ""
 
-
               if not node_id or not nonce: return # Drop invalid frames
 
               if e["name"] == "chat.request.start":
-                  print(e["args"])
                   self._open_frames[nonce] = {}
                   self._nonce_prefill[nonce] = True 
                   self._running_stats[nonce] = ReqStats(
@@ -295,22 +304,18 @@ class StatsAggregator:
                       tokenizer=e["args"]["tokenizer"], 
                       run_id=run_id,
                       nonce=nonce,
-                      ttft=e["args"]["t0"],  # set to initial timestamp then compute
-                      itl=[0.0],
-                      generated_tokens=0,
+                      ttft= e["args"]["t0"],
+                      itl=[ e["args"]["t0"], ],
                       prompt_tokens=e["args"]["prompt_tokens"],
                       total_tokens=e["args"]["prompt_tokens"],
                       latencies={},
                       latency_per_layer={},
                       latency_per_shard={},
-                      total_latency=0.0,
                       assignment=None,
-                      topo=None,
-                      layer_assignment_t=None,
-                      throughput=0.0,
-                      startup_t=0.0,
+                      compute_per_worker={},
+                      inwait_per_worker={},
+                      inflight_per_worker={},
                   )
-
 
               if e["name"] == "embedding": # Register new request
                   pass
@@ -323,55 +328,45 @@ class StatsAggregator:
               stats = self._running_stats[nonce]
 
               if e["name"] == "network.rx": # Time in transport, ingress queue and ingress_worker
-                print(f"\n{e["name"]}\n{e["args"]["inflight"]}\n{e["args"]["inwait"]}\n{e["args"]["ms"]}")
                 _cost = lambda e: e["args"]["inflight"] + e["args"]["inwait"] + e["args"]["ms"]
-                self._handle_frame(e, nonce, stats, _cost)
                 #TODO: change shard in metadata
 
               if e["name"] == "compute.forward": 
-                print(f"\n{e["name"]}\n{e["args"]["inwait"]}\n{e["args"]["ms"]}")
-                _cost = lambda e: e["args"]["inwait"] + e["args"]["ms"] # compute queue + execution
-                self._handle_frame(e, nonce, stats, _cost)
-                self._nonce_round_finish[nonce] = False
+                try:
+                  _cost = lambda e: e["args"]["inwait"] + e["args"]["ms"] # compute queue + execution
+                  self._handle_round(e, nonce, stats, _cost)
+                except Exception as e:
+                  print(f"{e}")
 
-                # End a cycle on compute done (inter-node queue wait is computed in next)
-                if self._nonce_prefill[nonce]:
-                  stats.ttft = e["args"]["t0"] - stats.ttft
-                else:
-                  stats.itl[-1] = e["args"]["t0"] - stats.itl[-1]
-                  stats.itl.append(e["args"]["t0"])
+              try:
+                if e["name"] == "chat.request.end":
+                  st_obj = self._running_stats[nonce]
+                  st_obj.generated_tokens = e["args"]["generated_tokens"]
+                  st_obj.total_tokens += e["args"]["generated_tokens"]
+                  print("Adding to stats")
+                  self._stats[nonce] = st_obj
+                  del self._running_stats[nonce]
+                  #del self._frames[node_id][nonce]
+                  # TODO: Handle latency of transfer back to API
 
-              if e["name"] == "chat.request.end":
-                if self._nonce_round_finish[nonce]:
-                  self._nonce_round_finish[nonce] = True 
-                  pass
-                self._nonce_round_finish[nonce] = True
-                st_obj = self._running_stats[nonce]
-                st_obj.generated_tokens = e["args"]["generated_tokens"]
-                st_obj.total_tokens += e["args"]["generated_tokens"]
-                self._stats[nonce] = st_obj
-                del self._running_stats[nonce]
-                #del self._frames[node_id][nonce]
-                # TODO: Handle latency of transfer back to API
 
-              if e["name"] == "network.tx.send":
-                _cost = lambda e: e["args"]["inwait"] + e["args"]["ms"] # tx queue + sendoff
-                self._handle_frame(e, nonce, stats, _cost)
+                if e["name"] == "network.tx.send":
+                  _cost = lambda e: e["args"]["inwait"] + e["args"]["ms"] # tx queue + sendoff
+
+              except Exception as e:
+                print(f"{e}")
 
     # Handle cost aggregation of frames
-    def _handle_frame(self, e: Any, nonce, stats: ReqStats, _cost_fnc: Any):
+    def _handle_round(self, e: Any, nonce, stats: ReqStats, _cost_fnc: Any):
       try:
-        if e["type"] == 'B': 
-          self._open_frames[nonce][e["name"]] = e
-          return
-        elif e["type"] == 'E':
-          n_rt = _cost_fnc(e) # Custom cost function for each farme 
-          if self._nonce_prefill[nonce]:
-            stats.ttft += n_rt
-          else:
-            stats.itl[-1] += n_rt
-          if e["name"] in self._open_frames[nonce]:
-            del self._open_frames[nonce][e["name"]]
+        logger.error(f"TTFT: {e["args"]["t0"]} - {stats.ttft}")
+        if self._nonce_prefill[nonce]:
+          stats.ttft = (e["args"]["t0"] - stats.ttft) * 1000.0
+          self._nonce_prefill[nonce] = False
+        else:
+          if e["args"]["t0"] > 0.0:
+            stats.itl[-1] = (e["args"]["t0"] - stats.itl[-1]) 
+            stats.itl.append(e["args"]["t0"])
       except Exception as ex:
         print(f"{ex}")
 
@@ -383,6 +378,7 @@ class StatsAggregator:
       model: Optional[str] = None
     ):
 
+      # FIXME: Allow manual selection of counters (and push to tracer)
       fields = [ # 0 is native, 1 compound
         (0, "prompt_tokens", ""), 
         (0, "generated_tokens", ""), 
@@ -391,50 +387,78 @@ class StatsAggregator:
         (0, "ttft", "ms"), 
         (1, "tokens_per_second", "ms"),
         (1, "inter_token_latency", "ms"),
-        (0, "throughput", "ms"), 
         (0, -1, ""),
-        (1, "workers", "ms"), 
-        (1, "estimated_compute", "GFLOPs")
+        (1, "estimated_compute", "GFLOPs"),
+        (1, "compute_time_per_worker", "ms"),
+        (1, "inwait_time_per_worker", "ms"),
+        (1, "inflight_time_per_worker", "ms"),
+        (0, -1, ""),
+        (1, "network_latency", "ms"),
       ]
 
-      if req_id:
-        pass
-
-      elif worker:
-        pass
-
-      elif model:
-        pass
+      # FIXME: Allow filtering by these
+      if req_id: pass
+      elif worker: pass
+      elif model: pass
 
       else: # Sort per model, per request (node info only when requested)
         if len(self._stats) < 1:
           print("No tracked stats in memory. Track a request first.\n")
           return
         stats = self._stats[list(self._stats.keys())[-1]]
-        sys.stdout.write(f"\n Performance counters stats for model '{stats.model}':\n\n")
-        for tag, n, unit in fields:
-          if tag == 0: # Native counter 
-            if n == -1:
-              sys.stdout.write("\n")
-              continue
-            nr = getattr(stats, n)
-            if isinstance(nr, int):
-              nr_str = f"{nr}"
-            elif isinstance(nr, float):
-              nr_str = f"{nr:15.5}"
-            elif isinstance(nr, str):
-              if len(nr) > 20:
-                nr_str = nr[:15] + "..."
-              else:
-                nr_str = nr
-          elif tag == 1:
-            match n:
-              case "tokens_per_second":
-              case "inter_token_latency":
-              case _:
-                pass
-          sys.stdout.write(f"{nr_str.rjust(20)} {unit.ljust(4)}\t{n}\n")
-        sys.stdout.write("\n\n")
+        #sys.stdout.write(f"\n Loaded model '{stats.model}'.\n")
+        sys.stdout.write(f"Performance stats for request '{stats.nonce}':\n\n")
+        try:
+          for tag, n, unit in fields:
+            if tag == 0: # Native counter 
+              if n == -1:
+                sys.stdout.write("\n")
+                continue
+              nr = getattr(stats, n)
+              if isinstance(nr, int):
+                nr_str = f"{nr}"
+              elif isinstance(nr, float):
+                nr_str = f"{nr:.2f}"
+              elif isinstance(nr, str):
+                if len(nr) > 20:
+                  nr_str = nr[:15] + "..."
+                else:
+                  nr_str = nr
+              sys.stdout.write(f"{nr_str.rjust(20)} {unit.ljust(5)}\t{n}\n")
+
+            # Compound trackers
+            elif tag == 1:
+              match n:
+                case "tokens_per_second":
+                  tps = [ 1 / rt for rt in stats.itl ]
+                  #median = statistics.median(tps)
+                  mean = sum(tps) / len(tps)
+                  sys.stdout.write(f"{mean:.2f}".rjust(20)+" tok/s".rjust(5)+" \ttokens_per_second")
+                  sys.stdout.write(f"\t# {statistics.median(stats.itl):.3f} s/tok\n")
+
+                case "inter_token_latency":
+                  itl = stats.itl[:-1] # FIXME: last element is super big
+                  median = statistics.median(itl)
+                  p90 = statistics.quantiles(itl, n=100)[89]
+                  p99 = statistics.quantiles(itl, n=100)[98]
+                  sys.stdout.write(f"{median:.4f}".rjust(20) + " ms".ljust(5) + "\tmean_inter_token_latency (ITL)\n")
+                  sys.stdout.write(" "*35 + f"{p90:.3f} (p90),  {p99:.3f} (p99)\n")
+                  sys.stdout.write(" "*35 +f"{min(itl):.3f} (min), {max(itl):.3f} (max)\n")
+
+                case "estimated_compute":
+                  sys.stdout.write(f"UNKNOWN":rjust(20)+" GFLOPs".ljust(5)+"\testimated_flops\n")
+
+                case "compute_time_per_worker":
+                  pass
+
+                case _:
+                  pass
+
+        except Exception as e:
+          logger.error(f"{e}")
+
+        # Per-node information
+        sys.stdout.write("\n")
         return
         
 

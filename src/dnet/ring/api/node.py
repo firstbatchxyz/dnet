@@ -419,8 +419,8 @@ class RingApiNode:
                     self._trace_ingest_cb(batch.model_dump())
 
                     _t_batch = { "run_id": "NONE", "node_id": "API", "events": list(self.tracer._events) }
-                    self.tracer._events.clear()
                     self._trace_ingest_cb(_t_batch) # FIXME: Move this 
+                    self.tracer._events.clear()
 
                     return TraceIngestResponse(ok=True, accepted=len(batch.events))
 
@@ -1293,9 +1293,12 @@ class RingApiNode:
         nonce = f"chatcmpl-{uuid.uuid4()}"
 
         self.tracer.mark("chat.request.start", {
-          "tokenizer": None,
+          "tokenizer": "",
+          "model": req.model,
+          "temperature": req.temperature,
           "prompt_tokens": prompt.size,
           "nonce": nonce,
+          "t0": time.perf_counter(),
         })
 
         detokenizer = self.tokenizer.detokenizer  # type: ignore
@@ -1357,6 +1360,7 @@ class RingApiNode:
         self.tracer.mark("chat.request.end", { 
           "generated_tokens": len(tokens), 
           "nonce": nonce,
+          "t0": time.perf_counter(),
         })
 
         # Build optional metrics

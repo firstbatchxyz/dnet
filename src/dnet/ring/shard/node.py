@@ -814,8 +814,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             try:
                 rx_t = time.perf_counter()
                 request.rx_enq_t = rx_t
-                request.rx_inflight_t = 0.0 if request.tx_enq_prev_t == 0.0 else rx_t - request_enq_prev_t
-                logger.error(f"rx_t {rx_t} --- tx_enq {request.tx_enq_prev_t}")
+                request.rx_inflight_t = 0.0 if request.tx_enq_prev_t == 0.0 else rx_t - request.tx_enq_prev_t
 
                 self.ingress_q.put_nowait(request)
                 logger.debug(f"[ENQUE] Enqueued activation request")
@@ -833,7 +832,6 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         finally enqueues for compute or forwards to the next shard.  """
 
         while self.running:
-            logger.error(f"NODE_ID {self.node_id}")
             with self.tracer.frame("network.rx", "wait"): # NOTE: bad counter 
                 try:
                     req = await self.ingress_q.get()

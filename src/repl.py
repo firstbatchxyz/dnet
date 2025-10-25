@@ -706,9 +706,7 @@ class REPL(cmd.Cmd):
 
     match cmd[1]:
       case s if s in "stats":
-        print(f"{self._stats_agg._nonces}")
-        print(f"{self._stats_agg._running_stats}")
-        print(f"{self._stats_agg._stats}")
+        self._stats_agg.stats()
         pass
       case _:
         pass

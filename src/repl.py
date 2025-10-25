@@ -659,10 +659,12 @@ class REPL(cmd.Cmd):
     
     match cmd[1]:
       case s if s in ["on", "ON"]:
+        self._tracing.set()
         self._trace_cfg.enabled = True
         dprint("Tracing is now ON\n")
 
       case s if s in ["off", "OFF"]:
+        self._tracing.clear()
         self._trace_cfg.enabled = False 
         dprint("Tracing is now OFF\n")
 
@@ -689,7 +691,11 @@ class REPL(cmd.Cmd):
           dprint("Not implemented yet\n")
 
       case s if s == "annotate":
-        self.print_trace_annotate("NONE")
+        if len(self._trace_agg._req) < 1:
+          dprint("No trace frames captured. Is tracing enabled?\n")
+          return
+        last = list(self._trace_agg._req.keys())[-1]
+        self.print_trace_annotate(last)
 
       case _:
         dprint("Unknown trace command. Type 'help' for a list of available commands.\n")

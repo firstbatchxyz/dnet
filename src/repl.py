@@ -1,4 +1,5 @@
 
+import io
 import os
 import sys
 import logging
@@ -6,6 +7,7 @@ import cmd
 import time
 import argparse
 import subprocess
+import contextlib
 from dataclasses import dataclass
 from typing import Optional, List, Any, Dict
 
@@ -146,7 +148,7 @@ class REPL(cmd.Cmd):
       elif cmd.startswith(("perf", ".perf")):
         self.do_perf(cmd.split(" "))
         continue
-      elif cmd.startswith(("topo", ".topo")):
+      elif cmd.startswith(("topo", ".topo", "t ")):
         self.do_topo(cmd.split(" "))
         continue
       elif cmd.startswith((".model", "model", "m ")):
@@ -209,7 +211,7 @@ class REPL(cmd.Cmd):
     if cmd[1] == "search":
       self.print_mdns_nodes()
       pass
-    elif cmd[1] == "auto" or cmd[1] == "build":
+    elif cmd[1] in ("auto", "build", "b"):
       self.prepare_topo()
       pass
     elif cmd[1] == "setup":
@@ -391,6 +393,7 @@ class REPL(cmd.Cmd):
   # ===== Handle API server
 
   async def _api_main(self) -> None: # main thread loop
+    logging.disable(logging.CRITICAL)
     self._api_loop = asyncio.get_running_loop()
     self._api_shutdown_e = asyncio.Event()
     self._node = RingApiNode(
@@ -576,9 +579,7 @@ class REPL(cmd.Cmd):
 
     match cmd[1]:
       case s if s in "stats":
-        print(f"{self._stats_agg._nonces}")
-        print(f"{self._stats_agg._running_stats}")
-        print(f"{self._stats_agg._stats}")
+        self._stats_agg.stats()
         pass
       case _:
         pass

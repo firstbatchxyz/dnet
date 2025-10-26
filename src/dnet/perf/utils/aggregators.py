@@ -216,12 +216,13 @@ class ReqStats:
   model: str = ""              # Model name
   tokenizer: str = ""          # Tokenizer name
   run_id: str = ""             # ID of session (for later mapping) 
-  req_id: str = ""              # List of serviced requests
+  req_id: str = ""             # List of serviced requests
   ttft: float = 0.0            # Time to first token
   itl: List[float] = None      # Inter-token latency per round 
   prompt_tokens: int = -1      # Number of prompt tokens per request (req_id: #)
   generated_tokens: int = -1   # Number of generated tokens per request (req_id: #)
   total_tokens: int = -1       # Total number of tokens processed
+  nodes: List[str] = None      # Nodes that participated in computation
 
   latencies: List[List[str, str, str, int]] = None # List of inter-node latencies: [node0, node1, p50, 0.0]
   latency_per_layer: Dict[int, float] = None       # Map of {layer: 0.0} 
@@ -258,7 +259,7 @@ class StatsAggregator:
       self._req: List[str] = []                          # Tracked requests (in-flight or done)
       self._req_round_finish: Dict[str, bool] = {}       # Track in-flight requests 
       self._req_prefill: Dict[str, bool] = {}            # Track if this request round is prefill
-      self._open_frames: Dict[str, Dict[str, Any]] = {}  # We got 'B' event but not 'E' (per request)
+      self._open_frames: Dict[str, Dict[str, Dict[str, Any]]] = {}  
 
       # Staging environment for events that arrive before 
       # the request.start of the request they belong to
@@ -275,15 +276,24 @@ class StatsAggregator:
       events =  data["events"] or []
       if not events: return # Nothing to do 
 
+      node_id = data.get("node_id")
+      if not node_id: return # Drop unknown node
+
       with self._lock:
 
           # Update in-flight events or register new ones
           for i, e in enumerate(events):
               symbol = e["name"].split(".")
 
+              if e["type"] == 'B':
+                req_id = data.get("req_id")
+                if not req_id or not node_id: continue 
+                self._open_frames[req_id][node_id][e["name"]] = e
+                continue
+                
               req_id = e["args"].get("req_id")
               if not req_id: 
-                print(f"Dropping {e["name"]}: {e["args"]}")
+                #print(f"Dropping {e}")
                 continue # Drop anonymous frames 
 
               if symbol[0] == "request":
@@ -306,6 +316,7 @@ class StatsAggregator:
                           compute_per_worker={},
                           network_per_worker={},
                           memory_per_worker={},
+                          nodes=[],
                       )
                       self._running_stats[req_id] = stats 
 
@@ -335,26 +346,27 @@ class StatsAggregator:
                   self._staging[req_id].append(e)
                   continue
 
-              node_id = e["args"].get("node_id")
-              if not node_id: return # Drop unknown node
+              #node_id = e["args"].get("node_id")
+              #if not node_id: return # Drop unknown node
 
               stats = self._running_stats[req_id]
               self._process_frame(e, req_id, node_id, stats)
 
 
     def _process_frame(self, e: Any, req_id: str, node_id: str,  stats: ReqStats):
-      if node_id not in self.nodes:
-        self.nodes.append(node_id)
+      symbol = e["name"].split(".")
+      if node_id not in self.nodes: self.nodes.append(node_id)
+      if node_id not in stats.nodes:
+        stats.nodes.append(node_id)
         stats.compute_per_worker[node_id] = 0.0
         stats.network_per_worker[node_id] = 0.0
         stats.memory_per_worker[node_id] = 0.0
-              
+
       if symbol[0] == "compute":
         if symbol[1] == "forward": 
           try:
             _cost = lambda e: e["args"]["inwait"] + e["args"]["ms"] 
             self._handle_round(e, req_id, stats, _cost) # compute queue + execution
-            print(f"TTFT: {stats.ttft}")
           except Exception as e:
             print(f"{e}")
         stats.compute_per_worker[node_id] += e["args"]["ms"] 
@@ -375,11 +387,14 @@ class StatsAggregator:
       try:
         if self._req_prefill[req_id]:
           stats.ttft = (e["args"]["t0"] - stats.ttft) * 1000.0
+          print(f"TTFT: {stats.ttft}")
           self._req_prefill[req_id] = False
         else:
           if e["args"]["t0"] > 0.0:
             stats.itl[-1] = (e["args"]["t0"] - stats.itl[-1]) 
+            print(f"ITL: {e["args"]["t0"]} - {stats.itl[-1]}")
             stats.itl.append(e["args"]["t0"])
+          print(f"ITL: {stats.itl[-1]}")
       except Exception as ex:
         print(f"{ex}")
 

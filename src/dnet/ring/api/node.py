@@ -1292,12 +1292,12 @@ class RingApiNode:
         t_first_token = None
         nonce = f"chatcmpl-{uuid.uuid4()}"
 
-        self.tracer.mark("chat.request.start", {
+        self.tracer.mark("request.start", {
           "tokenizer": "",
           "model": req.model,
           "temperature": req.temperature,
           "prompt_tokens": prompt.size,
-          "nonce": nonce,
+          "req_id": nonce,
           "t0": time.perf_counter(),
         })
 
@@ -1357,9 +1357,9 @@ class RingApiNode:
             else detokenizer.text[: -len(stop_sequence_suffix)]
         )
 
-        self.tracer.mark("chat.request.end", { 
+        self.tracer.mark("request.end", { 
           "generated_tokens": len(tokens), 
-          "nonce": nonce,
+          "req_id": nonce,
           "t0": time.perf_counter(),
         })
 

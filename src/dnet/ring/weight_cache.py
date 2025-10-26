@@ -76,7 +76,7 @@ class WeightCache:
                     )
                 return data
 
-        with self.tracer.frame("weights.cache", "search") as f:
+        with self.tracer.frame("memory.weights", "cache.search") as f:
             with self.lock:  
                 if layer_id in self.cache: 
                     data, _ = self.cache[layer_id]
@@ -100,7 +100,7 @@ class WeightCache:
                     creator = False
 
         if creator: # Perform the blocking load without holding the cache lock
-            with self.tracer.frame("weights.cache", "load") as f:
+            with self.tracer.frame("memory.weights", "cache.load") as f:
                 try:
                     data = self.layer_manager.load_layer_to_gpu(layer_id)
                     f.event("load")
@@ -139,7 +139,7 @@ class WeightCache:
                     return None
 
         else: # Not the creator: wait for the in-flight load to complete
-            with self.tracer.frame("weights.cache", "wait") as f:
+            with self.tracer.frame("memory.weights", "cache.wait") as f:
                 try:
                     inflight.result()  # block until the creator completes
                 except Exception as e:

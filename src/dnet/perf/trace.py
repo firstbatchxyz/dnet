@@ -51,7 +51,7 @@ class _Frame:
         self.attrs = dict(attrs or {})
         self._t0 = 0.0
     def __enter__(self):
-        self._t0 = time.perf_counter()
+        self._t0 = time.time_ns() # cross-node timekeeping
         self.t._emit({"type": "B", "name": self.name, "args": dict(self.attrs)})
         return self
     def __exit__(self, ex_type, ex, tb):
@@ -96,7 +96,7 @@ class Tracer:
         if flush and self._events:
             try:
                 self._agg_q.put_nowait({
-                    "run_id": (self._req_id or "run"),
+                    "req_id": (self._req_id or "run"),
                     "node_id": (self.config.node_id or "node"),
                     "events": list(self._events), })
             except queue.Full:

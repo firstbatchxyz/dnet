@@ -337,7 +337,9 @@ def load_api_layer_weights(model_metadata: ModelMetadata, model: BaseRingModel):
     cnt += load_embeddings(model_metadata, model)
     cnt += load_final_norm(model_metadata, model)
     # For head, respect tied setting if model exposes it
-    tied = bool(getattr(getattr(model, "config", object()), "tie_word_embeddings", False))
+    tied = bool(
+        getattr(getattr(model, "config", object()), "tie_word_embeddings", False)
+    )
     if not tied:
         cnt += load_lm_head(model_metadata, model)
     else:

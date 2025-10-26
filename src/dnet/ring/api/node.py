@@ -1319,6 +1319,8 @@ class RingApiNode:
             ),  # type: ignore
             arange(req.max_tokens or 0),
         ):
+            self.tracer.mark("request.round", {"req_id": nonce,"t0": time.time_ns()})
+
             if profile_enabled and t_first_token is None:
                 t_first_token = time.perf_counter()
             detokenizer.add_token(token)

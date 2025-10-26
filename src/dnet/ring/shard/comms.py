@@ -175,7 +175,7 @@ class CommsMixin(RingShardNodeAttributes):
                 with self.tracer.frame("network", "tx") as f:
                     if activation_msg.tx_enq_perf_t and self._profile:
                         f.set("inwait", time.perf_counter() - activation_msg.tx_enq_t) 
-                        f.set("nonce", activation_msg.nonce)
+                        f.set("req_id", activation_msg.nonce)
                         f.set("node", self._instance_name)
                         q_wait_ms = (
                             time.perf_counter() - activation_msg.tx_enq_perf_t
@@ -233,6 +233,7 @@ class CommsMixin(RingShardNodeAttributes):
             logger.debug(f"Sending activation")
             if activation_msg.is_final:
                 with self.tracer.frame("grpc", "send_activation.final") as f:
+                    f.set("req_id", activation_msg.nonce)
                     f.set("node", self._instance_name)
                     try:
                         if self._mode == "offload" and self.window_size > 0:
@@ -271,6 +272,7 @@ class CommsMixin(RingShardNodeAttributes):
                             f.event("reset_api")
 
                         with self.tracer.frame("grpc", "token_request") as fr:
+                            fr.set("req_id", activation_msg.nonce)
                             fr.set("node", self._instance_name)
                             try:
                                 req = shard_api_comm_pb2.TokenRequest(
@@ -360,6 +362,7 @@ class CommsMixin(RingShardNodeAttributes):
                 if self.next_node_stub:
 
                     with self.tracer.frame("network", "send_activation.next") as f:
+                        f.set("req_id", activation_msg.nonce)
                         f.set("node", self._instance_name)
                         request = activation_msg.to_proto(data)
                         request.timestamp = utc_epoch_now()

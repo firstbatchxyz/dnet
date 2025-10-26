@@ -46,7 +46,6 @@ from ...utils.model import (
     load_lm_head,
 )
 from ...utils.logger import logger
-from ...utils.layer_manager import set_prefetch_mode
 from .config import ShardConfig
 from ...utils.model import ModelMetadata, get_model_metadata
 from ...utils.time import utc_epoch_now
@@ -118,18 +117,16 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         self.input_pool: Optional[LayerAwareMemoryPool] = None
         self.output_pool: Optional[LayerAwareMemoryPool] = None
         self.weight_cache: Optional[WeightCache] = None
-        self._prefetch_scheduled: set[int] = set()
-        self._prefetch_pause = threading.Event()
-        self._prefetch_pending: set[int] = set()
-        self._prefetch_active = 0
-        self._beyond_cursor: Optional[int] = None
+        # Offload IO strategy: sequential (no background prefetch) vs overlap
+        self.sequential_io: bool = bool(self.config.sequential_io)
+        self._prepared_window_layers: list[int] = []
+        self._prepare_fut = None
 
         # Offloading/config-derived params
         self._resident_windows = int(self.config.resident_windows)
         self._recent_windows = []
         self._defer_unload = True
         self._await_next_ready = False
-        set_prefetch_mode(self.config.prefetch_mode)
         self._warmup_keep_flag = False
         self._warmup_completed = False
 
@@ -146,7 +143,6 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
 
         # Queues for async processing
         self.activation_recv_queue: Queue[ActivationMessage] = Queue(maxsize=queue_size)
-        self.weight_prefetch_queue: Queue[int] = Queue(maxsize=50)
         self.activation_computed_queue: asyncio.Queue[ActivationMessage] = (
             asyncio.Queue(maxsize=queue_size)
         )
@@ -161,7 +157,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             max_workers=int(self._device_prefetch_workers or 4)
         )
         self._active_nonce: Optional[str] = None
-        self._prefetch_init_nonce: Optional[str] = None
+        
         self._bound_versions: Dict[int, int] = {}
         self._x_stats = bool(self.config.x_stats)
         self._streams = {}
@@ -267,12 +263,10 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             # Reset config for the selected mode (adaptive defaults per mode)
             # If you need to override mxload_fastpath, set it via CLI/config before load.
             self.config = ShardConfig.for_mode(self._mode)
-            set_prefetch_mode(
-                self.config.prefetch_mode
-            )  # Apply new config's prefetch mode
             self._resident_windows = int(
                 self.config.resident_windows
             )  # Update resident windows
+            self.sequential_io = bool(self.config.sequential_io)
             eff_window_size = (
                 local_count
                 if (self._mode == "fit")
@@ -353,8 +347,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             except Exception as e:
                 logger.warning("Failed to load API-layer weights: %s", e)
 
-            # Reset prefetch tracking
-            self._prefetch_scheduled = set()
+            # Reset binding tracking
             self._bound_versions = {}
 
             # Set topology information
@@ -381,9 +374,22 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             # TODO: Make sure this is the right spot for prefetching
             initial_window = self._assigned_sorted[: self.window_size]
             if not (self._warmup_completed and self._warmup_keep_flag):
-                for lyr in initial_window:
-                    self._prefetch_to_ram(lyr)
-                    self._enqueue_weight_prefetch(lyr)
+                if not self.sequential_io:
+                    for lyr in initial_window:
+                        self._prefetch_to_ram(lyr)
+                        self._enqueue_weight_prefetch(lyr)
+                else:
+                    # In sequential offload, prepare the first window immediately so the
+                    # first activation does not pay cold IO. This blocks /load_model until
+                    # the window is resident, simplifying initial latency.
+                    self._prepared_window_layers = list(initial_window)
+                    try:
+                        await asyncio.get_running_loop().run_in_executor(
+                            self.executor, self._prepare_window_blocking, list(initial_window)
+                        )
+                    except Exception:
+                        # Fallback: best-effort synchronous prepare if executor unavailable
+                        self._prepare_window_blocking(list(initial_window))
 
             m = len(self._assigned_sorted)
             if m > 0:
@@ -464,7 +470,6 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
 
             self.input_pool = None
             self.output_pool = None
-            self._prefetch_scheduled = set()
             self._bound_versions = {}
 
             # Run garbage collection to free memory
@@ -535,9 +540,8 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 (payload_bytes / 1024.0),
             )
 
-            # Detect new sequence per node: initialize per-nonce KV; keep prefetch state per nonce
+            # Detect new sequence per node: initialize per-nonce KV
             if request.nonce != self._active_nonce:
-                self._clear_prefetch_state()
                 self._active_nonce = request.nonce
                 try:
                     self._get_or_make_kv(request.nonce)
@@ -545,16 +549,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                     pass
 
             if target_layer in self._assigned_set:
-                # First-hop prefetch on cold start for this nonce
-                if self._prefetch_init_nonce != request.nonce:
-                    next_locals = self._next_local_layers(
-                        target_layer, self.window_size - 1
-                    )
-                    window_layers = [target_layer] + next_locals
-                    for wl in window_layers:
-                        self._prefetch_to_ram(wl)
-                        self._enqueue_weight_prefetch(wl)
-                    self._prefetch_init_nonce = request.nonce
+                # No ingress prefetch; sequential offload warms windows only post-TX
 
                 # Allocate input pool and copy payload (with optional decompression)
                 t_alloc = time.perf_counter()
@@ -769,9 +764,8 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                     (payload_bytes / 1024.0),
                 )
 
-                # Detect new sequence per node: initialize per-nonce KV; keep prefetch state per nonce
+                # Detect new sequence per node: initialize per-nonce KV
                 if req.nonce != self._active_nonce:
-                    self._clear_prefetch_state()
                     self._active_nonce = req.nonce
                     try:
                         self._get_or_make_kv(req.nonce)
@@ -779,16 +773,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                         pass
 
                 if target_layer in self._assigned_set:
-                    # First-hop prefetch on cold start for this nonce
-                    if self._prefetch_init_nonce != req.nonce:
-                        next_locals = self._next_local_layers(
-                            target_layer, self.window_size - 1
-                        )
-                        window_layers = [target_layer] + next_locals
-                        for wl in window_layers:
-                            self._prefetch_to_ram(wl)
-                            self._enqueue_weight_prefetch(wl)
-                        self._prefetch_init_nonce = req.nonce
+                    # No ingress prefetch in sequential offload
 
                     # Heavy prep in executor (alloc/copy/decompress)
                     loop = asyncio.get_running_loop()
@@ -1079,26 +1064,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
 
         logger.info(f"Node {self.node_id} shutdown complete")
 
-    def _clear_prefetch_state(self):
-        """Clear scheduled/in-flight prefetch when a request ends or resets"""
-        try:
-            self._prefetch_scheduled.clear()
-        except Exception:
-            pass
-        try:
-            self._beyond_cursor = None
-        except Exception:
-            pass
-        try:
-            while True:
-                self.weight_prefetch_queue.get_nowait()
-        except Exception:
-            pass
-        try:
-            if self.weight_cache:
-                self.weight_cache.cancel_all_prefetch()
-        except Exception:
-            pass
+    # Prefetch state clearing removed: no background prefetch in sequential IO
 
     async def start(self, shutdown_trigger: Any = lambda: asyncio.Future()):
         self.running = True
@@ -1113,7 +1079,6 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
 
         self.background_tasks = [
             asyncio.create_task(self._ingress_worker()),
-            asyncio.create_task(self._prefetch_worker()),
             asyncio.create_task(self._send_worker()),
         ]
         # Start idle sweeper to close silent streams
@@ -1282,6 +1247,19 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             "Shard node %s HTTP server started on port %s", self.node_id, self.http_port
         )
 
+    def _prepare_window_blocking(self, window_layers: list[int]) -> None:
+        """Synchronously materialize the given window's weights to device memory.
+
+        This runs in the thread pool to avoid blocking the event loop.
+        """
+        try:
+            if not self.weight_cache:
+                return
+            for lid in window_layers:
+                _ = self.weight_cache.get_weight(lid, inc_ref=False)
+        finally:
+            pass
+
     async def _setup_routes(self) -> None:
         """Setup HTTP routes."""
 
@@ -1399,8 +1377,9 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                     start_idx : start_idx + max(1, window)
                 ]
                 for wl in window_layers:
-                    self._prefetch_to_ram(wl)
-                    self._enqueue_weight_prefetch(wl)
+                    if self._mode == "fit":
+                        self._prefetch_to_ram(wl)
+                        self._enqueue_weight_prefetch(wl)
                 return JSONResponse(content={"prefetched": window_layers})
             except Exception as e:
                 logger.error("/warm failed: %s", e)

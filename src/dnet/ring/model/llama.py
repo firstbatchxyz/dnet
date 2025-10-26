@@ -137,9 +137,9 @@ class LlamaRingModel(BaseRingModel):
             self._shrink_block(b)
 
     def unload_layers(self, abs_layers: List[int]):
-        # Skip for quantized models to avoid placeholder matmuls
-        if self.is_quantized:
-            return
+        # Shrink params for given absolute layer ids to placeholders.
+        # Safe for both quantized and unquantized models under windowed execution;
+        # layers will be re-bound before next use.
         for abs_idx in abs_layers:
             try:
                 local = self.abs_to_local.get(abs_idx)

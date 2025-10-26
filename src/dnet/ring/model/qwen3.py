@@ -151,12 +151,10 @@ class Qwen3RingModel(BaseRingModel):
     def unload_layers(self, abs_layers: list[int]):
         """Shrink params for given absolute layer ids to placeholders.
 
-        Call after a window is evicted to free memory retained by module params.
+        Safe for both quantized and unquantized models under the windowed
+        execution model: these layers are not executed again until their
+        weights are re-bound via `load_weights`.
         """
-        # Do not shrink quantized models to avoid introducing (1,1) placeholders
-        # in QuantizedLinear modules which will break subsequent matmuls.
-        if self.is_quantized:
-            return
         for abs_idx in abs_layers:
             try:
                 local = self.abs_to_local.get(abs_idx)

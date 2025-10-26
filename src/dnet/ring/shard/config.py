@@ -42,7 +42,6 @@ class ShardConfig:
     resident_windows: int = 2
     lazy_params: bool = False
 
-    prefetch_mode: str = "off"
 
     wire_dtype: str = "fp16"
 
@@ -70,6 +69,8 @@ class ShardConfig:
     # Enable mx.load fast-path only for explicitly repacked files/windows.
     # Default False to avoid loading full multi-layer shard files in offload mode.
     mxload_fastpath: bool = False
+    # IO strategy: True for sequential (no background prefetch/overlap)
+    sequential_io: bool = False
 
     # Activation pool sizes (MB)
     input_pool_mb: int = 512
@@ -84,12 +85,12 @@ class ShardConfig:
                 mode="offload",
                 resident_windows=1,
                 lazy_params=True,
-                prefetch_mode="sequential",  # Use sequential hints without aggressive prefetch
                 wire_dtype="fp16",
                 warmup_windows=1,
                 streaming=False,
                 compress=False,
-                mxload_fastpath=False,
+                mxload_fastpath=True,  # Use mx.load fast-path with repacked per-layer/per-window files
+                sequential_io=True,
                 input_pool_mb=256,
                 output_pool_mb=256,
             )
@@ -98,12 +99,12 @@ class ShardConfig:
             mode="fit",
             resident_windows=9999,
             lazy_params=False,
-            prefetch_mode="off",
             wire_dtype="fp16",
             warmup_windows=1,
             streaming=True,
             compress=False,
             mxload_fastpath=False,
+            sequential_io=False,
             input_pool_mb=512,
             output_pool_mb=512,
         )

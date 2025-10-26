@@ -78,6 +78,18 @@ class ComputeMixin(RingShardNodeAttributes):
                     _tmp_layer += 1
                     processed += 1
 
+                # In sequential offload, if an idle prefetch for this exact window is in-flight,
+                # wait for it to complete so the window is resident before binding/compute.
+                if self.sequential_io and window_layers and (
+                    self._prepared_window_layers == window_layers
+                ):
+                    fut = self._prepare_fut
+                    if fut is not None:
+                        try:
+                            fut.result(timeout=30)
+                        except Exception:
+                            pass
+
                 # Ensure weights for the window are resident and bind only if arrays changed
                 # if model fits and we've already bound these layers, skip the scan entirely.
                 fast_fit = (self._mode == "fit" and len(self._assigned_sorted) <= self.window_size)
@@ -136,33 +148,11 @@ class ComputeMixin(RingShardNodeAttributes):
                             bind_ms,
                         )
 
-                # Opportunistically schedule prefetch for the next window to overlap with compute
-                try:
-                    next_win_pre = self._next_local_layers(
-                        (
-                            window_layers[-1]
-                            if window_layers
-                            else (activation_msg.layer_id)
-                        ),
-                        self.window_size,
-                    )
-                    for nl in next_win_pre:
-                        self._prefetch_to_ram(nl)
-                        self._enqueue_weight_prefetch(nl)
-                    if self._profile:
-                        logger.info(
-                            "[PROFILE][PREFETCH-SCHED] node=%s nonce=%s next_window(pre)=%s",
-                            self.node_id,
-                            activation_msg.nonce,
-                            next_win_pre,
-                        )
-                except Exception:
-                    pass
+                # Sequential offload mode: do not schedule background prefetch
+                # Any background warming and overlap are disabled to simplify IO.
 
                 # Execute the window
-                self._beyond_cursor = (
-                    window_layers[-1] if window_layers else (activation_msg.layer_id)
-                )
+                # No beyond-cursor tracking needed in sequential IO
                 t_comp = time.perf_counter()
                 # Prevent prefetch touching during encode/compute to minimize UMA pressure
                 try:
@@ -265,41 +255,65 @@ class ComputeMixin(RingShardNodeAttributes):
                         (t_comp_done - t_comp) * 1000.0,
                     )
 
-                # Decrease references post-compute. Defer any eviction/unload of the
-                # just-computed window until after we synchronize (stage barrier)
-                # to avoid forcing MLX to re-materialize weights during eval.
+                # Decrease references post-compute and evict immediately if not retaining windows
                 for lid in window_layers:
                     self.weight_cache.decrease_reference(lid)
 
                 try:
                     self._recent_windows.append(list(window_layers))
-                    if not self._defer_unload:
-                        while len(self._recent_windows) > max(1, int(self._resident_windows)):
-                            old = self._recent_windows.pop(0)
-                            # Proactively evict; shrink params for old window
+                    # In sequential offload (resident_windows <= 1), evict just-computed window now
+                    if int(self._resident_windows) <= 1:
+                        old = self._recent_windows.pop(0)
+                        try:
+                            evicted_cnt = self.weight_cache.evict_layers(old)
+                        except Exception:
+                            evicted_cnt = 0
+                        try:
+                            if hasattr(self.model, "unload_layers"):
+                                self.model.unload_layers(old)  # type: ignore[attr-defined]
+                                for lid in old:
+                                    self._bound_versions.pop(lid, None)
+                        except Exception:
+                            pass
+                        if self._profile:
                             try:
-                                evicted_cnt = self.weight_cache.evict_layers(old)
-                            except Exception:
-                                evicted_cnt = 0
-                            try:
-                                if hasattr(self.model, "unload_layers"):
-                                    self.model.unload_layers(old)  # type: ignore[attr-defined]
-                                    for lid in old:
-                                        self._bound_versions.pop(lid, None)
+                                logger.info(
+                                    "[PROFILE][UNLOAD-WINDOW] node=%s nonce=%s old_layers=%s evicted=%s keep_windows=%s",
+                                    self.node_id,
+                                    activation_msg.nonce,
+                                    old,
+                                    evicted_cnt,
+                                    self._resident_windows,
+                                )
                             except Exception:
                                 pass
-                            if self._profile:
+                    else:
+                        if not self._defer_unload:
+                            while len(self._recent_windows) > max(1, int(self._resident_windows)):
+                                old = self._recent_windows.pop(0)
                                 try:
-                                    logger.info(
-                                        "[PROFILE][UNLOAD-WINDOW] node=%s nonce=%s old_layers=%s evicted=%s keep_windows=%s",
-                                        self.node_id,
-                                        activation_msg.nonce,
-                                        old,
-                                        evicted_cnt,
-                                        self._resident_windows,
-                                    )
+                                    evicted_cnt = self.weight_cache.evict_layers(old)
+                                except Exception:
+                                    evicted_cnt = 0
+                                try:
+                                    if hasattr(self.model, "unload_layers"):
+                                        self.model.unload_layers(old)  # type: ignore[attr-defined]
+                                        for lid in old:
+                                            self._bound_versions.pop(lid, None)
                                 except Exception:
                                     pass
+                                if self._profile:
+                                    try:
+                                        logger.info(
+                                            "[PROFILE][UNLOAD-WINDOW] node=%s nonce=%s old_layers=%s evicted=%s keep_windows=%s",
+                                            self.node_id,
+                                            activation_msg.nonce,
+                                            old,
+                                            evicted_cnt,
+                                            self._resident_windows,
+                                        )
+                                    except Exception:
+                                        pass
                 except Exception:
                     pass
 
@@ -337,12 +351,7 @@ class ComputeMixin(RingShardNodeAttributes):
                     self._compute_busy.clear()
                 except Exception:
                     pass
-                try:
-                    for lid in list(self._prefetch_pending):
-                        self._prefetch_pending.discard(lid)
-                        self._enqueue_weight_prefetch(lid)
-                except Exception:
-                    pass
+                # No prefetch pending in sequential IO
                 if self._profile:
                     try:
                         logger.info(
@@ -424,23 +433,7 @@ class ComputeMixin(RingShardNodeAttributes):
 
                 # Clean up input resources
                 self.input_pool.release(activation_msg.pool_id)
-                # After queuing TX, schedule prefetch and eviction in the background
-                # to avoid stalling the handoff to the next shard.
-                try:
-                    self._prefetch_pause.set()
-                except Exception:
-                    pass
-                next_window = self._next_local_layers(last_layer, self.window_size)
-                for nl in next_window:
-                    self._prefetch_to_ram(nl)
-                    self._enqueue_weight_prefetch(nl)
-                if self._profile:
-                    logger.info(
-                        "[PROFILE][PREFETCH-SCHED] node=%s nonce=%s next_window=%s",
-                        self.node_id,
-                        activation_msg.nonce,
-                        next_window,
-                    )
+                # Sequential offload: do not schedule post-stage prefetch
 
                 # Optional unload/evict after stage
                 if self._defer_unload:

@@ -271,12 +271,9 @@ class CommsMixin(RingShardNodeAttributes):
 
             if self._profile:
                 logger.info(
-                    "[PROFILE][SER-START] node=%s nonce=%s prefetch_active=%s pending=%s queue=%s",
+                    "[PROFILE][SER-START] node=%s nonce=%s",
                     self.node_id,
                     activation_msg.nonce,
-                    self._prefetch_active,
-                    len(self._prefetch_pending),
-                    self.weight_prefetch_queue.qsize(),
                 )
             t_ser = time.perf_counter()
             t_cast = t_ser
@@ -395,37 +392,18 @@ class CommsMixin(RingShardNodeAttributes):
                             cast_ms,
                         )
 
+                    # Idle-only fastpath prefetch for inter-device overlap: after TX, warm next window
                     try:
-                        t_flush = time.perf_counter()
-                        flushed = 0
-                        for lid in list(self._prefetch_pending):
-                            self._prefetch_to_ram(lid)
-                            self.weight_prefetch_queue.put_nowait(lid)
-                            self._prefetch_pending.discard(lid)
-                            flushed += 1
-                        if self._profile:
-                            logger.info(
-                                "[PROFILE][SER-END] node=%s nonce=%s flushed=%s flush_ms=%.2f",
-                                self.node_id,
-                                activation_msg.nonce,
-                                flushed,
-                                (time.perf_counter() - t_flush) * 1000.0,
+                        if self.sequential_io and self.window_size > 0:
+                            next_window = self._next_local_layers(
+                                activation_msg.layer_id, self.window_size
                             )
-                    except Exception:
-                        pass
-                    finally:
-                        try:
-                            self._prefetch_pause.clear()
-                        except Exception:
-                            pass
-
-                    try:
-                        next_window = self._next_local_layers(
-                            activation_msg.layer_id, self.window_size
-                        )
-                        for nl in next_window:
-                            self._prefetch_to_ram(nl)
-                            self._enqueue_weight_prefetch(nl)
+                            if next_window:
+                                self._prepared_window_layers = list(next_window)
+                                loop = asyncio.get_running_loop()
+                                self._prepare_fut = loop.run_in_executor(
+                                    self.executor, self._prepare_window_blocking, list(next_window)
+                                )
                     except Exception:
                         pass
                 else:
@@ -437,36 +415,10 @@ class CommsMixin(RingShardNodeAttributes):
                     "Final activation reached send path unexpectedly; sampling should occur on end shard."
                 )
 
-                # Resume prefetch and flush deferred
-                try:
-                    t_flush = time.perf_counter()
-                    flushed = 0
-                    for lid in list(self._prefetch_pending):
-                        self._prefetch_to_ram(lid)
-                        self.weight_prefetch_queue.put_nowait(lid)
-                        self._prefetch_pending.discard(lid)
-                        flushed += 1
-                    if self._profile:
-                        logger.info(
-                            "[PROFILE][SER-END] node=%s nonce=%s flushed=%s flush_ms=%.2f",
-                            self.node_id,
-                            activation_msg.nonce,
-                            flushed,
-                            (time.perf_counter() - t_flush) * 1000.0,
-                        )
-                except Exception:
-                    pass
-                finally:
-                    try:
-                        self._prefetch_pause.clear()
-                    except Exception:
-                        pass
+                # Sequential offload: no deferred prefetch to flush or resume
 
                 # Clear scheduling at request end
-                try:
-                    self._clear_prefetch_state()
-                except Exception:
-                    pass
+                # Sequential offload: prefetch state is unused
 
                 # Optional: explicitly end the per-nonce stream on request completion
                 # Enable by setting RING_EXPLICIT_EOR=1 when you emit a true end-of-request signal.

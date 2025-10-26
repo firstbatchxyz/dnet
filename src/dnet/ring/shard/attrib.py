@@ -24,11 +24,6 @@ class RingShardNodeAttributes:
     _mlx_lock: threading.Lock
 
     # prefetch-related
-    _prefetch_scheduled: set[int]
-    _prefetch_pending: set[int]
-    _prefetch_pause: threading.Event
-    _prefetch_active = 0
-
     _streaming_enabled: bool
 
     _resident_windows: int
@@ -36,9 +31,11 @@ class RingShardNodeAttributes:
     node_id: int
     running: bool
     weight_cache: WeightCache
-    weight_prefetch_queue: Queue[int]
     executor: ThreadPoolExecutor
     _compute_busy: threading.Event
+    sequential_io: bool
+    _prepared_window_layers: list[int]
+    _prepare_fut: Optional[Any]
 
     activation_computed_queue: asyncio.Queue[ActivationMessage]
     _defer_unload: bool
@@ -88,7 +85,6 @@ class RingShardNodeAttributes:
 
     # shared methods
     _prefetch_to_ram: Callable[[int], None]
-    _clear_prefetch_state: Callable[[], None]
     _enqueue_weight_prefetch: Callable[[int], None]
     _next_local_layers: Callable[[int, int], list[int]]
     _get_or_make_kv: Callable[[str], list]

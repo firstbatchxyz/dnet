@@ -52,11 +52,12 @@ class _Frame:
         self._t0 = 0.0
     def __enter__(self):
         self._t0 = time.time_ns() # cross-node timekeeping
+        self.attrs.update({"t0": self._t0})
         self.t._emit({"type": "B", "name": self.name, "args": dict(self.attrs)})
         return self
     def __exit__(self, ex_type, ex, tb):
-        dt_ms = (time.perf_counter() - self._t0) * 1000.0
-        self.attrs.update({"ms": round(dt_ms, 3), "exc": bool(ex)})
+        dt_ms = (time.time_ns() - self._t0) * 1e-6 
+        self.attrs.update({"ms": round(dt_ms, 3), "exc": bool(ex), "t0": time.time_ns()})
         self.t._emit({"type": "E", "name": self.name, "args": self.attrs})
         return False
     def event(self, name: str, **attrs):

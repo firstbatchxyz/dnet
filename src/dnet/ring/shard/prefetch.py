@@ -14,5 +14,4 @@ class PrefetchMixin(RingShardNodeAttributes):
             pass
 
     def _enqueue_weight_prefetch(self, layer_id: int):
-        # No-op in sequential IO; retained for compatibility
         return

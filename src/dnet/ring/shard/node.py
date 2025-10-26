@@ -549,8 +549,6 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                     pass
 
             if target_layer in self._assigned_set:
-                # No ingress prefetch; sequential offload warms windows only post-TX
-
                 # Allocate input pool and copy payload (with optional decompression)
                 t_alloc = time.perf_counter()
                 if "|" in activation.dtype:
@@ -773,8 +771,6 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                         pass
 
                 if target_layer in self._assigned_set:
-                    # No ingress prefetch in sequential offload
-
                     # Heavy prep in executor (alloc/copy/decompress)
                     loop = asyncio.get_running_loop()
                     try:

@@ -147,54 +147,20 @@ class ComputeMixin(RingShardNodeAttributes):
                             len(to_bind),
                             bind_ms,
                         )
-
-                # Sequential offload mode: do not schedule background prefetch
-                # Any background warming and overlap are disabled to simplify IO.
-
-                # Execute the window
-                # No beyond-cursor tracking needed in sequential IO
                 t_comp = time.perf_counter()
-                # Prevent prefetch touching during encode/compute to minimize UMA pressure
                 try:
                     self._compute_busy.set()
                 except Exception:
                     pass
-                layer_times_ms: list[tuple[int, float]] = []
                 for i, lyr in enumerate(window_layers):
-                    t_l0 = time.perf_counter() if self._profile else 0.0
                     with self._mlx_lock:
                         x = self.model.apply_single_layer(lyr, x, cache=kv)
-                        # Keep activations in wire dtype to reduce memory pressure
                         try:
                             if str(x.dtype) != str(self._wire_mx_dtype):
                                 x = x.astype(self._wire_mx_dtype)
                         except Exception:
                             pass
 
-                    # Optional per-n-layer sync for profiling, gated by settings
-                    if self._profile and self._sync_per_layer:
-                        do_sync = True
-                        n = self._sync_every_n
-                        if n > 0 and (i % n) != 0:
-                            do_sync = False
-
-                        if do_sync:
-                            try:
-                                with self._mlx_lock:
-                                    _s = mx.sum(x)
-                                    mx.eval(_s)
-                            except Exception:
-                                pass
-                            dt = (time.perf_counter() - t_l0) * 1000.0
-                            layer_times_ms.append((lyr, dt))
-                            self._prof.info(
-                                "[PROFILE][LAYER] node=%s nonce=%s layer=%s ms=%.3f",
-                                self.node_id,
-                                activation_msg.nonce,
-                                lyr,
-                                dt,
-                            )
-                t_comp_done = time.perf_counter()
                 last_layer = (
                     window_layers[-1] if window_layers else activation_msg.layer_id
                 )
@@ -204,49 +170,7 @@ class ComputeMixin(RingShardNodeAttributes):
                 # except Exception:
                 #    pass
                 if self._profile:
-                    try:
-                        avg = (
-                            sum(t for _, t in layer_times_ms) / len(layer_times_ms)
-                            if layer_times_ms
-                            else 0.0
-                        )
-                        self._prof.info(
-                            "[PROFILE][LAYER-AVG] node=%s nonce=%s window=%s avg_ms=%.3f per_layer_ms=%.3f",
-                            self.node_id,
-                            activation_msg.nonce,
-                            window_layers,
-                            avg,
-                            (avg / len(layer_times_ms)) if layer_times_ms else 0.0,
-                        )
-                    except Exception:
-                        pass
-                    self._prof.info(
-                        "[PROFILE][EXEC-PATH] node=%s nonce=%s compiled=%s window=%s",
-                        self.node_id,
-                        activation_msg.nonce,
-                        0,
-                        window_layers,
-                    )
-                    # Optional activation stats at window boundary for debugging
-                    try:
-                        if self._x_stats:
-                            m = mx.mean(x)
-                            s = mx.std(x)
-                            mn = mx.min(x)
-                            mxv = mx.max(x)
-                            mx.eval(m, s, mn, mxv)
-                            logger.info(
-                                "[PROFILE][X-STATS] node=%s nonce=%s window_tail=%s mean=%s std=%s min=%s max=%s",
-                                self.node_id,
-                                activation_msg.nonce,
-                                last_layer,
-                                float(m.item()),
-                                float(s.item()),
-                                float(mn.item()),
-                                float(mxv.item()),
-                            )
-                    except Exception:
-                        pass
+                    t_comp_done = time.perf_counter()
                     logger.info(
                         "[PROFILE][WINDOW] node=%s nonce=%s layers=%s compute_ms=%.3f",
                         self.node_id,
@@ -255,13 +179,11 @@ class ComputeMixin(RingShardNodeAttributes):
                         (t_comp_done - t_comp) * 1000.0,
                     )
 
-                # Decrease references post-compute and evict immediately if not retaining windows
                 for lid in window_layers:
                     self.weight_cache.decrease_reference(lid)
 
                 try:
                     self._recent_windows.append(list(window_layers))
-                    # In sequential offload (resident_windows <= 1), evict just-computed window now
                     if int(self._resident_windows) <= 1:
                         old = self._recent_windows.pop(0)
                         try:
@@ -351,7 +273,7 @@ class ComputeMixin(RingShardNodeAttributes):
                     self._compute_busy.clear()
                 except Exception:
                     pass
-                # No prefetch pending in sequential IO
+
                 if self._profile:
                     try:
                         logger.info(

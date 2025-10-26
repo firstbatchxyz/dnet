@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from queue import Empty, Queue, Full
 from typing import Any, Dict, List, Optional, cast
 from bisect import bisect_left as _bisect_left
+from pathlib import Path
 
 from socket import gethostname
 from secrets import token_hex
@@ -44,11 +45,13 @@ from ...utils.model import (
     load_embeddings,
     load_final_norm,
     load_lm_head,
+    ModelMetadata,
+    get_model_metadata,
 )
 from ...utils.logger import logger
 from ...utils.layer_manager import set_prefetch_mode
+from ...utils import repack
 from .config import ShardConfig
-from ...utils.model import ModelMetadata, get_model_metadata
 from ...utils.time import utc_epoch_now
 from ...utils.serialization import dtype_map, mlx_dtype_map
 from ..observability import load_settings, make_profiler
@@ -131,6 +134,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         self._await_next_ready = False
         set_prefetch_mode(self.config.prefetch_mode)
         self._warmup_keep_flag = False
+        self._warmup_completed = False
         self._materialize_prefetch_default = bool(self.config.materialize_prefetch)
         self._touch_during_compute = False
 
@@ -217,11 +221,15 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         try:
             start_time = time.perf_counter()
 
-            # Check if already loaded with same configuration
+            # Get local cache directory for repacked layers
+            cache_dir = self._get_cache_dir()
+
+            # Check if already loaded with same configuration and repacked layers exist
             if (
                 self.model is not None
                 and self.model_path == req.model_path
                 and self.assigned_layers == req.layers
+                and self._verify_window_files(cache_dir, req.layers, self.window_size)
             ):
                 logger.info(
                     "Node %s: Model already loaded with same configuration",
@@ -250,7 +258,27 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             self._assigned_sorted = sorted(self.assigned_layers)
             self._assigned_set = set(self._assigned_sorted)
 
+            # Set effective window size based on request and layer count
+            requested_w = int(max(1, int(getattr(req, "window_size", 1))))
+            local_count = max(1, len(self.assigned_layers))
+            self._mode = "fit" if requested_w >= local_count else "offload"
+            self.config = ShardConfig.for_mode(self._mode)
+            self.window_size = max(1, min(requested_w, local_count))
+
             self.model_path = req.model_path
+
+            cache_dir = self._get_cache_dir()
+            layer_windows = repack.chunk_layers(self.assigned_layers, self.window_size)
+
+            try:
+                await asyncio.to_thread(
+                    repack.repack_windows,
+                    req.model_path,
+                    layer_windows,
+                    cache_dir,
+                )
+            except Exception as e:
+                raise RuntimeError(f"Failed to repack model layers: {e}")
             try:
                 logger.info(
                     "[DIAG][LOAD] node=%s assigned_layers=%s _assigned_set_size(before)=%d",
@@ -264,19 +292,6 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             # Initialize memory pools
             self.input_pool = LayerAwareMemoryPool(total_memory_mb=512)
             self.output_pool = LayerAwareMemoryPool(total_memory_mb=512)
-
-            # Decide mode dynamically from assignment + requested window
-            requested_w = int(max(1, int(getattr(req, "window_size", 1))))
-            local_count = max(1, len(self.assigned_layers))
-
-            self._mode = "fit" if requested_w >= local_count else "offload"
-            self.config = ShardConfig.for_mode(self._mode)  # Reset config
-            eff_window_size = (
-                local_count
-                if (self._mode == "fit")
-                else max(1, min(requested_w, local_count))
-            )
-            self.window_size = eff_window_size
 
             logger.info(
                 "Node %s: Using prefetch window size: %d (requested=%s, local_count=%s, mode=%s). \n With mode: %s",
@@ -368,6 +383,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
 
             # Warmup if requested (run in executor to avoid blocking event loop)
             if req.warmup:
+                self._warmup_keep_flag = True  # Enable warmup keep flag
                 loop = asyncio.get_running_loop()
                 try:
                     await loop.run_in_executor(self.executor, self._warmup_shard)
@@ -448,6 +464,10 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             self.model_path = None
             self._assigned_sorted = []
             self._assigned_set = set()
+
+            # Reset warmup state
+            self._warmup_completed = False
+            self._warmup_keep_flag = False
 
             # Clear memory pools
             if self.weight_cache:
@@ -564,7 +584,9 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                         )
                     except Exception as e:
                         logger.error(
-                            "Decompression failed for nonce %s: %s", request.nonce, e
+                            "Decompression failed for nonce %s: %s",
+                            request.nonce,
+                            e,
                         )
                         return
 
@@ -797,7 +819,9 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                         )
                     except Exception as e:
                         logger.error(
-                            "Activation prepare failed for nonce %s: %s", req.nonce, e
+                            "Activation prepare failed for nonce %s: %s",
+                            req.nonce,
+                            e,
                         )
                         continue
                     if activation_msg is None:
@@ -902,7 +926,9 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                     )
                 except Exception as e:
                     logger.error(
-                        "Decompression failed for nonce %s: %s", request.nonce, e
+                        "Decompression failed for nonce %s: %s",
+                        request.nonce,
+                        e,
                     )
                     return None
 
@@ -934,7 +960,9 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                     shp = (int(len(tokens)),)
                 except Exception as e:
                     logger.error(
-                        "Failed to parse tokens for nonce %s: %s", request.nonce, e
+                        "Failed to parse tokens for nonce %s: %s",
+                        request.nonce,
+                        e,
                     )
                     return None
                 pool_id = self.input_pool.allocate_for_layer(
@@ -1186,9 +1214,39 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         except Exception:
             pass
 
+    def _get_cache_dir(self) -> Path:
+        """Get the cache directory for this shard's layers."""
+        return Path(f"cache/shard_{self.node_id}/layers")
+
+    def _verify_window_files(
+        self, cache_dir: Path, layers: List[int], window_size: int
+    ) -> bool:
+        """Check if all required window files exist in the cache directory.
+
+        Args:
+            cache_dir: Directory containing cached model files
+            layers: List of layer indices to verify
+            window_size: Size of each window
+
+        Returns:
+            True if all required window files exist, False otherwise
+        """
+        from dnet.utils.repack import chunk_layers
+
+        windows = chunk_layers(layers, window_size)
+        for window in windows:
+            if not window:
+                continue
+            a, b = int(window[0]), int(window[-1])
+            window_file = cache_dir / f"layers_{a:03d}-{b:03d}.safetensors"
+            if not window_file.exists():
+                return False
+        return True
+
     def _warmup_shard(self):
         logger.info(
-            "[WARMUP] Starting shard warmup with window size %s", self.window_size
+            "[WARMUP] Starting shard warmup with window size %s",
+            self.window_size,
         )
         if not self.model or not self.model_metadata or not self.weight_cache:
             logger.warning("[WARMUP] No model loaded; skipping warmup")
@@ -1271,7 +1329,9 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             aio_hypercorn.serve(self.app, config, shutdown_trigger=shutdown_trigger)  # type: ignore
         )
         logger.info(
-            "Shard node %s HTTP server started on port %s", self.node_id, self.http_port
+            "Shard node %s HTTP server started on port %s",
+            self.node_id,
+            self.http_port,
         )
 
     async def _setup_routes(self) -> None:
@@ -1378,7 +1438,8 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 window = int(body.get("window", self.window_size))
                 if start < 0:
                     return JSONResponse(
-                        status_code=400, content={"error": "missing/invalid start"}
+                        status_code=400,
+                        content={"error": "missing/invalid start"},
                     )
                 start_idx = 0
                 for i, lyr in enumerate(self._assigned_sorted):

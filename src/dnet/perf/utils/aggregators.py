@@ -216,12 +216,13 @@ class ReqStats:
   model: str = ""              # Model name
   tokenizer: str = ""          # Tokenizer name
   run_id: str = ""             # ID of session (for later mapping) 
-  nonce: str = ""              # List of serviced requests
+  req_id: str = ""             # List of serviced requests
   ttft: float = 0.0            # Time to first token
   itl: List[float] = None      # Inter-token latency per round 
   prompt_tokens: int = -1      # Number of prompt tokens per request (req_id: #)
   generated_tokens: int = -1   # Number of generated tokens per request (req_id: #)
   total_tokens: int = -1       # Total number of tokens processed
+  nodes: List[str] = None      # Nodes that participated in computation
 
   latencies: List[List[str, str, str, int]] = None # List of inter-node latencies: [node0, node1, p50, 0.0]
   latency_per_layer: Dict[int, float] = None       # Map of {layer: 0.0} 
@@ -253,175 +254,147 @@ class StatsAggregator:
       self._max_inflight_req = 20 # per node  FIXME: modify from repl
 
       # Frames are kept in here while in-flight, then remove the frame objects and append to _stats 
-      self._frames: Dict[str, Dict[str, Dict[str, Any]]] = {} # Store frames per nonce, per node_id 
+      self._frames: Dict[str, Dict[str, Dict[str, Any]]] = {} # Store frames per req_id, per node_id 
 
-      self._nonces: List[str] = []                       # Tracked nonces (either in-flight or done)
-      self._nonce_round_finish: Dict[str, bool] = {}     # Track in-flight rounds
-      self._nonce_prefill: Dict[str, bool] = {}          # Track if this round is prefill
+      self._req: List[str] = []                          # Tracked requests (in-flight or done)
+      self._req_round_finish: Dict[str, bool] = {}       # Track in-flight requests 
+      self._req_prefill: Dict[str, bool] = {}            # Track if this request round is prefill
+      self._open_frames: Dict[str, Dict[str, Dict[str, Any]]] = {}  
+
+      # Staging environment for events that arrive before 
+      # the request.start of the request they belong to
+      self._staging: Dict[str, Any] = {}
+
+      # Finished and running requests
       self._running_stats: Dict[str, ReqStats] = {}      # Unfinished stat frames
       self._stats: Dict[str, ReqStats] = {}              # Finished stat frames 
-      self._open_frames: Dict[str, Dict[str, Any]] = {}  # We got 'B' event but not 'E' (per nonce)
-      self._model_per_run: Dict[str, str] = {}           # Track model per run_id
 
-      self.nodes = [] # Keep track of active nodes 
-
-      # Maps of frames to higher-level sub-systems
-      self._compute_set = [
-        "compute.forward",
-        "compute.thread.kvcache.init",
-        "compute.thread.weights.prepare",
-        "compute.thread.activations.process",
-        "compute.thread.activations.load",
-        "compute.thread.execute",
-        "compute.thread.execute.enqueue_prefetch",
-        "compute.thread.execute.evict_and_unload",
-        "compute.thread.cleanup",
-        "compute.thread.mdns.send",
-      ]
-
-      self._network_set = [
-        "network.tx",
-        "network.token_request",
-        "network.rx.prepare",
-        "network.rx.prepare_activation.tokens",
-        "network.rx.enque",
-        "network.send_activation.final",
-        "network.rx",
-        "network.connect.next_node",
-        "network.rx.prefetch",
-      ]
-
-      self._memory_set = [
-        "memory.model.load",
-        "memory.model.load_metadata",
-        "memory.warmup",
-        "memory.weight_cache.init",
-        "memory.prefetch",
-        "memory.memory_pools.init",
-        "memory.cache.reset",
-        "memory.make_cache",
-      ]
+      self.nodes = [] # Keep track of active nodes in the network 
 
     # Ingest raw data from tracer
     def add(self, data: Dict[str, Any]) -> None:
-      run_id =  data["run_id"] 
-      node_id = data["node_id"]
       events =  data["events"] or []
+      if not events: return # Nothing to do 
 
-      if not run_id or not node_id: 
-        print("Dropped batch")
-        return # Drop the batch
+      node_id = data.get("node_id")
+      if not node_id: return # Drop unknown node
 
       with self._lock:
-          # Ensure we register workers and nodes
-          for i, ev in enumerate(events):
-              if "nonce" not in ev["args"]: ev["args"]["nonce"] = f"N_"
-              nonce = ev["args"]["nonce"] 
-
-              if node_id not in self._frames:
-                self._frames[node_id] = {}
-
-              if nonce not in self._frames[node_id]:
-                self._frames[node_id][nonce] = {}
-
-              if len(self._frames[node_id]) >= self._max_inflight_req: # remove oldest entry
-                  del self._frames[self._nonces[0]] 
-                  del self._nonces[0]
-
-              if nonce not in self._nonces:
-                  self._nonces.append(nonce)
 
           # Update in-flight events or register new ones
-          for e in events:
-              nonce = e["args"]["nonce"]
-              assert nonce is not None, ""
+          for i, e in enumerate(events):
+              symbol = e["name"].split(".")
 
-              if not node_id or not nonce: return # Drop invalid frames
-
-              if e["name"] == "chat.request.start":
-                  self._open_frames[nonce] = {}
-                  self._nonce_prefill[nonce] = True 
-                  self._running_stats[nonce] = ReqStats(
-                      model=e["args"]["model"],
-                      tokenizer=e["args"]["tokenizer"], 
-                      run_id=run_id,
-                      nonce=nonce,
-                      ttft= e["args"]["t0"],
-                      itl=[ e["args"]["t0"], ],
-                      prompt_tokens=e["args"]["prompt_tokens"],
-                      total_tokens=e["args"]["prompt_tokens"],
-                      latencies={},
-                      latency_per_layer={},
-                      latency_per_shard={},
-                      assignment=None,
-                      compute_per_worker={},
-                      network_per_worker={},
-                      memory_per_worker={},
-                  )
-
-              # FIXME: We might receive other frames then "embed" from shards
-              #        so we need to handle the creation of this better
-              if nonce not in self._running_stats:
+              if e["type"] == 'B':
+                req_id = data.get("req_id")
+                if not req_id or not node_id: continue 
+                self._open_frames[req_id][node_id][e["name"]] = e
                 continue
+                
+              req_id = e["args"].get("req_id")
+              if not req_id: 
+                #print(f"Dropping {e}")
+                continue # Drop anonymous frames 
 
-              stats = self._running_stats[nonce]
+              if symbol[0] == "request":
+                  if symbol[1] == "start": # Start request, setup buffers and ingest staged frames
+                      self._req.append(req_id)
+                      self._open_frames[req_id] = {}
+                      self._req_prefill[req_id] = True 
+                      stats = ReqStats(
+                          model=e["args"]["model"],
+                          tokenizer=e["args"]["tokenizer"], 
+                          req_id=req_id,
+                          ttft= e["args"]["t0"],
+                          itl=[ e["args"]["t0"], ],
+                          prompt_tokens=e["args"]["prompt_tokens"],
+                          total_tokens=e["args"]["prompt_tokens"],
+                          latencies={},
+                          latency_per_layer={},
+                          latency_per_shard={},
+                          assignment=None,
+                          compute_per_worker={},
+                          network_per_worker={},
+                          memory_per_worker={},
+                          nodes=[],
+                      )
+                      self._running_stats[req_id] = stats 
 
-              if "node" not in e["args"]: 
-                if e["name"] == "chat.request.end":
-                  print(f"{e}")
-                  st_obj = self._running_stats[nonce]
-                  st_obj.generated_tokens = e["args"]["generated_tokens"]
-                  st_obj.total_tokens += e["args"]["generated_tokens"]
-                  print("Adding to stats")
-                  self._stats[nonce] = st_obj
-                  del self._running_stats[nonce]
-                  #del self._frames[node_id][nonce]
-                  # TODO: Handle latency of transfer back to API
+                      # Process all events in staging
+                      if req_id in self._staging:
+                        for pe in self._staging[req_id]:
+                          node_id = e["args"].get("node_id")
+                          if not node_id: continue 
+                          self._process_frame(pe, req_id, node_id, stats)
 
-                else:
-                  continue # Drop frames without "node"
+                        del self._staging[req_id]
+                      continue
 
-              node_id = e["args"]["node"]
-              if node_id not in self.nodes:
-                self.nodes.append(node_id)
-                stats.compute_per_worker[node_id] = 0.0
-                stats.network_per_worker[node_id] = 0.0
-                stats.memory_per_worker[node_id] = 0.0
+                  elif symbol[1] == "end": # Finish processing request
+                      st_obj = self._running_stats[req_id]
+                      st_obj.generated_tokens = e["args"]["generated_tokens"]
+                      st_obj.total_tokens += e["args"]["generated_tokens"]
+                      self._stats[req_id] = st_obj
+                      del self._running_stats[req_id]
+                      # TODO: Handle latency of transfer back to API
+                      continue
 
-              if e["name"] in self._memory_set:
-                stats.memory_per_worker[node_id] += e["args"]["ms"] 
+              if req_id in self._stats: continue # Already finidhed processing request
+              if req_id not in self._req:        # If unknown request, stage frames 
+                  if req_id not in self._staging:
+                    self._staging[req_id] = []
+                  self._staging[req_id].append(e)
+                  continue
 
-              if e["name"] == "network.rx": # Time in transport, ingress queue and ingress_worker
-                _cost = lambda e: e["args"]["inflight"] + e["args"]["inwait"] + e["args"]["ms"]
-                #TODO: change shard in metadata
+              #node_id = e["args"].get("node_id")
+              #if not node_id: return # Drop unknown node
 
-              if e["name"] == "compute.forward": 
-                try:
-                  _cost = lambda e: e["args"]["inwait"] + e["args"]["ms"] # compute queue + execution
-                  self._handle_round(e, nonce, stats, _cost)
-                except Exception as e:
-                  print(f"{e}")
+              stats = self._running_stats[req_id]
+              self._process_frame(e, req_id, node_id, stats)
 
-              if e["name"] in self._compute_set: # Aggregate for compute total
-                stats.compute_per_worker[node_id] += e["args"]["ms"] 
 
-              if e["name"] in self._network_set:
-                stats.network_per_worker[node_id] += e["args"]["ms"] 
+    def _process_frame(self, e: Any, req_id: str, node_id: str,  stats: ReqStats):
+      symbol = e["name"].split(".")
+      if node_id not in self.nodes: self.nodes.append(node_id)
+      if node_id not in stats.nodes:
+        stats.nodes.append(node_id)
+        stats.compute_per_worker[node_id] = 0.0
+        stats.network_per_worker[node_id] = 0.0
+        stats.memory_per_worker[node_id] = 0.0
 
-              if e["name"] in self._memory_set:
-                stats.memory_per_worker[node_id] += e["args"]["ms"] 
+      if symbol[0] == "compute":
+        if symbol[1] == "forward": 
+          try:
+            _cost = lambda e: e["args"]["inwait"] + e["args"]["ms"] 
+            self._handle_round(e, req_id, stats, _cost) # compute queue + execution
+          except Exception as e:
+            print(f"{e}")
+        stats.compute_per_worker[node_id] += e["args"]["ms"] 
+
+      elif symbol[0] == "network":
+        if symbol[1] == "rx": # Time in transport, ingress queue and ingress_worker
+          _cost = lambda e: e["args"]["inflight"] + e["args"]["inwait"] + e["args"]["ms"]
+          #TODO: change shard in metadata
+        stats.network_per_worker[node_id] += e["args"]["ms"] 
+
+      elif symbol[0] == "memory":
+        stats.memory_per_worker[node_id] += e["args"]["ms"] 
+      return
+
 
     # Handle cost aggregation of frames
-    def _handle_round(self, e: Any, nonce, stats: ReqStats, _cost_fnc: Any):
+    def _handle_round(self, e: Any, req_id, stats: ReqStats, _cost_fnc: Any):
       try:
-        if self._nonce_prefill[nonce]:
-          logger.error(f"TTFT: {stats.ttft}")
+        if self._req_prefill[req_id]:
           stats.ttft = (e["args"]["t0"] - stats.ttft) * 1000.0
-          self._nonce_prefill[nonce] = False
+          print(f"TTFT: {stats.ttft}")
+          self._req_prefill[req_id] = False
         else:
           if e["args"]["t0"] > 0.0:
             stats.itl[-1] = (e["args"]["t0"] - stats.itl[-1]) 
+            print(f"ITL: {e["args"]["t0"]} - {stats.itl[-1]}")
             stats.itl.append(e["args"]["t0"])
+          print(f"ITL: {stats.itl[-1]}")
       except Exception as ex:
         print(f"{ex}")
 
@@ -457,7 +430,7 @@ class StatsAggregator:
           return
         stats = self._stats[list(self._stats.keys())[-1]]
         #sys.stdout.write(f"\n Loaded model '{stats.model}'.\n")
-        sys.stdout.write(f"Performance stats for request '{stats.nonce}':\n\n")
+        sys.stdout.write(f"Performance stats for request '{stats.req_id}':\n\n")
         try:
           for tag, n, unit in fields:
             if tag == 0: # Native counter 

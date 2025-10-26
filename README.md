@@ -98,11 +98,21 @@ curl -X POST http://localhost:8080/v1/prepare_topology \
   }'
 ```
 
-Response will be the otpimal topology (as given by the solver) for the discovered devices.
+> [!TIP]
+> You can also use the topology preparation response later by saving it to a file:
+>
+> ```sh
+> # Save topology to a file
+> curl -X POST http://localhost:8080/v1/prepare_topology \
+>   -H "Content-Type: application/json" \
+>   -d '{"model": "Qwen/Qwen3-4B-MLX-4bit"}' | tee topology.json
+> ```
+
+Response will be the optimal topology (as given by the solver) for the discovered devices.
 
 > [!NOTE]
 >
-> Once the topology is prepared, you can fetch it after via the `/topology` endpoint:
+> Once the topology is prepared, you can fetch it anytime via the `/topology` endpoint:
 >
 > ```sh
 > curl http://localhost:8080/v1/topology \
@@ -119,7 +129,16 @@ Load the model on shards with prepared topology:
 curl -X POST http://localhost:8080/v1/load_model \
   -H "Content-Type: application/json" \
   -d $OUTPUT_FROM_PREPARE_TOPOLOGY
-```
+
+> [!TIP]
+> You can reuse the topology preparation response:
+>
+> ```sh
+> # Load model using saved topology
+> curl -X POST http://localhost:8080/v1/load_model \
+>   -H "Content-Type: application/json" \
+>   -d @topology.json
+> ```
 
 #### Chat Completions
 

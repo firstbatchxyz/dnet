@@ -174,7 +174,7 @@ class CommsMixin(RingShardNodeAttributes):
                 activation_msg = await self.activation_computed_queue.get()
                 with self.tracer.frame("network", "tx") as f:
                     if activation_msg.tx_enq_perf_t and self._profile:
-                        f.set("inwait", time.perf_counter() - activation_msg.tx_enq_t) 
+                        f.set("inwait", (time.perf_counter() - activation_msg.tx_enq_t)*1000) 
                         f.set("req_id", activation_msg.nonce)
                         f.set("node", self._instance_name)
                         q_wait_ms = (

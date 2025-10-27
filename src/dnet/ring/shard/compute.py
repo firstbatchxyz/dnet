@@ -395,11 +395,13 @@ class ComputeMixin(RingShardNodeAttributes):
                         pass
 
                 # Create and enqueue output message: either forward activations or finalize on end role
-                with self.tracer.frame("compute.thread", "grpc.send") as f:
+                with self.tracer.frame("network.tx", "send") as f:
                     f.set("req_id", activation_msg.nonce)
                     f.set("node", self._instance_name)
-                    nxt = last_layer + 1
-                    if nxt >= self.model_metadata.num_layers:  # End of model
+
+                nxt = last_layer + 1
+                if nxt >= self.model_metadata.num_layers:  # End of model
+                    with self.tracer.frame("compute.thread", "sampling") as f:
                         try:
                             with self._mlx_lock:
                                 y = self.model.normalize(x_cast)
@@ -492,33 +494,35 @@ class ComputeMixin(RingShardNodeAttributes):
                 except Exception:
                     output_msg.tx_enq_perf_t = 0.0
                 # Enqueue to appropriate asyncio TX queue from compute thread
-                try:
-                    if self._loop is not None:
-                        target_q = (
-                            self.activation_token_queue
-                            if output_msg.is_final
-                            else self.activation_computed_queue
+                with self.tracer.frame("network.tx", "enque") as f:
+                    output_msg.tx_enq_t = time.perf_counter()
+                    try:
+                        if self._loop is not None:
+                            target_q = (
+                                self.activation_token_queue
+                                if output_msg.is_final
+                                else self.activation_computed_queue
+                            )
+                            fut = asyncio.run_coroutine_threadsafe(
+                                target_q.put(output_msg), self._loop
+                            )
+                            fut.result()
+                        else:
+                            raise RuntimeError("Event loop not available for TX queue")
+                    except Exception as e:
+                        logger.error(
+                            "Failed to queue computed activation for sending: %s", e
                         )
-                        fut = asyncio.run_coroutine_threadsafe(
-                            target_q.put(output_msg), self._loop
-                        )
-                        fut.result()
-                    else:
-                        raise RuntimeError("Event loop not available for TX queue")
-                except Exception as e:
-                    logger.error(
-                        "Failed to queue computed activation for sending: %s", e
-                    )
 
-                # Clean up input resources
-                self.input_pool.release(activation_msg.pool_id)
+                    # Clean up input resources
+                    self.input_pool.release(activation_msg.pool_id)
 
-<<<<<<< HEAD
                 # Optional unload/evict after stage
                 with self.tracer.frame("compute.thread", "cleanup"):
+                    f.set("req_id", activation_msg.nonce)
+                    f.set("node", self._instance_name)
                     if self._mode != "sliding_fit":
                         if self._defer_unload:
-=======
                     # Clean up input resources
                     with self.tracer.frame("compute.thread", "cleanup") as f:
                         f.set("req_id", activation_msg.nonce)
@@ -527,15 +531,28 @@ class ComputeMixin(RingShardNodeAttributes):
                         # After queuing TX, schedule prefetch and eviction in the background
                         # to avoid stalling the handoff to the next shard.
                         try:
-                            self._prefetch_pause.set()
+                            while len(self._recent_windows) > max(1, int(getattr(self, "_resident_windows", 2))):
+                                old = self._recent_windows.pop(0)
+                                try:
+                                    evicted_cnt = self.weight_cache.evict_layers(old)
+                                except Exception:
+                                    evicted_cnt = 0
+                                try:
+                                    if hasattr(self.model, "unload_layers"):
+                                        self.model.unload_layers(old)  # type: ignore[attr-defined]
+                                        for lid in old:
+                                            self._bound_versions.pop(lid, None)
+                                except Exception:
+                                    pass
                         except Exception:
                             pass
-                        next_window = self._next_local_layers(last_layer, self.window_size)
-                        for nl in next_window:
-                            self._prefetch_to_ram(nl)
-                            self._enqueue_weight_prefetch(nl)
-                        if getattr(self, "_defer_unload", False):
->>>>>>> 6c40e99 (reformat frames)
+                    if getattr(self, "_resident_windows", 2) <= 1:
+                        try:
+                            evicted = self.weight_cache.evict_layers(window_layers)
+                            if hasattr(self.mode, "unload_layers"):
+                                self.model.unload_layers(window_layers)
+                        except Exception:
+                            pass
                             try:
                                 while len(self._recent_windows) > max(
                                     1, int(self._resident_windows)

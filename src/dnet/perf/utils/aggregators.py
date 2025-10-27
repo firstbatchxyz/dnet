@@ -348,6 +348,7 @@ class StatsAggregator:
                   elif symbol[1] == "round":
                     stats = self._running_stats[req_id]
                     stats._rounds_t0.append(e["args"]["t0"])
+                    continue
 
               if req_id in self._stats: continue # Already finidhed processing request
               if req_id not in self._req:        # If unknown request, stage frames 

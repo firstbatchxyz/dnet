@@ -27,6 +27,7 @@ class Llama3RingModel(BaseRingModel):
       raise RuntimeError(f"API Service doesn't handle layers")
 
     self.config = ModelArgs.from_dict(model_config)
+    self.config.quantization = model_config["quantization"] # lmao
     self.is_api_layer = is_api_layer
 
     self._converted_to_quantized = False
@@ -87,13 +88,15 @@ class Llama3RingModel(BaseRingModel):
 
   def quantize_layers(self):
     self.quantization = None 
+    logger.debug(f"{self.config}")
     if hasattr(self.config, "quantization"):
       self.quantization = getattr(self.config, "quantization")
     elif hasattr(self.config, "quantization_config"):
       self.quantization = getattr(self.config, "quantization_config")
 
+    logger.debug(f"QUANTIZING {self.quantization}")
     if self.quantization is not None:
-      bits = int(self.quantization.get("bits", 8))
+      bits = int(self.quantization.get("bits", 4))
       group = int(self.quantization.get("group_size", 64))
       try:
         from mlx.nn.layers.quantized import QuantizedEmbedding

@@ -386,11 +386,6 @@ class StatsAggregator:
           #TODO: change shard in metadata
         stats.network_per_worker[node_id] += e["args"]["ms"] 
 
-      elif symbol[0] == "memory":
-        print(f"MEMORY_PER_WORKER: {e["name"]} : {stats.memory_per_worker}")
-        stats.memory_per_worker[node_id] += e["args"]["ms"] 
-      else:
-        print(f"UNTRACKED: {e["name"]}")
       return
 
     def _compute_round_stats(self, stats):
@@ -403,7 +398,6 @@ class StatsAggregator:
         stats.itl[-1] = (rounds[i] - rounds[i-1]) * 1e-6
         stats.itl.append(rounds[i])
       stats.itl = stats.itl[:-1]
-      print(stats.itl)
 
     # Return data for total, per req, worker or model (maybe add per layer too?)
     def stats(

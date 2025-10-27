@@ -18,7 +18,8 @@ class Llama3RingModel(BaseRingModel):
     self, 
     model_config: Any,
     assigned_layers: Optional[List[int]] = [],
-    is_api_layer: bool = False
+    is_api_layer: bool = False,
+    shard_config: Optional[Any] = None,
   ):
     super().__init__()
 
@@ -154,7 +155,6 @@ class Llama3RingModel(BaseRingModel):
 
     layer = self.layers[local_idx]
     ret = self.layers[local_idx](x, mask, cache[local_idx] if local_idx < len(cache) else None)
-    logger.debug(f"Executed layer:{layer_idx} with output shape: {ret.shape}")
     return ret
 
   def load_weights(self, weights, strict=False):
@@ -199,3 +199,15 @@ class Llama3RingModel(BaseRingModel):
         logger.error(f"Failed to load weights: {e}")
         logger.error(f"Weight keys: {list(shard_weights.keys())}")
         raise
+
+  def unload_layers(self, layers: List[int]):
+    for l in layers:
+      local = self.abs_to_local[l]
+      for name, mod in self.layers[local].named_modules():
+        if name in ['self_attn', 'mlp']:
+          for pname in mod.parameters():
+            setattr(mod, pname, None)
+            logger.debug(f"Unloaded {pname}")
+        elif name in ['input_layernorm', 'post_attention_layernorm']:
+          mod.weight = None
+          logger.debug(f"Unloaded {name}")

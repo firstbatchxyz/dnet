@@ -1132,8 +1132,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         while self.running:
             try:
                 # Get activation from queue (blocks until available)
-                with self.tracer.frame("compute", "deque.wait"):
-                    activation_msg = self.activation_recv_queue.get(timeout=1.0)
+                activation_msg = self.activation_recv_queue.get(timeout=1.0)
 
                 # Process the activation
                 with self.tracer.frame("compute", "forward") as f: # NOTE: Symbol hardcoded for runtime stats

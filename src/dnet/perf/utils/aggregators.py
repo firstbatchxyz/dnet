@@ -223,6 +223,7 @@ class ReqStats:
   generated_tokens: int = -1   # Number of generated tokens per request (req_id: #)
   total_tokens: int = -1       # Total number of tokens processed
   nodes: List[str] = None      # Nodes that participated in computation
+  _rounds_t0: List[int] = None # Keep round times for post-processing
 
   latencies: List[List[str, str, str, int]] = None # List of inter-node latencies: [node0, node1, p50, 0.0]
   latency_per_layer: Dict[int, float] = None       # Map of {layer: 0.0} 
@@ -305,8 +306,8 @@ class StatsAggregator:
                           model=e["args"]["model"],
                           tokenizer=e["args"]["tokenizer"], 
                           req_id=req_id,
-                          ttft= e["args"]["t0"],
-                          itl=[ e["args"]["t0"], ],
+                          ttft=0.0,
+                          itl=[],
                           prompt_tokens=e["args"]["prompt_tokens"],
                           total_tokens=e["args"]["prompt_tokens"],
                           latencies={},
@@ -317,6 +318,7 @@ class StatsAggregator:
                           network_per_worker={},
                           memory_per_worker={},
                           nodes=[],
+                          _rounds_t0=[],
                       )
                       self._running_stats[req_id] = stats 
 
@@ -338,6 +340,10 @@ class StatsAggregator:
                       del self._running_stats[req_id]
                       # TODO: Handle latency of transfer back to API
                       continue
+
+                  elif symbol[1] == "round":
+                    stats = self._running_stats[req_id]
+                    stats._rounds_t0.append(e["args"]["t0"])
 
               if req_id in self._stats: continue # Already finidhed processing request
               if req_id not in self._req:        # If unknown request, stage frames 
@@ -364,12 +370,11 @@ class StatsAggregator:
 
       if symbol[0] == "compute":
         if symbol[1] == "forward": 
-          try:
-            _cost = lambda e: e["args"]["inwait"] + e["args"]["ms"] 
-            self._handle_round(e, req_id, stats, _cost) # compute queue + execution
-          except Exception as e:
-            print(f"{e}")
+          pass
+          #_cost = lambda e: e["args"]["inwait"] + e["args"]["ms"] 
+            # Defer stats compute until after we sort the times (async is kil)
         stats.compute_per_worker[node_id] += e["args"]["ms"] 
+        print(f"COMPUTE_PER_WORKER: {e["name"]} : {stats.compute_per_worker}")
 
       elif symbol[0] == "network":
         if symbol[1] == "rx": # Time in transport, ingress queue and ingress_worker
@@ -381,22 +386,17 @@ class StatsAggregator:
         stats.memory_per_worker[node_id] += e["args"]["ms"] 
       return
 
-
-    # Handle cost aggregation of frames
-    def _handle_round(self, e: Any, req_id, stats: ReqStats, _cost_fnc: Any):
-      try:
-        if self._req_prefill[req_id]:
-          stats.ttft = (e["args"]["t0"] - stats.ttft) * 1000.0
-          print(f"TTFT: {stats.ttft}")
-          self._req_prefill[req_id] = False
-        else:
-          if e["args"]["t0"] > 0.0:
-            stats.itl[-1] = (e["args"]["t0"] - stats.itl[-1]) 
-            print(f"ITL: {e["args"]["t0"]} - {stats.itl[-1]}")
-            stats.itl.append(e["args"]["t0"])
-          print(f"ITL: {stats.itl[-1]}")
-      except Exception as ex:
-        print(f"{ex}")
+    def _compute_round_stats(self, stats):
+      rounds = stats._rounds_t0 
+      #rounds.sort()
+      assert len(rounds) > 2, "Not enough data."
+      stats.ttft = (rounds[1] - rounds[0]) * 1e-6
+      stats.itl.append(rounds[1])
+      for i in range(1, len(rounds)):
+        stats.itl[-1] = (rounds[i] - rounds[i-1]) * 1e-6
+        stats.itl.append(rounds[i])
+      stats.itl = stats.itl[:-1]
+      print(stats.itl)
 
     # Return data for total, per req, worker or model (maybe add per layer too?)
     def stats(
@@ -429,6 +429,7 @@ class StatsAggregator:
           print("No tracked stats in memory. Track a request first.\n")
           return
         stats = self._stats[list(self._stats.keys())[-1]]
+        self._compute_round_stats(stats)
         #sys.stdout.write(f"\n Loaded model '{stats.model}'.\n")
         sys.stdout.write(f"Performance stats for request '{stats.req_id}':\n\n")
         try:
@@ -453,11 +454,11 @@ class StatsAggregator:
             elif tag == 1:
               match n:
                 case "tokens_per_second":
-                  tps = [ 1 / rt for rt in stats.itl ]
+                  tps = [ 1 / (rt/1000) for rt in stats.itl ]
                   #median = statistics.median(tps)
                   mean = sum(tps) / len(tps)
                   sys.stdout.write(f"{mean:.2f}".rjust(20)+" tok/s".rjust(5)+" \ttokens_per_second")
-                  sys.stdout.write(f"\t# {statistics.median(stats.itl):.3f} s/tok\n")
+                  sys.stdout.write(f"\t# {statistics.median(stats.itl)/1000:.3f} s/tok\n")
 
                 case "inter_token_latency":
                   assert len(stats.itl) > 1, "Not enough trace frames"

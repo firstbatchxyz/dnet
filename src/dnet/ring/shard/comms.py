@@ -232,7 +232,7 @@ class CommsMixin(RingShardNodeAttributes):
         try:
             logger.debug(f"Sending activation")
             if activation_msg.is_final:
-                with self.tracer.frame("grpc", "send_activation.final") as f:
+                with self.tracer.frame("network", "send_activation.final") as f:
                     f.set("req_id", activation_msg.nonce)
                     f.set("node", self._instance_name)
                     try:
@@ -271,7 +271,7 @@ class CommsMixin(RingShardNodeAttributes):
                             self.api_stub = shard_api_comm_pb2_grpc.ShardApiServiceStub( self.api_channel)
                             f.event("reset_api")
 
-                        with self.tracer.frame("grpc", "token_request") as fr:
+                        with self.tracer.frame("network", "token_request") as fr:
                             fr.set("req_id", activation_msg.nonce)
                             fr.set("node", self._instance_name)
                             try:
@@ -301,13 +301,16 @@ class CommsMixin(RingShardNodeAttributes):
 
             # FIXME: shaped var is a bit weird (is it np_array or mlx_array), @andthattoo shall check
             shaped = activation_msg.tensor
-            if shaped is None:
-                output_buffer = self.output_pool.get_buffer(activation_msg.pool_id)
-                if output_buffer is None:
-                    logger.error(
-                        "Failed to get output buffer %s", activation_msg.pool_id
-                    )
-                    return
+            with self.tracer.frame("gprc.send_activations.default", "get_buffer") as fr:
+                fr.set("req_id", activation_msg.nonce)
+                fr.set("node", self._instance_name)
+                if shaped is None:
+                    output_buffer = self.output_pool.get_buffer(activation_msg.pool_id)
+                    if output_buffer is None:
+                        logger.error(
+                            "Failed to get output buffer %s", activation_msg.pool_id
+                        )
+                        return
 
             if self._profile:
                 logger.info(

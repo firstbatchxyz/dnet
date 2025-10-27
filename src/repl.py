@@ -140,7 +140,8 @@ class REPL(cmd.Cmd):
         self.print_mdns_nodes()
         continue
       elif cmd.startswith("load"):
-        self.load_model()
+        model = "mlx-community/llama-3.3-70b-instruct-4bit"
+        self.load_model(model)
         continue
       elif cmd.startswith(("trace", ".trace")):
         self.do_trace(cmd.split(" "))
@@ -212,7 +213,8 @@ class REPL(cmd.Cmd):
       self.print_mdns_nodes()
       pass
     elif cmd[1] in ("auto", "build", "b"):
-      self.prepare_topo()
+      model = "mlx-community/llama-3.3-70b-instruct-4bit"
+      self.prepare_topo(model)
       pass
     elif cmd[1] == "setup":
       pass
@@ -520,8 +522,11 @@ class REPL(cmd.Cmd):
           f.set_result(ret)
       except BaseException as e:
         f.set_exception(e)
-    self._api_loop.call_soon_threadsafe(runner)
-    return f.result(timeout)
+    try:
+      self._api_loop.call_soon_threadsafe(runner)
+      return f.result(timeout)
+    except Exception as e:
+      raise 
 
   # ------- Trace aggregation helpers 
 
@@ -709,24 +714,55 @@ class REPL(cmd.Cmd):
     sys.stdout.write(f"Devices: {topo.devices}\n\n")
     # TODO: Better print here
 
-  def prepare_topo(self):
-    req = PrepareTopologyRequest(model="Qwen/Qwen3-4B-MLX-4bit")
+  def prepare_topo(self, model):
+    req = PrepareTopologyRequest(model=model)
     try:
-      topo = self.api_call("_handle_prepare_topology", req, timeout=30)
+      topo = self.api_call("_handle_prepare_topology", req, timeout=120)
     except Exception as e:
       dprint(f"Unable to create topology: {e}\n\n")
-      return
+      return False
     self.state.topo = topo
     self.print_topo(topo)
+    return True
 
-  def load_model(self):
-    req = APILoadModelRequest(model="Qwen/Qwen3-4B-MLX-4bit")
+  def load_model(self, model):
+    req = APILoadModelRequest(model=model)
     try:
       res = self.api_call("_handle_load_model", req, timeout=30)
+      return True 
     except Exception as e:
       dprint(f"Failed to load model: {e}\n\n")
-      return
+      return False
     
+  # ===== Handle chat
+ 
+  def do_chat(self, cmd):
+    model = "mlx-community/llama-3.3-70b-instruct-4bit"
+    if len(cmd) < 2:
+      if not self.state.model or self.state.model == "":
+        self.prompt_model()
+      if not self.state.topology:
+        if not self._prepare_topo(self.state.model):
+          raise RuntimeError("Unable to create topology.")
+      if not self.load_model(self.state.model):
+        raise RuntimeError("Unable to load model.")
+
+      while True:
+        prompt = input("\n> ")
+        prompt = self.format_prompt(prompt)
+        messages = prompt
+        req = ChatRequest(
+          messages=messages,
+          max_tokens=100,
+          temperature=0.7,
+          stream=True,
+        )
+
+        self.api_call("_handle_completion", req)
+        
+      # Start default chat with selected model
+      pass
+    pass
 
   # ===== Handle shutdown 
 

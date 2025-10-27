@@ -261,6 +261,7 @@ class StatsAggregator:
       self._req_round_finish: Dict[str, bool] = {}       # Track in-flight requests 
       self._req_prefill: Dict[str, bool] = {}            # Track if this request round is prefill
       self._open_frames: Dict[str, Dict[str, Dict[str, Any]]] = {}  
+      self._global_memory_per_worker: Dict[str, float] = {}
 
       # Staging environment for events that arrive before 
       # the request.start of the request they belong to
@@ -294,7 +295,10 @@ class StatsAggregator:
                 
               req_id = e["args"].get("req_id")
               if not req_id: 
-                #print(f"Dropping {e}")
+                if symbol[0] == "memory": # Global memory frames are not request-based
+                  if node_id not in self._global_memory_per_worker:
+                    self._global_memory_per_worker[node_id] = 0.0
+                  self._global_memory_per_worker[node_id] += e["args"]["ms"] 
                 continue # Drop anonymous frames 
 
               if symbol[0] == "request":
@@ -375,7 +379,6 @@ class StatsAggregator:
           #_cost = lambda e: e["args"]["inwait"] + e["args"]["ms"] 
             # Defer stats compute until after we sort the times (async is kil)
         stats.compute_per_worker[node_id] += e["args"]["ms"] 
-        print(f"COMPUTE_PER_WORKER: {e["name"]} : {stats.compute_per_worker}")
 
       elif symbol[0] == "network":
         if symbol[1] == "rx": # Time in transport, ingress queue and ingress_worker
@@ -384,7 +387,10 @@ class StatsAggregator:
         stats.network_per_worker[node_id] += e["args"]["ms"] 
 
       elif symbol[0] == "memory":
+        print(f"MEMORY_PER_WORKER: {e["name"]} : {stats.memory_per_worker}")
         stats.memory_per_worker[node_id] += e["args"]["ms"] 
+      else:
+        print(f"UNTRACKED: {e["name"]}")
       return
 
     def _compute_round_stats(self, stats):
@@ -477,14 +483,19 @@ class StatsAggregator:
                   pass
 
           for i, n in enumerate(self.nodes):
-            comp = stats.compute_per_worker[n]
-            net = stats.network_per_worker[n]
-            mem = stats.memory_per_worker[n]
-            total = comp + net + mem
-            sys.stdout.write(f"\n    node{i} [{n}]\n")
-            sys.stdout.write(f"{comp:.2f}".rjust(20)+"ms".ljust(5)+f"\tcompute_time   # [{(comp/total)*100:0.2f}%]\n")
-            sys.stdout.write(f"{net:.2f}".rjust(20)+"ms".ljust(5)+f"\tnetwork_time   # [{(net/total)*100:0.2f}%]\n")
-            sys.stdout.write(f"{mem:.2f}".rjust(20)+"ms".ljust(5)+f"\tmemory_time    # [{(mem/total)*100:0.2f}%]\n")
+            try:
+              comp = stats.compute_per_worker[n]
+              net = stats.network_per_worker[n]
+              req_mem = stats.memory_per_worker[n]
+              g_mem = self._global_memory_per_worker[n]
+              mem = req_mem + g_mem
+              total = comp + net + mem
+              sys.stdout.write(f"\n    node{i} [{n}]\n")
+              sys.stdout.write(f"{comp:.2f}".rjust(20)+"ms".ljust(5)+f"\tcompute_time   # [{(comp/total)*100:0.2f}%]\n")
+              sys.stdout.write(f"{net:.2f}".rjust(20)+"ms".ljust(5)+f"\tnetwork_time   # [{(net/total)*100:0.2f}%]\n")
+              sys.stdout.write(f"{mem:.2f}".rjust(20)+"ms".ljust(5)+f"\tmemory_time    # [{(mem/total)*100:0.2f}%]\n")
+            except Exception as e:
+              print(f"{e}")
 
         except Exception as e:
           logger.error(f"{e}")

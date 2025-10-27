@@ -56,7 +56,7 @@ class _Frame:
         self.t._emit({"type": "B", "name": self.name, "args": dict(self.attrs)})
         return self
     def __exit__(self, ex_type, ex, tb):
-        dt_ms = (time.time_ns() - self._t0) 
+        dt_ms = (time.time_ns() - self._t0) * 1e-6 
         self.attrs.update({"ms": round(dt_ms, 3), "exc": bool(ex), "t0": time.time_ns()})
         self.t._emit({"type": "E", "name": self.name, "args": self.attrs})
         return False

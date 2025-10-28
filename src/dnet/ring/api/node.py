@@ -7,7 +7,7 @@ import json
 from dataclasses import asdict
 from io import StringIO
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import httpx
 import mlx.core as mx
@@ -349,10 +349,9 @@ class RingApiNode:
         model_metadata = get_model_metadata(req.model)
 
         # Profile model
-        batch_sizes = [1, 2]  # TODO: make it configurable
-        sequence_length = 512  # TODO: make it configurable
+        batch_sizes = [1]
         model_profile = await self._profile_model(
-            req.model, batch_sizes, sequence_length
+            req.model, batch_sizes, req.seq_len
         )
 
         # Get shards from discovery
@@ -373,12 +372,12 @@ class RingApiNode:
             shard_profiles, thunderbolt_conns
         )
         solution = await self._run_solver(
-            shard_profiles, model_profile, optimized_device_name_order
+            shard_profiles, model_profile, optimized_device_name_order, req.kv_bits
         )
         shards_list = [shards[name] for name in optimized_device_name_order]
         layer_assignments = compute_layer_assignments(
             optimized_device_name_order, solution.w, solution.k, shards
-        )
+        ) #TODO: handle cases where k=1, w > n 
         self.topology = TopologyInfo(
             model=req.model,
             num_layers=model_metadata.num_layers,
@@ -514,7 +513,7 @@ class RingApiNode:
 
             # Bootstrap: run discovery-based prepare
             topology = await self._handle_prepare_topology(
-                PrepareTopologyRequest(model=req.model)
+                PrepareTopologyRequest(model=req.model, kv_bits=req.kv_bits, seq_len=req.seq_len)
             )
 
         model_to_load = topology.model
@@ -536,7 +535,7 @@ class RingApiNode:
                 ]
 
                 if instance not in shards:
-                    logger.warning(f"Shard {instance} not found in discovery")
+                    logger.warning("Shard %s not found in discovery", instance)
                     shard_statuses.append(
                         ShardLoadStatus(
                             instance=instance,
@@ -865,7 +864,7 @@ class RingApiNode:
             batch_sizes=batch_sizes,
             sequence_length=sequence_length,
         )
-        logger.info(f"Model profiling completed for {repo_id}.")
+        logger.info("Model profiling completed for %s.", repo_id)
         return load_model_profile_from_dict(asdict(model_profile_split))
 
     async def _collect_shard_profiles(
@@ -970,6 +969,7 @@ class RingApiNode:
         shard_profiles: Dict[str, DeviceProfile],
         model_profile: ModelProfile,
         device_order: List[str],
+        kv_bits: Literal["4bit", "8bit", "fp16"]
     ) -> HALDAResult:
         """Run distilp with model and device profiles.
 
@@ -995,6 +995,7 @@ class RingApiNode:
             model=model_profile,
             mip_gap=1e-4,
             plot=False,
+            kv_bits=kv_bits
         )
 
         logger.info(

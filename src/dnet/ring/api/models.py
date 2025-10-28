@@ -262,7 +262,6 @@ class RecieveResultRequest(BaseModel):
 
 class RecieveResultResponseModel(JSONResponse):
     """Response for result receipt."""
-
     pass
 
 
@@ -297,6 +296,8 @@ class PrepareTopologyRequest(BaseModel):
     """
 
     model: str = Field(..., description="Model name or HuggingFace repo ID")
+    kv_bits: Literal["4bit", "8bit", "fp16"] = Field(default="8bit", description="KV cache quantization")
+    seq_len: int = Field(default=512, description="Sequence length to optimize for")
     max_batch_exp: int = Field(
         default=2, description="Max batch size as power of 2 exponent"
     )
@@ -341,6 +342,18 @@ class APILoadModelRequest(BaseModel):
 
     model: Optional[str] = Field(
         default=None, description="Model name or HuggingFace repo ID (optional)"
+    )
+    kv_bits: Literal["4bit", "8bit", "fp16"] = Field(
+        default="8bit",
+        description="KV cache quantization level"
+    )
+    seq_len: int = Field(
+        default=512,
+        description="Sequence length to optimize for. Select this based on your use case."
+    )
+    batch_size: int = Field(
+        default=1,
+        description="Batch size to optimize for. Select this based on your use case."
     )
 
 

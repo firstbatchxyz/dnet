@@ -112,36 +112,23 @@ class RingApiNode:
         self.http_port = http_port
         self.grpc_port = grpc_port
 
-        # Model state (loaded dynamically)
         self.model_metadata: Optional[ModelMetadata] = None
         self.model: Optional[Any] = None
         self.tokenizer: Optional[Any] = None
         self.generate_step: Optional[Any] = None
         self.model_name: Optional[str] = None
-
-        # Topology state
         self.topology: Optional[TopologyInfo] = None
-
-        # API
         self.app = FastAPI()
         self.running = False
-
-        # Compression
         try:
             self._compression_pct = max(0.0, min(100.0, float(compression_pct)))
         except ValueError:
             self._compression_pct = 0.0
-
-        # gRPC
         self.http_server: Optional[Any] = None
         self.api_grpc_server: Optional[aio_grpc.Server] = None
         self.first_shard_channel: Optional[aio_grpc.Channel] = None
         self.first_shard_stub: Optional[DnetRingServiceStub] = None
-
-        # Discovery
         self.discovery = DnetP2P("lib/dnet-p2p/lib")
-
-        # Callback tracking
         self.pending_requests: Dict[str, asyncio.Future] = {}
 
         logger.info(
@@ -158,13 +145,8 @@ class RingApiNode:
         """
         self.running = True
 
-        # Start gRPC server for callbacks
         await self._start_grpc_server()
-
-        # Start discovery
         self._start_discovery()
-
-        # Start HTTP server (background)
         await self._start_http_server(shutdown_trigger)
         await asyncio.sleep(0.2)
 
@@ -179,7 +161,7 @@ class RingApiNode:
             instance,
             self.http_port,
             self.grpc_port,
-            is_manager=True,  # API is a manager
+            is_manager=True,
         )
         self.discovery.start()
         logger.info("Discovery service started for API node")
@@ -262,7 +244,6 @@ class RingApiNode:
 
         @self.app.get("/v1/devices")
         async def get_devices() -> JSONResponse:
-            """Get all discovered devices from mDNS."""
             devices = self.discovery.get_properties()
             devices_dict = {
                 service_name: device_props.model_dump()
@@ -274,7 +255,6 @@ class RingApiNode:
         async def prepare_topology(
             req: PrepareTopologyRequest,
         ) -> TopologyInfo:
-            """Prepare topology for a model."""
             try:
                 return await self._handle_prepare_topology(req)
             except Exception as e:
@@ -288,7 +268,6 @@ class RingApiNode:
         async def prepare_topology_manual(
             req: PrepareTopologyManualRequest,
         ) -> TopologyInfo:
-            """Prepare topology manually (no discovery)."""
             try:
                 return await self._handle_prepare_topology_manual(req)
             except Exception as e:
@@ -300,7 +279,6 @@ class RingApiNode:
 
         @self.app.post("/v1/load_model")
         async def load_model(req: APILoadModelRequest) -> APILoadModelResponse:
-            """Load model on shards with prepared topology."""
             try:
                 return await self._handle_load_model(req)
             except Exception as e:
@@ -312,7 +290,6 @@ class RingApiNode:
 
         @self.app.post("/v1/unload_model")
         async def unload_model() -> UnloadModelResponse:
-            """Unload model from all shards."""
             try:
                 return await self._handle_unload_model()
             except Exception as e:
@@ -349,7 +326,6 @@ class RingApiNode:
 
         @self.app.post("/v1/completions")
         async def completions(req: CompletionRequestModel):  # type: ignore
-            """Handle completion requests."""
             if req.stream:
                 return StreamingResponse(
                     self._stream_completion(req), media_type="text/event-stream"
@@ -386,7 +362,6 @@ class RingApiNode:
 
         logger.info("Discovered %d shards: %s", len(shards), list(shards.keys()))
 
-        # Collect shard profiles and thunderbolt connections
         shard_profiles, thunderbolt_conns = await self._collect_shard_profiles(
             shards,
             req.model,
@@ -394,26 +369,16 @@ class RingApiNode:
             req.max_batch_exp,
             batch_sizes,
         )
-
-        # Optimize device ordering to place Thunderbolt-connected devices adjacently
         optimized_device_name_order = optimize_device_ordering(
             shard_profiles, thunderbolt_conns
         )
-
-        # Run solver with optimized device ordering
         solution = await self._run_solver(
             shard_profiles, model_profile, optimized_device_name_order
         )
-        shards_list = [
-            shards[name] for name in optimized_device_name_order
-        ]  # shards ordered w.r.t to the solver
-
-        # Compute layer assignments, next service mapping, and prefetch windows
+        shards_list = [shards[name] for name in optimized_device_name_order]
         layer_assignments = compute_layer_assignments(
             optimized_device_name_order, solution.w, solution.k, shards
         )
-
-        # Store topology (can be GET'ed later)
         self.topology = TopologyInfo(
             model=req.model,
             num_layers=model_metadata.num_layers,
@@ -436,12 +401,10 @@ class RingApiNode:
         """Handle manual topology preparation without discovery."""
         logger.info("Preparing manual topology for model: %s", req.model)
 
-        # Validate unique device names
         device_names = [d.name for d in req.devices]
         if len(device_names) != len(set(device_names)):
             raise ValueError("Device names must be unique in manual topology")
 
-        # Normalize assignments and validate services
         # FIXME: may not need normalized array here, just use assignments
         services = set(device_names)
         normalized: List[LayerAssignment] = []
@@ -459,7 +422,6 @@ class RingApiNode:
                 )
             )
 
-        # Infer num_layers if not provided
         num_layers = req.num_layers
         if num_layers is None:
             flat = [layer for aa in normalized for rr in aa.layers for layer in rr]
@@ -467,7 +429,6 @@ class RingApiNode:
                 raise ValueError("No layers provided in assignments")
             num_layers = max(flat) + 1
 
-        # Build device properties from provided endpoints
         devices_props: List[DnetDeviceProperties] = []
         for d in req.devices:
             devices_props.append(
@@ -481,7 +442,6 @@ class RingApiNode:
                 )
             )
 
-        # If next_service missing and >1 device, compute simple ring by min layer
         # FIXME: may not need this edge case at all, probably redundant
         if any(a.next_service is None for a in normalized) and len(normalized) > 1:
             order = sorted(

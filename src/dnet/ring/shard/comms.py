@@ -392,7 +392,7 @@ class CommsMixin(RingShardNodeAttributes):
                             cast_ms,
                         )
 
-                    # Idle-only fastpath prefetch for inter-device overlap: after TX, warm next window
+                    # Idle prefetch next window (offload)
                     try:
                         if self._mode == "offload" and self.window_size > 0:
                             next_window = self._next_local_layers(
@@ -415,7 +415,7 @@ class CommsMixin(RingShardNodeAttributes):
                     "Final activation reached send path unexpectedly; sampling should occur on end shard."
                 )
 
-                # Sequential offload: no deferred prefetch to flush or resume
+                
 
                 # Clear scheduling at request end
                 # Sequential offload: prefetch state is unused

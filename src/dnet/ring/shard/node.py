@@ -243,28 +243,15 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             self._assigned_set = set(self._assigned_sorted)
 
             self.model_path = req.model_path
-            try:
-                logger.info(
-                    "[DIAG][LOAD] node=%s assigned_layers=%s _assigned_set_size(before)=%d",
-                    self.node_id,
-                    self.assigned_layers,
-                    len(self._assigned_set),
-                )
-            except Exception:
-                pass
-
             # Decide mode dynamically from assignment + requested window
             requested_w = int(max(1, int(req.window_size)))
             local_count = max(1, len(self.assigned_layers))
 
             self._mode = "fit" if requested_w >= local_count else "offload"
-            # Reset config for the selected mode (adaptive defaults per mode)
-            # If you need to override mxload_fastpath, set it via CLI/config before load.
             self.config = ShardConfig.for_mode(self._mode)
             self._resident_windows = int(
                 self.config.resident_windows
-            )  # Update resident windows
-            # Mode already selects sequential IO behavior when offload
+            )
             eff_window_size = (
                 local_count
                 if (self._mode == "fit")
@@ -377,9 +364,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                         self._prefetch_to_ram(lyr)
                         self._enqueue_weight_prefetch(lyr)
                 else:
-                    # In sequential offload, prepare the first window immediately so the
-                    # first activation does not pay cold IO. This blocks /load_model until
-                    # the window is resident, simplifying initial latency.
+                    # Prepare first window (offload)
                     self._prepared_window_layers = list(initial_window)
                     try:
                         await asyncio.get_running_loop().run_in_executor(

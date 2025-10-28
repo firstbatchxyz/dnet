@@ -355,7 +355,7 @@ class ComputeMixin(RingShardNodeAttributes):
 
                 # Clean up input resources
                 self.input_pool.release(activation_msg.pool_id)
-                # Sequential offload: do not schedule post-stage prefetch
+                
 
                 # Optional unload/evict after stage
                 if self._defer_unload:

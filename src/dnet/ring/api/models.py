@@ -309,7 +309,7 @@ class PrepareTopologyResponse(TopologyInfo):
 class ManualDevice(BaseModel):
     """Manual device specification for topology (no discovery)."""
 
-    name: str = Field(..., description="Unique service name for the device")
+    instance: str = Field(..., description="Name of the device")
     local_ip: str = Field(..., description="Reachable IP/host for the device")
     server_port: int = Field(..., description="Device HTTP port (for /load_model)")
     shard_port: int = Field(..., description="Device gRPC port (ring service)")
@@ -348,7 +348,7 @@ class APILoadModelRequest(BaseModel):
 class ShardLoadStatus(BaseModel):
     """Load status for a single shard."""
 
-    service_name: str = Field(..., description="Shard service name")
+    instance: str = Field(..., description="Shard name")
     success: bool = Field(..., description="Whether loading succeeded")
     layers_loaded: Optional[List[int]] = Field(
         None, description="Layers successfully loaded"
@@ -373,7 +373,7 @@ class APILoadModelResponse(BaseModel):
 class ShardUnloadStatus(BaseModel):
     """Unload status for a single shard."""
 
-    service_name: str = Field(..., description="Shard service name")
+    instance: str = Field(..., description="Shard name")
     success: bool = Field(..., description="Whether unloading succeeded")
     message: Optional[str] = Field(None, description="Status or error message")
 

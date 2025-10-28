@@ -6,12 +6,12 @@ from pydantic import BaseModel, Field
 class LayerAssignment(BaseModel):
     """Layer assignment for a single device in ring topology."""
 
-    service: str = Field(..., description="Target device service name")
+    instance: str = Field(..., description="Target device name")
     layers: List[List[int]] = Field(
         ..., description="Layer indices per round (k sublists)"
     )
-    next_service: Optional[str] = Field(
-        None, description="Next node service name in ring (null if connects to API)"
+    next_instance: Optional[str] = Field(
+        None, description="Next device name in ring (null if connects to API)"
     )
     window_size: int = Field(..., description="Window size for this device")
 

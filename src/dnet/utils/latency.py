@@ -35,7 +35,7 @@ class LatencyResults(BaseModel):
 
     results: Dict[str, DeviceLatencyResult] = Field(
         default_factory=dict,
-        description="Mapping of service names to their latency results",
+        description="Mapping of shard names to their latency results",
     )
 
 
@@ -51,7 +51,7 @@ def calculate_median_latency_seconds(
         Median latency in seconds, or None if no valid measurements found.
     """
     all_latencies = []
-    for service_name, result in latency_results.results.items():
+    for _instance, result in latency_results.results.items():
         for measurement in result.measurements:
             if measurement.success and measurement.latency_ms is not None:
                 all_latencies.append(measurement.latency_ms)

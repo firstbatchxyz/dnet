@@ -142,7 +142,7 @@ def compute_layer_assignments(
         shards: Discovered shards
 
     Returns:
-        Tuple of (layer assignments per device per round, next service per device in ring, prefetch window per device)
+        Tuple of (layer assignments per device per round, next instance per device in ring, prefetch window per device)
     """
     if len(solution_w) != len(shards) or len(device_names) != len(shards):
         raise ValueError(
@@ -170,40 +170,40 @@ def compute_layer_assignments(
         f"Assigned {current_layer} layers, expected {num_layers}"
     )
 
-    # Compute next service for each device in ring topology
+    # Compute next instance for each device in ring topology
     # In ring: dev1 -> dev2 -> ... -> devN -> dev1 (wraps around)
     # Each shard will detect when processing the final layer and send to API
-    next_service_map: Dict[str, Optional[str]] = {}
+    next_instance_map: Dict[str, Optional[str]] = {}
 
     if len(device_names) == 1:
         # Single device: forwards to itself in a loop
-        next_service_map[device_names[0]] = device_names[0]
+        next_instance_map[device_names[0]] = device_names[0]
         logger.info("Ring (single device): %s -> SELF (loops back)", device_names[0])
     else:
         # Multiple devices: each forwards to the next in the ring
-        for i, service_name in enumerate(device_names):
+        for i, instance in enumerate(device_names):
             if i < len(device_names) - 1:
                 # Forward to next device
-                next_service_map[service_name] = device_names[i + 1]
+                next_instance_map[instance] = device_names[i + 1]
             else:
                 # Last device wraps to first device
-                next_service_map[service_name] = device_names[0]
+                next_instance_map[instance] = device_names[0]
 
         # Log ring topology
-        for service_name in device_names:
-            logger.info("Ring: %s -> %s", service_name, next_service_map[service_name])
+        for instance in device_names:
+            logger.info("Ring: %s -> %s", instance, next_instance_map[instance])
 
     # Compute window size for each device: total_layers_per_device / k
     window_sizes: Dict[str, int] = {}
-    for service_name, rounds_layers in layer_assignments.items():
+    for instance, rounds_layers in layer_assignments.items():
         # Flatten to count total layers
         total_layers = sum(len(round_layers) for round_layers in rounds_layers)
         if total_layers > 0:
             window_size = max(1, total_layers // solution_k)
-            window_sizes[service_name] = window_size
+            window_sizes[instance] = window_size
             logger.info(
                 "Window size for %s: %d (total_layers=%d, k=%d)",
-                service_name,
+                instance,
                 window_size,
                 total_layers,
                 solution_k,
@@ -212,18 +212,17 @@ def compute_layer_assignments(
             # FIXME: how to handle?
             logger.error(
                 "No layers assigned to %s, setting window size to 1",
-                service_name,
+                instance,
             )
-            window_sizes[service_name] = 1
+            window_sizes[instance] = 1
 
     logger.info("Layer assignments (by rounds): %s", layer_assignments)
-    # return layer_assignments, next_service_map, window_size
 
     return [
         LayerAssignment(
-            service=name,
+            instance=name,
             layers=layer_assignments[name],
-            next_service=next_service_map[name],
+            next_instance=next_instance_map[name],
             window_size=window_sizes[name],
         )
         for name in device_names

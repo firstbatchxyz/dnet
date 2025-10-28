@@ -300,6 +300,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 prefetch_threads=self._prefetch_threads,
                 resident_windows=self._resident_windows,
                 use_mxload_fastpath=self.config.mxload_fastpath,
+                prefetch_mode=self.config.prefetch_mode,
             )
 
             # Load the model
@@ -378,9 +379,8 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             initial_window = self._assigned_sorted[: self.window_size]
             if not (self._warmup_completed and self._warmup_keep_flag):
                 if self._mode == "fit":
-                    for lyr in initial_window:
-                        self._prefetch_to_ram(lyr)
-                        self._enqueue_weight_prefetch(lyr)
+                    # Prefetch disabled in fit mode to avoid duplicate RAM usage
+                    pass
                 elif self._mode == "offload":
                     self._prepared_window_layers = list(initial_window)
                     try:
@@ -459,12 +459,21 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
 
             # Clear memory pools
             if self.weight_cache:
+                # Stop any in-flight prefetch and close layer manager resources
+                try:
+                    self.weight_cache.cancel_all_prefetch()
+                except Exception:
+                    pass
                 # Clear all cached weights
                 for layer_id in list(self._bound_versions.keys()):
                     try:
                         self.weight_cache.evict_layer(layer_id)
                     except Exception:
                         pass
+                try:
+                    self.weight_cache.layer_manager.close()
+                except Exception:
+                    pass
                 self.weight_cache = None
 
             self.input_pool = None
@@ -1372,7 +1381,8 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                     start_idx : start_idx + max(1, window)
                 ]
                 for wl in window_layers:
-                    if self._mode == "fit":
+                    # Prefetch disabled in fit mode; allow only when non-fit and enabled
+                    if self._mode != "fit" and self.config.prefetch_mode != "off":
                         self._prefetch_to_ram(wl)
                         self._enqueue_weight_prefetch(wl)
                 return JSONResponse(content={"prefetched": window_layers})

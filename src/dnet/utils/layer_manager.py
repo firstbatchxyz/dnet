@@ -2,7 +2,6 @@
 
 import ctypes
 import ctypes.util
-import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List
 
@@ -27,27 +26,12 @@ MADV_WILLNEED = 3  # Prefetch pages
 MADV_DONTNEED = 4  # Pages not needed
 
 
-# Prefetch policy control
+# Prefetch policy control (config-driven)
 # Modes:
-#   - "full": SEQUENTIAL + WILLNEED (default)
+#   - "full": SEQUENTIAL + WILLNEED
 #   - "sequential": SEQUENTIAL only (no WILLNEED)
 #   - "off": no madvise at all
 _VALID_PREFETCH_MODES = {"full", "sequential", "off"}
-_PREFETCH_MODE = os.getenv("RING_PREFETCH_MODE", "full").strip().lower()
-if _PREFETCH_MODE not in _VALID_PREFETCH_MODES:
-    _PREFETCH_MODE = "full"
-
-
-def get_prefetch_mode() -> str:
-    return _PREFETCH_MODE
-
-
-def set_prefetch_mode(mode: str) -> str:
-    global _PREFETCH_MODE
-    m = (mode or "").strip().lower()
-    if m in _VALID_PREFETCH_MODES:
-        _PREFETCH_MODE = m
-    return _PREFETCH_MODE
 
 
 class LayerManager:
@@ -65,6 +49,7 @@ class LayerManager:
         thread_pool_size: int = 2,
         *,
         use_mxload_fastpath: bool = False,
+        prefetch_mode: str = "off",
     ):
         """
         Args:
@@ -93,6 +78,9 @@ class LayerManager:
         # Only enable mx.load fast-path for explicitly repacked windows.
         # Default is False to avoid loading entire multi-layer shard files.
         self._use_mxload_fastpath = bool(use_mxload_fastpath)
+        # Config-driven prefetch mode
+        pm = (prefetch_mode or "off").strip().lower()
+        self._prefetch_mode = pm if pm in _VALID_PREFETCH_MODES else "off"
         logger.info(f"Initialized LLM manager with layers {self.assigned_layers}")
 
     def _memadvise_layer(self, layer_idx: int, memadvise: int) -> bool:
@@ -151,7 +139,7 @@ class LayerManager:
                     f"[PROFILE][PREFETCH-READ] layer={layer_idx} mode=mxload ms={dt_ms:.2f} (failed)"
                 )
                 return False
-        mode = get_prefetch_mode()
+        mode = self._prefetch_mode
         if mode == "off":
             # Skip any OS advice; treat as success for control flow
             dt_ms = (_time.perf_counter() - t0) * 1000.0

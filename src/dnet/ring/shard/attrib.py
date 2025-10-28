@@ -1,4 +1,4 @@
-from typing import Callable, Optional, Any
+from typing import Optional, Any
 from fastapi import FastAPI
 import grpc.aio as aio_grpc
 import asyncio

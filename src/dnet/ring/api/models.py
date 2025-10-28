@@ -296,8 +296,8 @@ class PrepareTopologyRequest(BaseModel):
     """
 
     model: str = Field(..., description="Model name or HuggingFace repo ID")
-    kv_bits: Literal["4bit", "8bit", "fp16"] = Field(default="8bit", description="KV cache quantization")
-    seq_len: int = Field(default=512, description="Sequence length to optimize for")
+    kv_bits: Literal["4bit", "8bit", "fp16"] = Field(default="4bit", description="KV cache quantization")
+    seq_len: int = Field(default=256, description="Sequence length to optimize for")
     max_batch_exp: int = Field(
         default=2, description="Max batch size as power of 2 exponent"
     )

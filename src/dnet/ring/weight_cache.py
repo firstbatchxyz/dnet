@@ -29,6 +29,7 @@ class WeightCache:
         *,
         resident_windows: int = 2,
         use_mxload_fastpath: bool = False,
+        prefetch_mode: str = "off",
     ):
         self.assigned_layers = assigned_layers
         # Resident budget: enforce up to N windows resident
@@ -47,6 +48,7 @@ class WeightCache:
             assigned_layers,
             thread_pool_size=int(prefetch_threads or 2),
             use_mxload_fastpath=bool(use_mxload_fastpath),
+            prefetch_mode=prefetch_mode,
         )
         self.lock = threading.Lock()
         # Track in-flight materializations so compute can wait on prefetch
@@ -169,6 +171,9 @@ class WeightCache:
         pages to speed up subsequent `get_weight` loads.
         """
         try:
+            # Respect config: skip entirely if prefetch is off
+            if self.layer_manager._prefetch_mode == "off":
+                return None
             # Avoid spamming prefetch for the same layer; reuse in-flight
             f = self.prefetch_futures.get(layer_id)
             if f is not None and not f.done():

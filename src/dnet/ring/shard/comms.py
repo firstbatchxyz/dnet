@@ -392,13 +392,16 @@ class CommsMixin(RingShardNodeAttributes):
                             cast_ms,
                         )
 
-                    # Idle prefetch next window (offload)
+                    # Idle I/O overlap for next window
                     try:
-                        if self._mode == "offload" and self.window_size > 0:
+                        if self.window_size > 0:
                             next_window = self._next_local_layers(
                                 activation_msg.layer_id, self.window_size
                             )
-                            if next_window:
+                            if not next_window:
+                                pass
+                            elif self._mode == "offload":
+                                # Offload: prepare arrays (mx.load fast-path + bind later)
                                 self._prepared_window_layers = list(next_window)
                                 loop = asyncio.get_running_loop()
                                 self._prepare_fut = loop.run_in_executor(
@@ -406,6 +409,10 @@ class CommsMixin(RingShardNodeAttributes):
                                     self._prepare_window_blocking,
                                     list(next_window),
                                 )
+                            elif self._mode == "sliding_fit" and self.config.prefetch_mode != "off":
+                                # Sliding-fit: light OS prefetch (SEQUENTIAL) without allocating arrays
+                                for lid in next_window:
+                                    self._prefetch_to_ram(lid)
                     except Exception:
                         pass
                 else:

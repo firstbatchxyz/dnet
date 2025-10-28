@@ -68,6 +68,9 @@ class ShardConfig:
     # Enable mx.load fast-path only for explicitly repacked files/windows.
     mxload_fastpath: bool = False
 
+    # Prefetch control: "off" | "sequential" | "full" (config-driven)
+    prefetch_mode: str = "off"
+
     # Activation pool sizes (MB)
     input_pool_mb: int = 512
     output_pool_mb: int = 512
@@ -86,6 +89,7 @@ class ShardConfig:
                 streaming=False,
                 compress=False,
                 mxload_fastpath=False,  # force mmap/madvise path; no mx.load
+                prefetch_mode="sequential",
                 input_pool_mb=256,
                 output_pool_mb=256,
             )
@@ -100,6 +104,7 @@ class ShardConfig:
                 streaming=False,
                 compress=False,
                 mxload_fastpath=True,  # Use mx.load fast-path with repacked per-layer/per-window files
+                prefetch_mode="off",
                 input_pool_mb=256,
                 output_pool_mb=256,
             )
@@ -113,6 +118,7 @@ class ShardConfig:
             streaming=True,
             compress=False,
             mxload_fastpath=False,
+            prefetch_mode="off",
             input_pool_mb=512,
             output_pool_mb=512,
         )

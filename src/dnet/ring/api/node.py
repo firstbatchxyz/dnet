@@ -391,7 +391,7 @@ class RingApiNode:
             assignments=layer_assignments,
             solution=asdict(solution),
         )
-
+        print(f"Topology solution: k {solution.k}, w {solution.w}, n {solution.n}, objective: {solution.obj_value}")
         logger.info(
             "Topology prepared: %d devices, %d layers",
             len(shards_list),

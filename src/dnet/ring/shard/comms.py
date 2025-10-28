@@ -402,7 +402,9 @@ class CommsMixin(RingShardNodeAttributes):
                                 self._prepared_window_layers = list(next_window)
                                 loop = asyncio.get_running_loop()
                                 self._prepare_fut = loop.run_in_executor(
-                                    self.executor, self._prepare_window_blocking, list(next_window)
+                                    self.executor,
+                                    self._prepare_window_blocking,
+                                    list(next_window),
                                 )
                     except Exception:
                         pass
@@ -414,8 +416,6 @@ class CommsMixin(RingShardNodeAttributes):
                 logger.error(
                     "Final activation reached send path unexpectedly; sampling should occur on end shard."
                 )
-
-                
 
                 # Clear scheduling at request end
                 # Sequential offload: prefetch state is unused
@@ -517,17 +517,16 @@ class CommsMixin(RingShardNodeAttributes):
         """
         latency_results_dict: dict[str, DeviceLatencyResult] = {}
 
-        for service_name, device_info in devices.items():
+        for instance, device_info in devices.items():
             # Skip measuring latency to ourselves
-            # FIXME: just equals check should suffice here?
-            if service_name.startswith(self.discovery.instance_name()):
-                logger.debug("Skipping latency measurement to self: %s", service_name)
+            if instance == self.discovery.instance_name():
+                logger.debug("Skipping latency measurement to self: %s", instance)
                 continue
 
             # Skip measuring latency to API (manager) devices
             if device_info.is_manager:
                 logger.debug(
-                    "Skipping latency measurement to manager/API: %s", service_name
+                    "Skipping latency measurement to manager/API: %s", instance
                 )
                 continue
 
@@ -535,27 +534,25 @@ class CommsMixin(RingShardNodeAttributes):
                 shard_port = device_info.shard_port
 
                 # Check for Thunderbolt connection
-                if service_name in thunderbolts:
-                    tb_data = thunderbolts[service_name]
-                    service_ip = tb_data.ip_addr
+                if instance in thunderbolts:
+                    tb_data = thunderbolts[instance]
+                    instance_tb_ip = tb_data.ip_addr
                     logger.info(
                         "Using Thunderbolt for %s at %s, connected to instance %s",
-                        service_name,
-                        service_ip,
+                        instance,
+                        instance_tb_ip,
                         tb_data.instance,
                     )
                 else:
                     # No Thunderbolt, use WiFi
-                    service_ip = device_info.local_ip
+                    instance_tb_ip = device_info.local_ip
 
-                if not shard_port or not service_ip:
-                    logger.warning(
-                        "No shard_port or local_ip for device %s", service_name
-                    )
+                if not shard_port or not instance_tb_ip:
+                    logger.warning("No shard_port or local_ip for device %s", instance)
                     continue
 
                 # Connect to target shard's gRPC server
-                target_address = f"{service_ip}:{shard_port}"
+                target_address = f"{instance_tb_ip}:{shard_port}"
                 channel = aio_grpc.insecure_channel(target_address)
                 from ...protos.dnet_ring_pb2_grpc import DnetRingServiceStub
 
@@ -607,19 +604,19 @@ class CommsMixin(RingShardNodeAttributes):
                     success=True,
                     error=None,
                 )
-                latency_results_dict[service_name] = result
+                latency_results_dict[instance] = result
 
                 # Close channel
                 await channel.close()
 
             except Exception as e:
-                logger.error("Error measuring latency to %s: %s", service_name, e)
+                logger.error("Error measuring latency to %s: %s", instance, e)
                 result = DeviceLatencyResult(
                     target_node_id=None,
                     success=False,
                     error=str(e),
                     measurements=[],
                 )
-                latency_results_dict[service_name] = result
+                latency_results_dict[instance] = result
 
         return LatencyResults(results=latency_results_dict)

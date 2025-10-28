@@ -151,7 +151,7 @@ class RingApiNode:
         await asyncio.sleep(0.2)
 
     def _start_discovery(self) -> None:
-        """Start mDNS discovery service."""
+        """Start discovery service."""
         from secrets import token_hex
         from socket import gethostname
 
@@ -246,8 +246,8 @@ class RingApiNode:
         async def get_devices() -> JSONResponse:
             devices = self.discovery.get_properties()
             devices_dict = {
-                service_name: device_props.model_dump()
-                for service_name, device_props in devices.items()
+                instance: device_props.model_dump()
+                for instance, device_props in devices.items()
             }
             return JSONResponse(content={"devices": devices_dict})
 
@@ -401,23 +401,23 @@ class RingApiNode:
         """Handle manual topology preparation without discovery."""
         logger.info("Preparing manual topology for model: %s", req.model)
 
-        device_names = [d.name for d in req.devices]
+        device_names = [d.instance for d in req.devices]
         if len(device_names) != len(set(device_names)):
             raise ValueError("Device names must be unique in manual topology")
 
         # FIXME: may not need normalized array here, just use assignments
-        services = set(device_names)
+        device_names = set(device_names)
         normalized: List[LayerAssignment] = []
         for assignment in req.assignments:
-            if assignment.service not in services:
+            if assignment.instance not in device_names:
                 raise ValueError(
-                    f"Assignment references unknown service: {assignment.service}"
+                    f"Assignment references unknown device: {assignment.instance}"
                 )
             normalized.append(
                 LayerAssignment(
-                    service=assignment.service,
+                    instance=assignment.instance,
                     layers=assignment.layers,
-                    next_service=assignment.next_service,
+                    next_instance=assignment.next_instance,
                     window_size=assignment.window_size,
                 )
             )
@@ -435,7 +435,7 @@ class RingApiNode:
                 DnetDeviceProperties(
                     is_manager=False,
                     is_busy=False,
-                    instance=d.name,
+                    instance=d.instance,
                     server_port=d.server_port,
                     shard_port=d.shard_port,
                     local_ip=d.local_ip,
@@ -443,7 +443,7 @@ class RingApiNode:
             )
 
         # FIXME: may not need this edge case at all, probably redundant
-        if any(a.next_service is None for a in normalized) and len(normalized) > 1:
+        if any(a.next_instance is None for a in normalized) and len(normalized) > 1:
             order = sorted(
                 normalized,
                 key=lambda aa: min([layer for rr in aa.layers for layer in rr])
@@ -451,14 +451,14 @@ class RingApiNode:
                 else (1 << 30),
             )
             ring_map = {
-                order[i].service: order[(i + 1) % len(order)].service
+                order[i].instance: order[(i + 1) % len(order)].instance
                 for i in range(len(order))
             }
             normalized = [
                 LayerAssignment(
-                    service=a.service,
+                    instance=a.instance,
                     layers=a.layers,
-                    next_service=a.next_service or ring_map.get(a.service),
+                    next_instance=a.next_instance or ring_map.get(a.instance),
                     window_size=a.window_size,
                 )
                 for a in normalized
@@ -527,7 +527,7 @@ class RingApiNode:
         shard_statuses: List[ShardLoadStatus] = []
         async with httpx.AsyncClient() as http_client:
             for assignment in assignments_to_use:
-                service_name = assignment.service
+                instance = assignment.instance
                 # Flatten layers for shard loading
                 layers = [
                     layer
@@ -535,11 +535,11 @@ class RingApiNode:
                     for layer in round_layers
                 ]
 
-                if service_name not in shards:
-                    logger.warning(f"Shard {service_name} not found in discovery")
+                if instance not in shards:
+                    logger.warning(f"Shard {instance} not found in discovery")
                     shard_statuses.append(
                         ShardLoadStatus(
-                            service_name=service_name,
+                            instance=instance,
                             success=False,
                             message="Shard not found in discovery",
                             layers_loaded=[],
@@ -547,19 +547,19 @@ class RingApiNode:
                     )
                     continue
 
-                shard_props = shards[service_name]
+                shard_props = shards[instance]
 
                 # Get next node address from next_service in ring (if provided)
                 next_shard = None
-                if assignment.next_service is not None:
-                    ns = assignment.next_service
+                if assignment.next_instance is not None:
+                    ns = assignment.next_instance
                     if ns in shards:
                         next_shard = shards[ns]
-                        logger.info("Shard %s next node in ring: %s", service_name, ns)
+                        logger.info("Shard %s next node in ring: %s", instance, ns)
                     else:
                         logger.info(
-                            "Shard %s next service %s not found; skipping ring hop",
-                            service_name,
+                            "Shard %s next instance %s not found; skipping ring hop",
+                            instance,
                             ns,
                         )
 
@@ -586,7 +586,7 @@ class RingApiNode:
 
                     shard_statuses.append(
                         ShardLoadStatus(
-                            service_name=service_name,
+                            instance=instance,
                             success=result.success,
                             message=result.message,
                             layers_loaded=result.layers_loaded,
@@ -594,17 +594,15 @@ class RingApiNode:
                     )
                     logger.info(
                         "Shard %s load result: success=%s (%s)",
-                        service_name,
+                        instance,
                         result.success,
                         result.message,
                     )
                 except Exception as e:
-                    logger.exception(
-                        "Error loading model on shard %s: %s", service_name, e
-                    )
+                    logger.exception("Error loading model on shard %s: %s", instance, e)
                     shard_statuses.append(
                         ShardLoadStatus(
-                            service_name=service_name,
+                            instance=instance,
                             success=False,
                             message=str(e),
                             layers_loaded=[],
@@ -649,7 +647,7 @@ class RingApiNode:
                 )
         else:
             failed_shards = [
-                status.service_name for status in shard_statuses if not status.success
+                status.instance for status in shard_statuses if not status.success
             ]
             logger.error("Failed to load model on shards: %s", failed_shards)
             return APILoadModelResponse(
@@ -688,7 +686,7 @@ class RingApiNode:
 
                     shard_statuses.append(
                         ShardUnloadStatus(
-                            service_name=shard.instance,
+                            instance=shard.instance,
                             success=result.get("success", False),
                             message=result.get("message", ""),
                         )
@@ -709,7 +707,7 @@ class RingApiNode:
                     )
                     shard_statuses.append(
                         ShardUnloadStatus(
-                            service_name=shard.instance,
+                            instance=shard.instance,
                             success=False,
                             message=f"Error: {str(e)}",
                         )
@@ -719,7 +717,7 @@ class RingApiNode:
         all_success = all(status.success for status in shard_statuses)
         if not all_success:
             failed_shards = [
-                status.service_name for status in shard_statuses if not status.success
+                status.instance for status in shard_statuses if not status.success
             ]
             logger.error(f"Failed to unload model on shards: {failed_shards}")
 
@@ -745,7 +743,7 @@ class RingApiNode:
             all_success = False
             shard_statuses.append(
                 ShardUnloadStatus(
-                    service_name="api",
+                    instance="api",
                     success=False,
                     message=f"API model unload error: {str(e)}",
                 )
@@ -770,7 +768,7 @@ class RingApiNode:
             return False
 
         # Pick the device whose assignment contains layer 0; fallback to index 0
-        start_service: str | None = None
+        start_instance: str | None = None
         try:
             for assignment in self.topology.assignments:
                 # Flatten round layers
@@ -780,17 +778,17 @@ class RingApiNode:
                     for layer in round_layers
                 ]
                 if 0 in flat:
-                    start_service = assignment.service
+                    start_instance = assignment.instance
                     break
         except Exception:
-            start_service = None
+            start_instance = None
 
-        # find the start device w.r.t service name
+        # find the start device w.r.t name
         start_device = None
-        if start_service is not None:
+        if start_instance is not None:
             try:
                 for dev in self.topology.devices:
-                    if dev.instance == start_service:
+                    if dev.instance == start_instance:
                         start_device = dev
                         break
             except Exception:

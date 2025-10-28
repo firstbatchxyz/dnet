@@ -116,7 +116,7 @@ class RingApiNode:
 
         self.model_metadata: Optional[ModelMetadata] = None
         self.model: Optional[BaseRingModel] = None
-        self.model_name: Optional[str] = None
+
         self.tokenizer: Optional[Any] = None
         self.generate_step: Optional[Any] = None
         self.topology: Optional[TopologyInfo] = None
@@ -228,21 +228,15 @@ class RingApiNode:
             return JSONResponse(
                 content={
                     "status": "ok",
-                    "model_loaded": self.model is not None,
-                    "model_name": self.model_name,
+                    "model": self.topology.model if self.topology else None,
                     "topology_configured": bool(self.topology),
                 }
             )
 
         @self.app.get("/v1/topology")
-        async def topology() -> JSONResponse:
+        async def topology() -> TopologyInfo:
             if self.topology:
-                return JSONResponse(
-                    content={
-                        "model": self.model_name,
-                        "topology": self.topology.model_dump(),
-                    }
-                )
+                return self.topology
             else:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -277,6 +271,7 @@ class RingApiNode:
         ) -> TopologyInfo:
             try:
                 return await self._handle_prepare_topology_manual(req)
+
             except Exception as e:
                 logger.exception("Error in /v1/prepare_topology_manual: %s", e)
                 raise HTTPException(
@@ -474,7 +469,7 @@ class RingApiNode:
         # Persist manual topology
         self.topology = TopologyInfo(
             model=req.model,
-            num_layers=int(num_layers),
+            num_layers=num_layers,
             devices=devices_props,
             assignments=normalized,
             solution={"source": "manual"},
@@ -500,31 +495,31 @@ class RingApiNode:
         # Decide model and assignments
         if self.topology:
             topology = self.topology
-
-            if req.model and req.model != self.model_name:
+            if topology.model:
                 logger.info(
                     "load_model request model %s overridden by topology model %s",
                     req.model,
-                    self.model_name,
+                    topology.model,
                 )
-                model_to_load = self.model_name
-        else:
-            # ensure model is given
-            if not req.model:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=(
-                        "No topology configured and no model provided. "
-                        "Call /v1/prepare_topology or /v1/prepare_topology_manual first, "
-                        "or include 'model' to bootstrap with discovery."
-                    ),
-                )
-
-            # Bootstrap: run discovery-based prepare
+                # use existing model from topology
+                model_to_load = topology.model
+            else:
+                model_to_load = req.model
+        elif req.model:
+            # prepare topology on-the-fly
             topology = await self._handle_prepare_topology(
                 PrepareTopologyRequest(model=req.model)
             )
             model_to_load = req.model
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "No topology configured and no model provided. "
+                    "Call /v1/prepare_topology or /v1/prepare_topology_manual first, "
+                    "or include 'model' to bootstrap with discovery."
+                ),
+            )
 
         assignments_to_use = topology.assignments
         shards = {dev.instance: dev for dev in topology.devices}
@@ -589,6 +584,7 @@ class RingApiNode:
                     ).model_dump()
 
                     # timeout is `None` because shards may actually be downloading weights for the first time
+                    # TODO: can we do this in a better way?
                     response = await http_client.post(url, json=payload, timeout=None)
                     result = ShardLoadModelResponse.model_validate_json(response.text)
 
@@ -621,7 +617,6 @@ class RingApiNode:
         if all(status.success for status in shard_statuses):
             try:
                 self.model_metadata = get_model_metadata(model_to_load)
-                self.model_name = model_to_load
 
                 # Load tokenizer
                 self.tokenizer = load_tokenizer(Path(model_to_load), {})
@@ -732,8 +727,9 @@ class RingApiNode:
             self.model = None  # the model instance
             self.tokenizer = None
             self.model_metadata = None
-            self.model_name = None
             self.generate_step = None
+
+            self.topology.model = None
 
             # Close first shard connection
             if self.first_shard_channel:
@@ -1171,6 +1167,7 @@ class RingApiNode:
         return await self._generate_response(
             nonce,
             text,
+            req.model,
             completion_reason,
             len(prompt),
             len(tokens),
@@ -1234,6 +1231,7 @@ class RingApiNode:
         self,
         nonce: str,
         text: str,
+        model: str,
         finish_reason: Optional[ChatCompletionReason] = None,
         prompt_token_count: Optional[int] = None,
         completion_token_count: Optional[int] = None,
@@ -1280,7 +1278,7 @@ class RingApiNode:
             ),
             metrics=metrics,
             created=int(time.time()),
-            model=self.model_name or "unknown",
+            model=model,
         )
 
     def _stream_chat(self, req: ChatRequestModel):

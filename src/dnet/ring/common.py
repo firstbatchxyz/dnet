@@ -19,6 +19,9 @@ class LayerAssignment(BaseModel):
 class TopologyInfo(BaseModel):
     """Stored topology information for the current model."""
 
+    model: Optional[str] = Field(
+        ..., description="Loaded model name or HuggingFace repo ID"
+    )
     num_layers: int = Field(..., description="Total number of layers in model")
     devices: List[DnetDeviceProperties] = Field(
         ..., description="Devices (in solver order)"

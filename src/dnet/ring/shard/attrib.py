@@ -1,4 +1,4 @@
-from typing import Callable, Optional, Any
+from typing import Callable, Literal, Optional, Any
 from fastapi import FastAPI
 import grpc.aio as aio_grpc
 import asyncio
@@ -87,3 +87,6 @@ class RingShardNodeAttributes:
     _enqueue_weight_prefetch: Callable[[int], None]
     _next_local_layers: Callable[[int, int], list[int]]
     _get_or_make_kv: Callable[[str], list]
+
+    _mode: Literal["fit", "offload"]
+    _compression_pct: float

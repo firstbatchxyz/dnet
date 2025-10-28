@@ -30,11 +30,11 @@ if __name__ == "__main__":
         print(response.text)
         exit(1)
 
-    # call `/load_model` endpoint with the response body
+    # call `/load_model` endpoint with the model
     print(f"Loading: {args.model}")
     response = requests.post(
         "http://localhost:8080/v1/load_model",
-        json=topology,
+        json={"model": args.model},
     )
     if response.status_code == 200:
         print("Model loaded successfully:")

@@ -40,6 +40,7 @@ from ...protos.shard_api_comm_pb2_grpc import (
 )
 
 from ...utils.logger import logger
+from ...utils.banner import print_startup_banner
 from ...utils.model import ModelMetadata, get_model_metadata
 from .utils import (
     create_generate_step_for_ring_with_grpc,
@@ -128,6 +129,12 @@ class RingApiNode:
         self.first_shard_stub: Optional[DnetRingServiceStub] = None
         self.discovery = DnetP2P("lib/dnet-p2p/lib")
         self.pending_requests: Dict[str, asyncio.Future] = {}
+
+        # Print ASCII art banner if available
+        try:
+            print_startup_banner()
+        except Exception:
+            pass
 
         logger.info(
             "API node initialized on HTTP port %s, gRPC port %s",
@@ -576,6 +583,7 @@ class RingApiNode:
                         warmup=True,
                         next_node=next_shard,
                         window_size=assignment.window_size,
+                        residency_size=assignment.residency_size,
                         total_layers=topology.num_layers,
                         api_callback_address=api_callback_address,
                     ).model_dump()

@@ -82,8 +82,15 @@ class RingShardNodeAttributes:
     next_node_channel: Optional[aio_grpc.Channel]
     next_node_stub: Optional[Any]
 
-    # shared methods
-    _prefetch_to_ram: Callable[[int], None]
-    _enqueue_weight_prefetch: Callable[[int], None]
-    _next_local_layers: Callable[[int, int], list[int]]
-    _get_or_make_kv: Callable[[str], list]
+    # shared methods (declared for type checking; implemented by mixins/node)
+    def _prefetch_to_ram(self, layer_id: int) -> None:  # pragma: no cover - interface stub
+        raise NotImplementedError
+
+    def _enqueue_weight_prefetch(self, layer_id: int) -> None:  # pragma: no cover - interface stub
+        raise NotImplementedError
+
+    def _next_local_layers(self, after_layer: int, count: int) -> list[int]:  # pragma: no cover - interface stub
+        raise NotImplementedError
+
+    def _get_or_make_kv(self, nonce: str) -> list:  # pragma: no cover - interface stub
+        raise NotImplementedError

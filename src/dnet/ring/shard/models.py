@@ -20,6 +20,9 @@ class ShardLoadModelRequest(BaseModel):
         default=None, description="Next shard in the ring"
     )
     window_size: int = Field(..., description="Window size (computed from k)")
+    residency_size: int = Field(
+        ..., description="Resident layers (n) allowed on GPU at once"
+    )
     api_callback_address: str = Field(
         ...,
         description="API callback address for final layer completion (gRPC host:port)",

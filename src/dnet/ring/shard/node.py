@@ -46,6 +46,7 @@ from ...utils.model import (
     load_lm_head,
 )
 from ...utils.logger import logger
+from ...utils.banner import print_startup_banner
 from .config import ShardConfig
 from ...utils.model import ModelMetadata, get_model_metadata
 from ...utils.time import utc_epoch_now
@@ -198,6 +199,12 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         self._kv_last_seen: Dict[str, float] = {}
         self._kv_ttl_s: float = max(1.0, float(self.config.kv_cache.kv_ttl_s))
 
+        # Print ASCII art banner if available
+        try:
+            print_startup_banner()
+        except Exception:
+            pass
+
         logger.info(
             "Shard node %s initialized with queue_size=%d",
             self.node_id,
@@ -246,18 +253,30 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             # Decide mode dynamically from assignment + requested window
             requested_w = int(max(1, int(req.window_size)))
             local_count = max(1, len(self.assigned_layers))
+            n_residency = int(max(1, int(req.residency_size)))
 
-            self._mode = "fit" if requested_w >= local_count else "offload"
-            self.config = ShardConfig.for_mode(self._mode)
-            self._resident_windows = int(
-                self.config.resident_windows
-            )
-            eff_window_size = (
-                local_count
-                if (self._mode == "fit")
-                else max(1, min(requested_w, local_count))
-            )
-            self.window_size = eff_window_size
+            if n_residency < requested_w:
+                self._mode = "sliding_fit"
+                self.config = ShardConfig.for_mode(self._mode)
+                self._resident_windows = int(self.config.resident_windows)
+                self.window_size = max(1, min(n_residency, local_count))
+                logger.info(
+                    "Node %s: sliding_fit enabled (m=%s, w=%s, n=%s) -> window_size=%s, resident_windows=%s",
+                    self.node_id,
+                    local_count,
+                    requested_w,
+                    n_residency,
+                    self.window_size,
+                    self._resident_windows,
+                )
+            else:
+                self._mode = "fit" if requested_w >= local_count else "offload"
+                self.config = ShardConfig.for_mode(self._mode)
+                self._resident_windows = int(self.config.resident_windows)
+                eff_window_size = (
+                    local_count if (self._mode == "fit") else max(1, min(requested_w, local_count))
+                )
+                self.window_size = eff_window_size
 
             logger.info(
                 "Node %s: Using prefetch window size: %d (requested=%s, local_count=%s, mode=%s). \n With mode: %s",
@@ -356,22 +375,19 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             elif req.warmup and self._mode != "fit":
                 logger.info("Warmup requested but skipped in offload mode on node %s", self.node_id)
 
-            # TODO: Make sure this is the right spot for prefetching
             initial_window = self._assigned_sorted[: self.window_size]
             if not (self._warmup_completed and self._warmup_keep_flag):
                 if self._mode == "fit":
                     for lyr in initial_window:
                         self._prefetch_to_ram(lyr)
                         self._enqueue_weight_prefetch(lyr)
-                else:
-                    # Prepare first window (offload)
+                elif self._mode == "offload":
                     self._prepared_window_layers = list(initial_window)
                     try:
                         await asyncio.get_running_loop().run_in_executor(
                             self.executor, self._prepare_window_blocking, list(initial_window)
                         )
                     except Exception:
-                        # Fallback: best-effort synchronous prepare if executor unavailable
                         self._prepare_window_blocking(list(initial_window))
 
             m = len(self._assigned_sorted)

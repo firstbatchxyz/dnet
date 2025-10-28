@@ -75,6 +75,20 @@ class ShardConfig:
     @staticmethod
     def for_mode(mode: str) -> "ShardConfig":
         m = (mode or "fit").strip().lower()
+        if m == "sliding_fit":
+            # Sequential intra-device windowing with strict residency cap and mmap path
+            return ShardConfig(
+                mode="sliding_fit",
+                resident_windows=1,
+                lazy_params=True,
+                wire_dtype="fp16",
+                warmup_windows=1,
+                streaming=False,
+                compress=False,
+                mxload_fastpath=False,  # force mmap/madvise path; no mx.load
+                input_pool_mb=256,
+                output_pool_mb=256,
+            )
         if m == "offload":
             # Focus on minimal RAM usage; allow on-demand reads
             return ShardConfig(

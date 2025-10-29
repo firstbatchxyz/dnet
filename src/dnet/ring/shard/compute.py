@@ -336,23 +336,25 @@ class ComputeMixin(RingShardNodeAttributes):
                     output_msg.tx_enq_perf_t = time.perf_counter()
                 except Exception:
                     output_msg.tx_enq_perf_t = 0.0
-                # Enqueue to asyncio TX queue from compute thread
+                # Enqueue to appropriate asyncio TX queue from compute thread
                 try:
                     if self._loop is not None:
+                        target_q = (
+                            self.activation_token_queue
+                            if output_msg.is_final
+                            else self.activation_computed_queue
+                        )
                         fut = asyncio.run_coroutine_threadsafe(
-                            self.activation_computed_queue.put(output_msg), self._loop
+                            target_q.put(output_msg), self._loop
                         )
                         fut.result(timeout=10)
                     else:
-                        # Fallback: try immediate put_nowait via a temporary loop context
-                        # (should not happen in practice)
                         raise RuntimeError("Event loop not available for TX queue")
                 except Exception as e:
                     logger.error(
                         "Failed to queue computed activation for sending: %s", e
                     )
-                    # nothing to release when using direct tensor path
-
+                
                 # Clean up input resources
                 self.input_pool.release(activation_msg.pool_id)
                 

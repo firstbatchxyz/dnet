@@ -116,6 +116,8 @@ class ShardConfig:
             wire_dtype="fp16",
             warmup_windows=1,
             streaming=True,
+            stream_backoff_s=0.1,
+            stream_idle_s=30.0,
             compress=False,
             mxload_fastpath=False,
             prefetch_mode="off",

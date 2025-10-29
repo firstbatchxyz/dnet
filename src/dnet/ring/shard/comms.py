@@ -189,6 +189,35 @@ class CommsMixin(RingShardNodeAttributes):
             except Exception as e:
                 logger.error("Send worker error: %s", e)
 
+    async def _send_token_worker(self):
+        """Dedicated worker for final token delivery to API.
+
+        Separating this from ring-forward sends avoids head-of-line blocking
+        when ring transport experiences retries/timeouts.
+        """
+        while self.running or (
+            hasattr(self, "activation_token_queue")
+            and not self.activation_token_queue.empty()
+        ):
+            try:
+                activation_msg = await self.activation_token_queue.get()
+                if activation_msg.tx_enq_perf_t and self._profile:
+                    q_wait_ms = (
+                        time.perf_counter() - activation_msg.tx_enq_perf_t
+                    ) * 1000.0
+                    logger.info(
+                        "[PROFILE][QUEUE-TX] node=%s nonce=%s wait_ms=%.3f size=%s",
+                        self.node_id,
+                        activation_msg.nonce,
+                        q_wait_ms,
+                        self.activation_token_queue.qsize(),
+                    )
+                await self._send_activation(activation_msg)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Token send worker error: %s", e)
+
     async def _send_activation(self, activation_msg: ActivationMessage):
         if not self.output_pool or not self.model_metadata:
             logger.error(
@@ -350,14 +379,36 @@ class CommsMixin(RingShardNodeAttributes):
                             ctx.disabled = True
 
                     if not stream_used:
+                        # In fit mode, avoid long unary stalls: use short deadline and min retries
+                        # Streaming should be the norm; unary is a quick safety valve only.
+                        ring_timeout = 3.0 if self._mode == "fit" else 30.0
+                        ring_retries = 1 if self._mode == "fit" else max(1, int(self._send_retries))
+                        # Emit a clear fallback log with reason/context
+                        if self._profile:
+                            if ctx is None:
+                                reason = "no_stream_ctx"
+                            elif not ctx.open:
+                                reason = "stream_closed"
+                            elif ctx.disabled:
+                                reason = "stream_disabled"
+                            else:
+                                reason = "enqueue_failed"
+                            logger.warning(
+                                "[STREAM->UNARY] node=%s nonce=%s reason=%s mode=%s timeout_s=%.1f retries=%d",
+                                self.node_id,
+                                activation_msg.nonce,
+                                reason,
+                                self._mode,
+                                ring_timeout,
+                                ring_retries,
+                            )
                         t0 = time.perf_counter()
-                        max_attempts = max(1, int(self._send_retries))
                         last_exc: Optional[Exception] = None
-                        for attempt in range(1, max_attempts + 1):
+                        for attempt in range(1, ring_retries + 1):
                             try:
                                 # FIXME: use response here?
                                 _ = await self.next_node_stub.SendActivation(
-                                    request, timeout=30.0
+                                    request, timeout=ring_timeout
                                 )  # type: ignore
                                 break
                             except grpc.aio.AioRpcError as e:  # type: ignore
@@ -371,7 +422,7 @@ class CommsMixin(RingShardNodeAttributes):
                                     logger.warning(
                                         "SendActivation attempt %s/%s failed (%s); reconnecting...",
                                         attempt,
-                                        max_attempts,
+                                        ring_retries,
                                         code.name,
                                     )
                                     await self._reconnect_next_node()

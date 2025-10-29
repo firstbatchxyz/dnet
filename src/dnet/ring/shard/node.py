@@ -142,7 +142,12 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
 
         # Queues for async processing
         self.activation_recv_queue: Queue[ActivationMessage] = Queue(maxsize=queue_size)
+        # Ring-forward queue (non-final frames)
         self.activation_computed_queue: asyncio.Queue[ActivationMessage] = (
+            asyncio.Queue(maxsize=queue_size)
+        )
+        # Token-delivery queue (final shard -> API)
+        self.activation_token_queue: asyncio.Queue[ActivationMessage] = (
             asyncio.Queue(maxsize=queue_size)
         )
         self.ingress_q: asyncio.Queue[dnet_ring_pb2.ActivationRequest] = asyncio.Queue(
@@ -1083,7 +1088,8 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
 
         self.background_tasks = [
             asyncio.create_task(self._ingress_worker()),
-            asyncio.create_task(self._send_worker()),
+            asyncio.create_task(self._send_worker()),  # ring-forward sends
+            asyncio.create_task(self._send_token_worker()),  # token sends
         ]
         # Start idle sweeper to close silent streams
         try:

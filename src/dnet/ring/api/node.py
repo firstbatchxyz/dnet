@@ -116,7 +116,6 @@ class RingApiNode:
         self.grpc_port = grpc_port
 
         self.model_metadata: Optional[ModelMetadata] = None
-        self.model: Optional[BaseRingModel] = None
         self.tokenizer: Optional[Any] = None
         self.generate_step: Optional[Any] = None
         self.topology: Optional[TopologyInfo] = None
@@ -742,7 +741,6 @@ class RingApiNode:
 
         # Unload API-side model components
         try:
-            self.model = None  # the model instance
             self.tokenizer = None
             self.model_metadata = None
             self.generate_step = None

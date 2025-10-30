@@ -183,59 +183,107 @@ class ComputeMixin(RingShardNodeAttributes):
                     self.weight_cache.decrease_reference(lid)
 
                 try:
-                    self._recent_windows.append(list(window_layers))
-                    if int(self._resident_windows) <= 1:
-                        old = self._recent_windows.pop(0)
-                        try:
-                            evicted_cnt = self.weight_cache.evict_layers(old)
-                        except Exception:
-                            evicted_cnt = 0
-                        try:
-                            if hasattr(self.model, "unload_layers"):
-                                self.model.unload_layers(old)  # type: ignore[attr-defined]
-                                for lid in old:
-                                    self._bound_versions.pop(lid, None)
-                        except Exception:
-                            pass
-                        if self._profile:
-                            try:
-                                logger.info(
-                                    "[PROFILE][UNLOAD-WINDOW] node=%s nonce=%s old_layers=%s evicted=%s keep_windows=%s",
-                                    self.node_id,
-                                    activation_msg.nonce,
-                                    old,
-                                    evicted_cnt,
-                                    self._resident_windows,
-                                )
-                            except Exception:
-                                pass
-                    else:
-                        if not self._defer_unload:
-                            while len(self._recent_windows) > max(1, int(self._resident_windows)):
-                                old = self._recent_windows.pop(0)
+                    # Sliding-fit delta swap: avoid whole-window churn. Maintain a single
+                    # resident set by evicting only the head of the previous window equal
+                    # to the size of the current (delta) window, then merging tail+current.
+                    if self._mode == "sliding_fit":
+                        if int(self._resident_windows) <= 1:
+                            if not self._recent_windows:
+                                # First window in token: seed resident set
+                                self._recent_windows.append(list(window_layers))
+                            else:
+                                prev = self._recent_windows.pop(0)
+                                # Compute delta size as the non-overlapping head of prev
                                 try:
-                                    evicted_cnt = self.weight_cache.evict_layers(old)
+                                    keep_tail = [x for x in prev if x in window_layers]
+                                except Exception:
+                                    keep_tail = []
+                                evict_len = max(0, len(prev) - len(keep_tail))
+                                evict_head = prev[:evict_len]
+                                try:
+                                    evicted_cnt = self.weight_cache.evict_layers(evict_head)
                                 except Exception:
                                     evicted_cnt = 0
                                 try:
                                     if hasattr(self.model, "unload_layers"):
-                                        self.model.unload_layers(old)  # type: ignore[attr-defined]
-                                        for lid in old:
+                                        self.model.unload_layers(evict_head)  # type: ignore[attr-defined]
+                                        for lid in evict_head:
                                             self._bound_versions.pop(lid, None)
                                 except Exception:
                                     pass
+                                combined = keep_tail + list(window_layers)
+                                self._recent_windows.append(combined)
                                 if self._profile:
                                     try:
                                         logger.info(
-                                            "[PROFILE][UNLOAD-WINDOW] node=%s nonce=%s old_layers=%s evicted=%s keep_windows=%s",
+                                            "[PROFILE][DELTA-SWAP] node=%s nonce=%s evict_head=%s keep_tail=%s add=%s evicted=%s",
                                             self.node_id,
                                             activation_msg.nonce,
-                                            old,
+                                            evict_head,
+                                            keep_tail,
+                                            window_layers,
                                             evicted_cnt,
-                                            self._resident_windows,
                                         )
                                     except Exception:
                                         pass
+                        else:
+                            # resident_windows>1 not expected in sliding_fit; fall back to seeding
+                            self._recent_windows.append(list(window_layers))
+                    else:
+                        # Original eviction policy for other modes
+                        self._recent_windows.append(list(window_layers))
+                        if int(self._resident_windows) <= 1:
+                            old = self._recent_windows.pop(0)
+                            try:
+                                evicted_cnt = self.weight_cache.evict_layers(old)
+                            except Exception:
+                                evicted_cnt = 0
+                            try:
+                                if hasattr(self.model, "unload_layers"):
+                                    self.model.unload_layers(old)  # type: ignore[attr-defined]
+                                    for lid in old:
+                                        self._bound_versions.pop(lid, None)
+                            except Exception:
+                                pass
+                            if self._profile:
+                                try:
+                                    logger.info(
+                                        "[PROFILE][UNLOAD-WINDOW] node=%s nonce=%s old_layers=%s evicted=%s keep_windows=%s",
+                                        self.node_id,
+                                        activation_msg.nonce,
+                                        old,
+                                        evicted_cnt,
+                                        self._resident_windows,
+                                    )
+                                except Exception:
+                                    pass
+                        else:
+                            if not self._defer_unload:
+                                while len(self._recent_windows) > max(1, int(self._resident_windows)):
+                                    old = self._recent_windows.pop(0)
+                                    try:
+                                        evicted_cnt = self.weight_cache.evict_layers(old)
+                                    except Exception:
+                                        evicted_cnt = 0
+                                    try:
+                                        if hasattr(self.model, "unload_layers"):
+                                            self.model.unload_layers(old)  # type: ignore[attr-defined]
+                                            for lid in old:
+                                                self._bound_versions.pop(lid, None)
+                                    except Exception:
+                                        pass
+                                    if self._profile:
+                                        try:
+                                            logger.info(
+                                                "[PROFILE][UNLOAD-WINDOW] node=%s nonce=%s old_layers=%s evicted=%s keep_windows=%s",
+                                                self.node_id,
+                                                activation_msg.nonce,
+                                                old,
+                                                evicted_cnt,
+                                                self._resident_windows,
+                                            )
+                                        except Exception:
+                                            pass
                 except Exception:
                     pass
 
@@ -360,48 +408,49 @@ class ComputeMixin(RingShardNodeAttributes):
                 
 
                 # Optional unload/evict after stage
-                if self._defer_unload:
-                    try:
-                        while len(self._recent_windows) > max(1, int(self._resident_windows)):
-                            old = self._recent_windows.pop(0)
-                            try:
-                                evicted_cnt = self.weight_cache.evict_layers(old)
-                            except Exception:
-                                evicted_cnt = 0
-                            try:
-                                if hasattr(self.model, "unload_layers"):
-                                    self.model.unload_layers(old)  # type: ignore[attr-defined]
-                                    for lid in old:
-                                        self._bound_versions.pop(lid, None)
-                            except Exception:
-                                pass
+                if self._mode != "sliding_fit":
+                    if self._defer_unload:
+                        try:
+                            while len(self._recent_windows) > max(1, int(self._resident_windows)):
+                                old = self._recent_windows.pop(0)
+                                try:
+                                    evicted_cnt = self.weight_cache.evict_layers(old)
+                                except Exception:
+                                    evicted_cnt = 0
+                                try:
+                                    if hasattr(self.model, "unload_layers"):
+                                        self.model.unload_layers(old)  # type: ignore[attr-defined]
+                                        for lid in old:
+                                            self._bound_versions.pop(lid, None)
+                                except Exception:
+                                    pass
+                                if self._profile:
+                                    logger.info(
+                                        "[PROFILE][UNLOAD-WINDOW] node=%s nonce=%s old_layers=%s evicted=%s keep_windows=%s (post-stage)",
+                                        self.node_id,
+                                        activation_msg.nonce,
+                                        old,
+                                        evicted_cnt,
+                                        self._resident_windows,
+                                    )
+                        except Exception:
+                            pass
+
+                    if self._resident_windows <= 1:
+                        try:
+                            evicted = self.weight_cache.evict_layers(window_layers)
+                            if hasattr(self.model, "unload_layers"):
+                                self.model.unload_layers(window_layers)  # type: ignore[attr-defined]
                             if self._profile:
                                 logger.info(
-                                    "[PROFILE][UNLOAD-WINDOW] node=%s nonce=%s old_layers=%s evicted=%s keep_windows=%s (post-stage)",
+                                    "[PROFILE][EVICT] node=%s nonce=%s layers=%s evicted=%s",
                                     self.node_id,
                                     activation_msg.nonce,
-                                    old,
-                                    evicted_cnt,
-                                    self._resident_windows,
+                                    window_layers,
+                                    evicted,
                                 )
-                    except Exception:
-                        pass
-
-                if self._resident_windows <= 1:
-                    try:
-                        evicted = self.weight_cache.evict_layers(window_layers)
-                        if hasattr(self.model, "unload_layers"):
-                            self.model.unload_layers(window_layers)  # type: ignore[attr-defined]
-                        if self._profile:
-                            logger.info(
-                                "[PROFILE][EVICT] node=%s nonce=%s layers=%s evicted=%s",
-                                self.node_id,
-                                activation_msg.nonce,
-                                window_layers,
-                                evicted,
-                            )
-                    except Exception:
-                        pass
+                        except Exception:
+                            pass
                 return
         except Exception as e:
             logger.exception("Error processing activation: %s", e)

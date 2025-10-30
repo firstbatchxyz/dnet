@@ -45,6 +45,9 @@ from ...utils.model import (
     load_final_norm,
     load_lm_head,
 )
+from ...utils.repack import ensure_repacked_for_layers
+from pathlib import Path
+import os
 from ...utils.logger import logger
 from ...utils.banner import print_startup_banner
 from .config import ShardConfig
@@ -292,6 +295,28 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 self.config.mode,
                 self._mode,
             )
+
+            # For sliding_fit/offload, repack only assigned layers and enable fast-path
+            if self._mode in {"sliding_fit", "offload"}:
+                try:
+                    t0_rep = time.perf_counter()
+                    repacked_dir, did_repack = ensure_repacked_for_layers(self.model_path, self._assigned_sorted)
+                    dt_rep_ms = (time.perf_counter() - t0_rep) * 1000.0
+                    self.model_path = str(repacked_dir)
+                    self.model_metadata = get_model_metadata(self.model_path)
+                    self.config.mxload_fastpath = True
+                    self.config.prefetch_mode = "off"
+                    # Always log repack decision and cost, regardless of profile flag
+                    logger.info(
+                        "[REPACK] node=%s dst=%s layers=%s repacked=%s ms=%.1f",
+                        self.node_id,
+                        self.model_path,
+                        len(self._assigned_sorted),
+                        int(did_repack),
+                        dt_rep_ms,
+                    )
+                except Exception as e:
+                    logger.warning("Node %s: Repack failed or skipped: %s", self.node_id, e)
 
             # Initialize memory pools with final config sizes
             self.input_pool = LayerAwareMemoryPool(total_memory_mb=int(self.config.input_pool_mb))
@@ -1394,6 +1419,55 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 return JSONResponse(content={"prefetched": window_layers})
             except Exception as e:
                 logger.error("/warm failed: %s", e)
+                return JSONResponse(status_code=500, content={"error": str(e)})
+
+        @self.app.post("/cleanup_repacked")
+        async def cleanup_repacked(request: Request) -> JSONResponse:  # type: ignore
+            """Delete repacked per-layer weights on this shard to free disk.
+
+            Body JSON (all fields optional):
+              - model_id: restrict cleanup to this model bucket
+              - all: when true, remove the entire repack directory base
+            """
+            import shutil
+            from ...utils.repack import _sanitize_model_id
+
+            try:
+                payload = await request.json()
+            except Exception:
+                payload = {}
+            model_id = (payload or {}).get("model_id")
+            all_flag = bool((payload or {}).get("all", False))
+
+            base_dir = Path(os.getenv("DNET_REPACK_DIR", "repacked_models"))
+            removed: list[str] = []
+
+            try:
+                if all_flag:
+                    if base_dir.exists():
+                        shutil.rmtree(base_dir, ignore_errors=True)
+                        removed.append(str(base_dir))
+                else:
+                    if model_id:
+                        safe = _sanitize_model_id(str(model_id))
+                        target = base_dir / safe
+                        if target.exists():
+                            shutil.rmtree(target, ignore_errors=True)
+                            removed.append(str(target))
+                    else:
+                        # Default: remove buckets for current model_path if it is an HF id
+                        try:
+                            if self.model_path:
+                                safe = _sanitize_model_id(self.model_path)
+                                target = base_dir / safe
+                                if target.exists():
+                                    shutil.rmtree(target, ignore_errors=True)
+                                    removed.append(str(target))
+                        except Exception:
+                            pass
+                return JSONResponse(content={"removed": removed})
+            except Exception as e:
+                logger.error("/cleanup_repacked failed: %s", e)
                 return JSONResponse(status_code=500, content={"error": str(e)})
 
     async def _profile_device(self, repo_id: str, max_batch_exp: int) -> dict:

@@ -34,8 +34,6 @@ from distilp import (
 )
 from distilp.components.dense_common import HALDAResult
 
-from dnet.ring.model.base import BaseRingModel
-
 from ...protos.dnet_ring_pb2_grpc import DnetRingServiceStub
 from ...protos.shard_api_comm_pb2_grpc import (
     add_ShardApiServiceServicer_to_server,

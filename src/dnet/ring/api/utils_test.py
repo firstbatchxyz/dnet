@@ -93,7 +93,7 @@ def test_optimize_device_ordering():
     assert abs(dev2_index - dev6_index) == 1
 
 
-def test_layer_assignments():
+def test_layer_assignments_triple():
     # the order here is important
     shard_order = ["dev1", "dev2", "dev3"]
     shards = {
@@ -129,3 +129,20 @@ def test_layer_assignments():
     assert assignments[2].layers == [[8, 9, 10, 11], [20, 21, 22, 23]]
     assert assignments[2].residency_size == 2
     assert assignments[2].next_instance == "dev1"  # wraps around
+
+
+def test_layer_assignments_single():
+    shard_order = ["dev1"]
+    shards = {
+        "dev1": DnetDeviceProperties(
+            instance="dev1", local_ip="192.168.0.1", server_port=0, shard_port=0
+        ),
+    }
+
+    assignments = compute_layer_assignments(shard_order, shards, [2], [2], 3)
+
+    # [0]: dev1
+    assert assignments[0].instance == "dev1"
+    assert assignments[0].layers == [[0, 1], [2, 3], [4, 5]]
+    assert assignments[0].residency_size == 2
+    assert assignments[0].next_instance == "dev1"  # wraps around

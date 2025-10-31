@@ -415,7 +415,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             else:
                 logger.warning("Node %s: No next node configured", self.node_id)
 
-            # Warmup only in fit mode; offload shards skip to avoid front-loading allocations
+            # Warmup: compile hot path and stabilize allocators before first request
             if req.warmup and self._mode == "fit":
                 loop = asyncio.get_running_loop()
                 try:
@@ -424,7 +424,12 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                     # Fall back to direct call if executor is unavailable
                     self._warmup_shard()
             elif req.warmup and self._mode != "fit":
-                logger.info("Warmup requested but skipped in offload mode on node %s", self.node_id)
+                # Offload/sliding-fit: perform a small, offload-safe warmup for the first window
+                loop = asyncio.get_running_loop()
+                try:
+                    await loop.run_in_executor(self.executor, self._warmup_shard_offload)
+                except Exception:
+                    self._warmup_shard_offload()
 
             initial_window = self._assigned_sorted[: self.window_size]
             if not (self._warmup_completed and self._warmup_keep_flag):
@@ -1215,7 +1220,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
 
         batch_size, seq_len = 1, 1
         hidden_size = self.model_metadata.model_config.get("hidden_size", 2560)
-        x = mx.zeros((batch_size, seq_len, hidden_size), dtype=mx.bfloat16)
+        x = mx.zeros((batch_size, seq_len, hidden_size), dtype=self._wire_mx_dtype)
         start_time = time.perf_counter()
 
         # Pause prefetch and ensure MLX ops are serialized during warmup
@@ -1273,6 +1278,74 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             self._compute_busy.clear()
         except Exception:
             pass
+
+    def _warmup_shard_offload(self):
+        """Offload-safe warmup: bind and execute exactly one window with real KV and wire dtype.
+
+        This compiles and runs the hot path once on the compute thread so the
+        serializer does not inherit lazy evaluation later. It avoids pinning
+        additional windows to keep peak VRAM stable.
+        """
+        logger.info("[WARMUP][OFFLOAD] Starting shard warmup (one window)")
+        if not self.model or not self.model_metadata or not self.weight_cache:
+            logger.warning("[WARMUP][OFFLOAD] No model loaded; skipping warmup")
+            return
+
+        # Build a minimal input that matches runtime dtype and shape
+        batch_size, seq_len = 1, 1
+        hidden_size = int(self.model_metadata.model_config.get("hidden_size", 2560))
+        x = mx.zeros((batch_size, seq_len, hidden_size), dtype=self._wire_mx_dtype)
+        kv = self._get_or_make_kv("__warm__")
+
+        t0_ms = time.perf_counter()
+        # Pause competing MLX ops and avoid unload during warmup
+        try:
+            self._compute_busy.set()
+        except Exception:
+            pass
+        prev_keep = self._warmup_keep_flag
+        self._warmup_keep_flag = True
+
+        try:
+            # Determine one window of local layers
+            if not self._assigned_sorted:
+                logger.info("[WARMUP][OFFLOAD] No local layers; skipping")
+                return
+            window_layers = self._assigned_sorted[: max(1, int(self.window_size) or 1)]
+
+            # Ensure weights are materialized and bound
+            weights_to_bind = {}
+            for lid in window_layers:
+                w = self.weight_cache.get_weight(lid)
+                if w:
+                    for k, v in w.items():
+                        weights_to_bind[k] = v
+            if weights_to_bind:
+                with self._mlx_lock:
+                    self.model.load_weights(list(weights_to_bind.items()), strict=False)
+
+            # Run the real compute path with KV and force execution now
+            with self._mlx_lock:
+                for lid in window_layers:
+                    x = self.model.apply_single_layer(lid, x, cache=kv)
+            try:
+                mx.eval(x)
+            except Exception:
+                pass
+
+            # Balance weight references; do not aggressively unload during warmup
+            for lid in window_layers:
+                self.weight_cache.decrease_reference(lid)
+
+            dt_ms = (time.perf_counter() - t0_ms) * 1000.0
+            logger.info("[WARMUP][OFFLOAD] Completed one window in %.2fms", dt_ms)
+            self._warmup_completed = True
+        finally:
+            self._warmup_keep_flag = prev_keep
+            try:
+                self._compute_busy.clear()
+            except Exception:
+                pass
 
     async def _start_http_server(self, shutdown_trigger: Any) -> None:
         """Start HTTP server.

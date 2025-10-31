@@ -226,8 +226,8 @@ class CommsMixin(RingShardNodeAttributes):
             )
             return
         try:
-            # Handle final token path (end-shard sampling)
             if activation_msg.is_final:
+                self._prepared_by_nonce.pop(activation_msg.nonce, None)
                 cb = activation_msg.callback_url or ""
                 parsed = urlparse(cb) if cb else None
                 t_rpc = time.perf_counter()
@@ -346,7 +346,12 @@ class CommsMixin(RingShardNodeAttributes):
                 if self.next_node_stub:
                     request = activation_msg.to_proto(data)
                     request.timestamp = utc_epoch_now()
-                    # Prefer streaming if enabled/available; fallback to unary
+                    if self._mode == "offload" and self.window_size > 0:
+                        next_window = self._next_local_layers(activation_msg.layer_id, self.window_size)
+                        if next_window:
+                            loop = asyncio.get_running_loop()
+                            fut = loop.run_in_executor(self.executor, self._prepare_window_blocking, list(next_window))
+                            self._prepared_by_nonce[activation_msg.nonce] = (list(next_window), fut)
                     stream_used = False
                     ctx = await self._ensure_stream(activation_msg.nonce)
                     if (
@@ -442,30 +447,6 @@ class CommsMixin(RingShardNodeAttributes):
                             rpc_ms,
                             cast_ms,
                         )
-
-                    # Idle I/O overlap for next window
-                    try:
-                        if self.window_size > 0:
-                            next_window = self._next_local_layers(
-                                activation_msg.layer_id, self.window_size
-                            )
-                            if not next_window:
-                                pass
-                            elif self._mode == "offload":
-                                # Offload: prepare arrays (mx.load fast-path + bind later)
-                                self._prepared_window_layers = list(next_window)
-                                loop = asyncio.get_running_loop()
-                                self._prepare_fut = loop.run_in_executor(
-                                    self.executor,
-                                    self._prepare_window_blocking,
-                                    list(next_window),
-                                )
-                            elif self._mode == "sliding_fit" and self.config.prefetch_mode != "off":
-                                # Sliding-fit: light OS prefetch (SEQUENTIAL) without allocating arrays
-                                for lid in next_window:
-                                    self._prefetch_to_ram(lid)
-                    except Exception:
-                        pass
                 else:
                     logger.error(
                         "Cannot forward activation - no next node configured; end shard should sample inline."

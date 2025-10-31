@@ -41,3 +41,4 @@ layer_weights/*
 .logs/
 bench_*
 repacked_weights/*
+repacked_models/*

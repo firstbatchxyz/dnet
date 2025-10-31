@@ -79,17 +79,15 @@ class ComputeMixin(RingShardNodeAttributes):
                     _tmp_layer += 1
                     processed += 1
 
-                # In sequential offload, if an idle prefetch for this exact window is in-flight,
-                # wait for it to complete so the window is resident before binding/compute.
-                if self._mode == "offload" and window_layers and (
-                    self._prepared_window_layers == window_layers
-                ):
-                    fut = self._prepare_fut
-                    if fut is not None:
-                        try:
-                            fut.result(timeout=30)
-                        except Exception:
-                            pass
+                if self._mode == "offload" and window_layers:
+                    prep = self._prepared_by_nonce.get(activation_msg.nonce)
+                    if prep is not None:
+                        layers, fut = prep
+                        if layers == window_layers and fut is not None:
+                            try:
+                                fut.result(timeout=30)
+                            except Exception:
+                                pass
 
                 # In sliding_fit with a single resident window, proactively evict only the
                 # non-needed head from the current resident set before loading new weights.
@@ -217,11 +215,10 @@ class ComputeMixin(RingShardNodeAttributes):
                 last_layer = (
                     window_layers[-1] if window_layers else activation_msg.layer_id
                 )
-                # Ensure compute is complete before any cache/eviction ops
-                # try:
-                #    mx.eval(x)
-                # except Exception:
-                #    pass
+                try:
+                    mx.eval(x)
+                except Exception:
+                    pass
                 if self._profile:
                     t_comp_done = time.perf_counter()
                     logger.info(

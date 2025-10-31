@@ -121,8 +121,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         self.input_pool: Optional[LayerAwareMemoryPool] = None
         self.output_pool: Optional[LayerAwareMemoryPool] = None
         self.weight_cache: Optional[WeightCache] = None
-        self._prepared_window_layers: list[int] = []
-        self._prepare_fut = None
+        self._prepared_by_nonce: Dict[str, tuple[list[int], Any]] = {}
 
         # Offloading/config-derived params
         self._resident_windows = int(self.config.resident_windows)
@@ -435,21 +434,17 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 except Exception:
                     self._warmup_shard_offload()
 
-            initial_window = self._assigned_sorted[: self.window_size]
-            if not (self._warmup_completed and self._warmup_keep_flag):
-                if self._mode == "fit":
-                    # Prefetch disabled in fit mode to avoid duplicate RAM usage
-                    pass
-                elif self._mode == "offload":
-                    self._prepared_window_layers = list(initial_window)
-                    try:
-                        await asyncio.get_running_loop().run_in_executor(
-                            self.executor,
-                            self._prepare_window_blocking,
-                            list(initial_window),
-                        )
-                    except Exception:
-                        self._prepare_window_blocking(list(initial_window))
+            if self._mode == "offload" and not (self._warmup_completed and self._warmup_keep_flag):
+                initial_window = self._assigned_sorted[: self.window_size]
+                try:
+                    fut = asyncio.get_running_loop().run_in_executor(
+                        self.executor,
+                        self._prepare_window_blocking,
+                        list(initial_window),
+                    )
+                    await fut
+                except Exception:
+                    self._prepare_window_blocking(list(initial_window))
 
             m = len(self._assigned_sorted)
             if m > 0:

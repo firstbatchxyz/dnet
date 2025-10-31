@@ -244,7 +244,6 @@ class LayerManager:
 
         if self._use_mxload_fastpath and info and (len(fnames) == 1):
             try:
-                # Transient per-file load: pick only keys for this layer
                 collected = 0
                 for fname in fnames:
                     d = mx.load(fname)
@@ -259,13 +258,12 @@ class LayerManager:
                             continue
                         data[get_model_layer_name(layer_idx, suffix)] = v
                         collected += 1
-                # If nothing matched (unexpected), fall back to per-tensor path
                 if collected == 0:
                     data.clear()
                     raise RuntimeError("mxload keys not found for layer")
+                mx.eval(*data.values())
                 return data
             except Exception:
-                # Fall back to default path on any error
                 data.clear()
         
         # Default path: mmap-based per-tensor load

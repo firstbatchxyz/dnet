@@ -227,7 +227,19 @@ class CommsMixin(RingShardNodeAttributes):
             return
         try:
             if activation_msg.is_final:
-                self._prepared_by_nonce.pop(activation_msg.nonce, None)
+                try:
+                    if self._mode == "offload" and self.window_size > 0:
+                        first_window = self._assigned_sorted[: self.window_size]
+                        if first_window:
+                            loop = asyncio.get_running_loop()
+                            fut = loop.run_in_executor(
+                                self.executor,
+                                self._prepare_window_blocking,
+                                list(first_window),
+                            )
+                            self._prepared_by_nonce[activation_msg.nonce] = (list(first_window), fut)
+                except Exception:
+                    pass
                 cb = activation_msg.callback_url or ""
                 parsed = urlparse(cb) if cb else None
                 t_rpc = time.perf_counter()
@@ -348,10 +360,15 @@ class CommsMixin(RingShardNodeAttributes):
                     request.timestamp = utc_epoch_now()
                     if self._mode == "offload" and self.window_size > 0:
                         next_window = self._next_local_layers(activation_msg.layer_id, self.window_size)
+                        loop = asyncio.get_running_loop()
                         if next_window:
-                            loop = asyncio.get_running_loop()
                             fut = loop.run_in_executor(self.executor, self._prepare_window_blocking, list(next_window))
                             self._prepared_by_nonce[activation_msg.nonce] = (list(next_window), fut)
+                        else:
+                            first_window = self._assigned_sorted[: self.window_size]
+                            if first_window:
+                                fut = loop.run_in_executor(self.executor, self._prepare_window_blocking, list(first_window))
+                                self._prepared_by_nonce[activation_msg.nonce] = (list(first_window), fut)
                     stream_used = False
                     ctx = await self._ensure_stream(activation_msg.nonce)
                     if (

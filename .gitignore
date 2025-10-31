@@ -40,3 +40,4 @@ layer_weights/*
 .ruff_cache/
 .logs/
 bench_*
+repacked_weights/*

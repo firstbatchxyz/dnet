@@ -183,9 +183,10 @@ class ComputeMixin(RingShardNodeAttributes):
                     self.weight_cache.decrease_reference(lid)
 
                 try:
-                    # Sliding-fit delta swap: avoid whole-window churn. Maintain a single
-                    # resident set by evicting only the head of the previous window equal
-                    # to the size of the current (delta) window, then merging tail+current.
+                    # Sliding-fit delta swap: maintain a single resident set by evicting
+                    # only what's needed to fit the next window into the budget. Prefer
+                    # keeping the tail of the previous window so we don't thrash weights
+                    # that are likely to be reused.
                     if self._mode == "sliding_fit":
                         if int(self._resident_windows) <= 1:
                             if not self._recent_windows:
@@ -193,13 +194,18 @@ class ComputeMixin(RingShardNodeAttributes):
                                 self._recent_windows.append(list(window_layers))
                             else:
                                 prev = self._recent_windows.pop(0)
-                                # Compute delta size as the non-overlapping head of prev
+                                # Compute minimal eviction to fit the new window into budget.
+                                # Budget equals window_size when resident_windows == 1.
                                 try:
-                                    keep_tail = [x for x in prev if x in window_layers]
+                                    budget = max(1, int(self.window_size) or 1)
                                 except Exception:
-                                    keep_tail = []
-                                evict_len = max(0, len(prev) - len(keep_tail))
-                                evict_head = prev[:evict_len]
+                                    budget = max(1, int(self.window_size))
+
+                                curr = list(window_layers)
+                                prev_only = [x for x in prev if x not in curr]
+                                keep_quota = max(0, budget - len(curr))
+                                keep_tail = prev_only[-keep_quota:] if keep_quota > 0 else []
+                                evict_head = [x for x in prev_only if x not in set(keep_tail)]
                                 try:
                                     evicted_cnt = self.weight_cache.evict_layers(evict_head)
                                 except Exception:
@@ -211,7 +217,7 @@ class ComputeMixin(RingShardNodeAttributes):
                                             self._bound_versions.pop(lid, None)
                                 except Exception:
                                     pass
-                                combined = keep_tail + list(window_layers)
+                                combined = list(keep_tail) + curr
                                 self._recent_windows.append(combined)
                                 if self._profile:
                                     try:

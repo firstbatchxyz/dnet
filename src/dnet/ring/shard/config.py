@@ -79,7 +79,7 @@ class ShardConfig:
     def for_mode(mode: str) -> "ShardConfig":
         m = (mode or "fit").strip().lower()
         if m == "sliding_fit":
-            # Sequential intra-device windowing with strict residency cap and mmap path
+            # Sequential intra-device windowing with strict residency cap.
             return ShardConfig(
                 mode="sliding_fit",
                 resident_windows=1,
@@ -88,8 +88,8 @@ class ShardConfig:
                 warmup_windows=1,
                 streaming=False,
                 compress=False,
-                mxload_fastpath=False,  # force mmap/madvise path; no mx.load
-                prefetch_mode="sequential",
+                mxload_fastpath=True,
+                prefetch_mode="off",
                 input_pool_mb=256,
                 output_pool_mb=256,
             )

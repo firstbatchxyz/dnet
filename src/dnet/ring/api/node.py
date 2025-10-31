@@ -33,6 +33,7 @@ from distilp import (
     load_device_profile_from_dict,
 )
 from distilp.components.dense_common import HALDAResult
+from ..observability import load_settings
 
 from ...protos.dnet_ring_pb2_grpc import DnetRingServiceStub
 from ...protos.shard_api_comm_pb2_grpc import (
@@ -308,6 +309,27 @@ class RingApiNode:
                     detail=str(e),
                 ) from e
 
+        @self.app.post("/v1/cleanup_repacked")
+        async def cleanup_repacked(body: Dict[str, Any] | None = None) -> JSONResponse:  # type: ignore
+            """Ask all shards to delete repacked per-layer weights to free disk.
+
+            Body JSON (all fields optional):
+              - model_id: restrict cleanup to this model bucket
+              - all: when true, remove the entire repack directory base
+            """
+            payload = body or {}
+            shards = self._get_shards_from_discovery()
+            results: Dict[str, Any] = {}
+            async with httpx.AsyncClient() as http_client:
+                for name, props in shards.items():
+                    url = f"http://{props.local_ip}:{props.server_port}/cleanup_repacked"
+                    try:
+                        resp = await http_client.post(url, json=payload, timeout=30.0)
+                        results[name] = resp.json()
+                    except Exception as e:
+                        results[name] = {"error": str(e)}
+            return JSONResponse(content={"results": results})
+
         @self.app.post("/v1/chat/completions")
         async def chat_completions(
             req: ChatRequestModel,
@@ -395,14 +417,31 @@ class RingApiNode:
         shards_list = [shards[name] for name in optimized_device_name_order]
         self.topology = TopologyInfo(
             model=req.model,
+            kv_bits=req.kv_bits,
             num_layers=model_metadata.num_layers,
             devices=shards_list,
             assignments=layer_assignments,
             solution=asdict(solution),
         )
-        print(
-            f"Topology solution: k {solution.k}, w {solution.w}, n {solution.n}, objective: {solution.obj_value}"
-        )
+
+        # Optional, detailed solver print when profiling is enabled
+        try:
+            obs = load_settings()
+            if obs.enabled:
+                dev_order = ", ".join(optimized_device_name_order)
+                logger.info(
+                    "[SOLUTION] k=%s; devices=[%s]; w=%s; n=%s; obj=%s; total_layers=%s",
+                    solution.k,
+                    dev_order,
+                    list(solution.w),
+                    list(solution.n),
+                    solution.obj_value,
+                    model_metadata.num_layers,
+                )
+        except Exception:
+            pass
+        print(f"Topology solution: k {solution.k}, w {solution.w}, n {solution.n}, objective: {solution.obj_value}")
+
         logger.info(
             "Topology prepared: %d devices, %d layers",
             len(shards_list),
@@ -487,6 +526,7 @@ class RingApiNode:
         self.topology = TopologyInfo(
             model=req.model,
             num_layers=num_layers,
+            kv_bits=req.kv_bits,
             devices=devices_props,
             assignments=normalized,
             solution={"source": "manual"},
@@ -512,6 +552,16 @@ class RingApiNode:
         # Decide model and assignments
         if self.topology:
             topology = self.topology
+            
+            # Always use kv_bits from topology; log if caller asked for different
+            kv_bits_use = topology.kv_bits
+            if req.kv_bits != kv_bits_use:
+                logger.info(
+                    "load_model request kv_bits %s overridden by topology kv_bits %s",
+                    req.kv_bits,
+                    kv_bits_use,
+                )
+            
             if topology.model:
                 logger.info(
                     "load_model request model %s overridden by topology model %s",
@@ -547,6 +597,7 @@ class RingApiNode:
                     "or include 'model' to bootstrap with discovery."
                 ),
             )
+            kv_bits_use = topology.kv_bits
 
         assignments_to_use = topology.assignments
         shards = {dev.instance: dev for dev in topology.devices}
@@ -608,6 +659,7 @@ class RingApiNode:
                         window_size=assignment.window_size,
                         residency_size=assignment.residency_size,
                         total_layers=topology.num_layers,
+                        kv_bits=kv_bits_use,
                         api_callback_address=api_callback_address,
                     ).model_dump()
 

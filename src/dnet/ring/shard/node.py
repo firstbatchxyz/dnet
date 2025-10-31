@@ -45,6 +45,9 @@ from ...utils.model import (
     load_final_norm,
     load_lm_head,
 )
+from ...utils.repack import ensure_repacked_for_layers
+from pathlib import Path
+import os
 from ...utils.logger import logger
 from ...utils.banner import print_startup_banner
 from .config import ShardConfig
@@ -293,6 +296,48 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 self._mode,
             )
 
+            # KV cache settings from API request (always provided)
+            kv = (req.kv_bits or "").strip().lower()
+            if kv == "4bit":
+                self.config.kv_cache.mode = "4bit"
+                self.config.kv_cache.bits = 4
+            elif kv == "8bit":
+                self.config.kv_cache.mode = "8bit"
+                self.config.kv_cache.bits = 8
+            else:
+                # fp16 (or default): not quantized; bits value unused by make_cache
+                self.config.kv_cache.mode = "fp16"
+                self.config.kv_cache.bits = max(1, int(self.config.kv_cache.bits or 8))
+            logger.info(
+                "Node %s: KV cache configured: mode=%s bits=%s group=%s",
+                self.node_id,
+                self.config.kv_cache.mode,
+                self.config.kv_cache.bits,
+                self.config.kv_cache.group_size,
+            )
+
+            # For sliding_fit/offload, repack only assigned layers and enable fast-path
+            if self._mode in {"sliding_fit", "offload"}:
+                try:
+                    t0_rep = time.perf_counter()
+                    repacked_dir, did_repack = ensure_repacked_for_layers(self.model_path, self._assigned_sorted)
+                    dt_rep_ms = (time.perf_counter() - t0_rep) * 1000.0
+                    self.model_path = str(repacked_dir)
+                    self.model_metadata = get_model_metadata(self.model_path)
+                    self.config.mxload_fastpath = True
+                    self.config.prefetch_mode = "off"
+                    # Always log repack decision and cost, regardless of profile flag
+                    logger.info(
+                        "[REPACK] node=%s dst=%s layers=%s repacked=%s ms=%.1f",
+                        self.node_id,
+                        self.model_path,
+                        len(self._assigned_sorted),
+                        int(did_repack),
+                        dt_rep_ms,
+                    )
+                except Exception as e:
+                    logger.warning("Node %s: Repack failed or skipped: %s", self.node_id, e)
+
             # Initialize memory pools with final config sizes
             self.input_pool = LayerAwareMemoryPool(
                 total_memory_mb=int(self.config.input_pool_mb)
@@ -374,7 +419,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             else:
                 logger.warning("Node %s: No next node configured", self.node_id)
 
-            # Warmup only in fit mode; offload shards skip to avoid front-loading allocations
+            # Warmup: compile hot path and stabilize allocators before first request
             if req.warmup and self._mode == "fit":
                 loop = asyncio.get_running_loop()
                 try:
@@ -383,10 +428,12 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                     # Fall back to direct call if executor is unavailable
                     self._warmup_shard()
             elif req.warmup and self._mode != "fit":
-                logger.info(
-                    "Warmup requested but skipped in offload mode on node %s",
-                    self.node_id,
-                )
+                # Offload/sliding-fit: perform a small, offload-safe warmup for the first window
+                loop = asyncio.get_running_loop()
+                try:
+                    await loop.run_in_executor(self.executor, self._warmup_shard_offload)
+                except Exception:
+                    self._warmup_shard_offload()
 
             initial_window = self._assigned_sorted[: self.window_size]
             if not (self._warmup_completed and self._warmup_keep_flag):
@@ -1179,7 +1226,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
 
         batch_size, seq_len = 1, 1
         hidden_size = self.model_metadata.model_config.get("hidden_size", 2560)
-        x = mx.zeros((batch_size, seq_len, hidden_size), dtype=mx.bfloat16)
+        x = mx.zeros((batch_size, seq_len, hidden_size), dtype=self._wire_mx_dtype)
         start_time = time.perf_counter()
 
         # Pause prefetch and ensure MLX ops are serialized during warmup
@@ -1237,6 +1284,74 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             self._compute_busy.clear()
         except Exception:
             pass
+
+    def _warmup_shard_offload(self):
+        """Offload-safe warmup: bind and execute exactly one window with real KV and wire dtype.
+
+        This compiles and runs the hot path once on the compute thread so the
+        serializer does not inherit lazy evaluation later. It avoids pinning
+        additional windows to keep peak VRAM stable.
+        """
+        logger.info("[WARMUP][OFFLOAD] Starting shard warmup (one window)")
+        if not self.model or not self.model_metadata or not self.weight_cache:
+            logger.warning("[WARMUP][OFFLOAD] No model loaded; skipping warmup")
+            return
+
+        # Build a minimal input that matches runtime dtype and shape
+        batch_size, seq_len = 1, 1
+        hidden_size = int(self.model_metadata.model_config.get("hidden_size", 2560))
+        x = mx.zeros((batch_size, seq_len, hidden_size), dtype=self._wire_mx_dtype)
+        kv = self._get_or_make_kv("__warm__")
+
+        t0_ms = time.perf_counter()
+        # Pause competing MLX ops and avoid unload during warmup
+        try:
+            self._compute_busy.set()
+        except Exception:
+            pass
+        prev_keep = self._warmup_keep_flag
+        self._warmup_keep_flag = True
+
+        try:
+            # Determine one window of local layers
+            if not self._assigned_sorted:
+                logger.info("[WARMUP][OFFLOAD] No local layers; skipping")
+                return
+            window_layers = self._assigned_sorted[: max(1, int(self.window_size) or 1)]
+
+            # Ensure weights are materialized and bound
+            weights_to_bind = {}
+            for lid in window_layers:
+                w = self.weight_cache.get_weight(lid)
+                if w:
+                    for k, v in w.items():
+                        weights_to_bind[k] = v
+            if weights_to_bind:
+                with self._mlx_lock:
+                    self.model.load_weights(list(weights_to_bind.items()), strict=False)
+
+            # Run the real compute path with KV and force execution now
+            with self._mlx_lock:
+                for lid in window_layers:
+                    x = self.model.apply_single_layer(lid, x, cache=kv)
+            try:
+                mx.eval(x)
+            except Exception:
+                pass
+
+            # Balance weight references; do not aggressively unload during warmup
+            for lid in window_layers:
+                self.weight_cache.decrease_reference(lid)
+
+            dt_ms = (time.perf_counter() - t0_ms) * 1000.0
+            logger.info("[WARMUP][OFFLOAD] Completed one window in %.2fms", dt_ms)
+            self._warmup_completed = True
+        finally:
+            self._warmup_keep_flag = prev_keep
+            try:
+                self._compute_busy.clear()
+            except Exception:
+                pass
 
     async def _start_http_server(self, shutdown_trigger: Any) -> None:
         """Start HTTP server.
@@ -1345,7 +1460,8 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 logger.info(
                     f"HTTP /load_model: model={req.model_path}, layers={req.layers}, "
                     f"next_node={req.next_node or 'none'}, window_size={req.window_size}, "
-                    f"total_layers={req.total_layers}, api_callback={req.api_callback_address or 'none'}"
+                    f"total_layers={req.total_layers}, kv_bits={req.kv_bits or 'default'}, "
+                    f"api_callback={req.api_callback_address or 'none'}"
                 )
                 result = await self.load_model(req)
                 return result
@@ -1403,6 +1519,55 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 return JSONResponse(content={"prefetched": window_layers})
             except Exception as e:
                 logger.error("/warm failed: %s", e)
+                return JSONResponse(status_code=500, content={"error": str(e)})
+
+        @self.app.post("/cleanup_repacked")
+        async def cleanup_repacked(request: Request) -> JSONResponse:  # type: ignore
+            """Delete repacked per-layer weights on this shard to free disk.
+
+            Body JSON (all fields optional):
+              - model_id: restrict cleanup to this model bucket
+              - all: when true, remove the entire repack directory base
+            """
+            import shutil
+            from ...utils.repack import _sanitize_model_id
+
+            try:
+                payload = await request.json()
+            except Exception:
+                payload = {}
+            model_id = (payload or {}).get("model_id")
+            all_flag = bool((payload or {}).get("all", False))
+
+            base_dir = Path(os.getenv("DNET_REPACK_DIR", "repacked_models"))
+            removed: list[str] = []
+
+            try:
+                if all_flag:
+                    if base_dir.exists():
+                        shutil.rmtree(base_dir, ignore_errors=True)
+                        removed.append(str(base_dir))
+                else:
+                    if model_id:
+                        safe = _sanitize_model_id(str(model_id))
+                        target = base_dir / safe
+                        if target.exists():
+                            shutil.rmtree(target, ignore_errors=True)
+                            removed.append(str(target))
+                    else:
+                        # Default: remove buckets for current model_path if it is an HF id
+                        try:
+                            if self.model_path:
+                                safe = _sanitize_model_id(self.model_path)
+                                target = base_dir / safe
+                                if target.exists():
+                                    shutil.rmtree(target, ignore_errors=True)
+                                    removed.append(str(target))
+                        except Exception:
+                            pass
+                return JSONResponse(content={"removed": removed})
+            except Exception as e:
+                logger.error("/cleanup_repacked failed: %s", e)
                 return JSONResponse(status_code=500, content={"error": str(e)})
 
     async def _profile_device(self, repo_id: str, max_batch_exp: int) -> dict:

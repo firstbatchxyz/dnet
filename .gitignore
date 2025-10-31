@@ -39,3 +39,4 @@ layer_weights/*
 .DS_Store
 .ruff_cache/
 .logs/
+bench_*

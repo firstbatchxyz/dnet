@@ -1,6 +1,6 @@
 """Shard models for dnet ring topology endpoints."""
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 from pydantic import BaseModel, Field
 from dnet_p2p import DnetDeviceProperties, ThunderboltConnection
 
@@ -22,6 +22,9 @@ class ShardLoadModelRequest(BaseModel):
     window_size: int = Field(..., description="Window size (computed from k)")
     residency_size: int = Field(
         ..., description="Resident layers (n) allowed on GPU at once"
+    )
+    kv_bits: Literal["4bit", "8bit", "fp16"] = Field(
+        ..., description="KV cache quantization ('4bit'|'8bit'|'fp16')"
     )
     api_callback_address: str = Field(
         ...,

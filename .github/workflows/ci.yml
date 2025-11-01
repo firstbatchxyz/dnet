@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: src
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Sync dev dependencies
+        run: |
+          uv sync --all-extras
+
+      - name: Ruff format check (style/format) via uvx
+        run: |
+          uvx ruff format --check .
+
+      - name: Ruff lint via uvx
+        run: |
+          uvx ruff check .
+
+      - name: Run tests (pytest) via uv
+        run: |
+          # currently, there are no tests, so we ignore exit code 5 (no tests collected)
+          uv run pytest || ([ $? -eq 5 ] && echo "No tests collected, continuing..." && exit 0 || exit $?)

@@ -17,6 +17,47 @@ from .attrib import RingShardNodeAttributes
 class ComputeMixin(RingShardNodeAttributes):
     """Split out the hot-path compute from RingShardNode."""
 
+    def _delta_swap_eviction(self, window_layers: List[int], resident: List[int], activation_msg: ActivationMessage, early: bool = False) -> int:
+        budget = max(1, int(self.window_size or 1))
+        curr_set = set(window_layers)
+        prev_only = [lid for lid in resident if lid not in curr_set]
+        keep_quota = max(0, budget - len(window_layers))
+        idx = max(0, len(prev_only) - keep_quota)
+        keep_tail = prev_only[idx:]
+        evict_head = prev_only[:idx]
+        if not evict_head:
+            return 0
+        evicted: List[int] = []
+        for lid in evict_head:
+            try:
+                if self.weight_cache.evict_layer(lid):
+                    evicted.append(lid)
+            except Exception:
+                continue
+        if evicted:
+            try:
+                if hasattr(self.model, "unload_layers"):
+                    self.model.unload_layers(evicted)
+                for lid in evicted:
+                    self._bound_versions.pop(lid, None)
+            except Exception:
+                pass
+            if self._profile:
+                try:
+                    tag = "DELTA-SWAP-EARLY" if early else "DELTA-SWAP"
+                    logger.info(
+                        f"[PROFILE][{tag}] node=%s nonce=%s evict_head=%s keep_tail=%s add=%s evicted=%s",
+                        self.node_id,
+                        activation_msg.nonce,
+                        evict_head,
+                        keep_tail,
+                        window_layers,
+                        len(evicted),
+                    )
+                except Exception:
+                    pass
+        return len(evicted)
+
     def _process_activation(self, activation_msg: ActivationMessage):
         if (
             not self.model
@@ -94,50 +135,14 @@ class ComputeMixin(RingShardNodeAttributes):
                 # This prevents LRU from evicting the useful tail during materialization.
                 if self._mode == "sliding_fit" and int(self._resident_windows) <= 1 and window_layers:
                     try:
-                        # Current requested window
-                        curr = list(window_layers)
-                        # Budget equals window_size for single resident window
-                        try:
-                            budget = max(1, int(self.window_size) or 1)
-                        except Exception:
-                            budget = max(1, int(self.window_size))
-                        # Derive actual resident layers from cache ordered oldest->newest
                         resident = []
                         try:
                             resident = self.weight_cache.get_resident_layers()  # type: ignore[union-attr]
                         except Exception:
                             resident = []
-                        # Consider only layers not part of the current window
-                        prev_only = [lid for lid in resident if lid not in curr]
-                        keep_quota = max(0, budget - len(curr))
-                        keep_tail = prev_only[-keep_quota:] if keep_quota > 0 else []
-                        evict_head = [lid for lid in prev_only if lid not in set(keep_tail)]
-                        if evict_head:
-                            try:
-                                evicted_cnt = self.weight_cache.evict_layers(evict_head)  # type: ignore[union-attr]
-                            except Exception:
-                                evicted_cnt = 0
-                            try:
-                                if hasattr(self.model, "unload_layers"):
-                                    self.model.unload_layers(evict_head)  # type: ignore[attr-defined]
-                                    for lid in evict_head:
-                                        self._bound_versions.pop(lid, None)
-                            except Exception:
-                                pass
+                        evicted_cnt = self._delta_swap_eviction(window_layers, resident, activation_msg, early=True)
+                        if evicted_cnt > 0:
                             did_early_swap = True
-                            if self._profile:
-                                try:
-                                    logger.info(
-                                        "[PROFILE][DELTA-SWAP][EARLY] node=%s nonce=%s evict_head=%s keep_tail=%s add=%s evicted=%s",
-                                        self.node_id,
-                                        activation_msg.nonce,
-                                        evict_head,
-                                        keep_tail,
-                                        window_layers,
-                                        evicted_cnt,
-                                    )
-                                except Exception:
-                                    pass
                     except Exception:
                         pass
 
@@ -247,44 +252,14 @@ class ComputeMixin(RingShardNodeAttributes):
                                 self._recent_windows.append(list(window_layers))
                             else:
                                 prev = self._recent_windows.pop(0)
-                                # Compute minimal eviction to fit the new window into budget.
-                                # Budget equals window_size when resident_windows == 1.
-                                try:
-                                    budget = max(1, int(self.window_size) or 1)
-                                except Exception:
-                                    budget = max(1, int(self.window_size))
-
+                                self._delta_swap_eviction(window_layers, prev, activation_msg, early=False)
+                                budget = max(1, int(self.window_size or 1))
                                 curr = list(window_layers)
                                 prev_only = [x for x in prev if x not in curr]
                                 keep_quota = max(0, budget - len(curr))
                                 keep_tail = prev_only[-keep_quota:] if keep_quota > 0 else []
-                                evict_head = [x for x in prev_only if x not in set(keep_tail)]
-                                try:
-                                    evicted_cnt = self.weight_cache.evict_layers(evict_head)
-                                except Exception:
-                                    evicted_cnt = 0
-                                try:
-                                    if hasattr(self.model, "unload_layers"):
-                                        self.model.unload_layers(evict_head)  # type: ignore[attr-defined]
-                                        for lid in evict_head:
-                                            self._bound_versions.pop(lid, None)
-                                except Exception:
-                                    pass
                                 combined = list(keep_tail) + curr
                                 self._recent_windows.append(combined)
-                                if self._profile:
-                                    try:
-                                        logger.info(
-                                            "[PROFILE][DELTA-SWAP] node=%s nonce=%s evict_head=%s keep_tail=%s add=%s evicted=%s",
-                                            self.node_id,
-                                            activation_msg.nonce,
-                                            evict_head,
-                                            keep_tail,
-                                            window_layers,
-                                            evicted_cnt,
-                                        )
-                                    except Exception:
-                                        pass
                         else:
                             # resident_windows>1 not expected in sliding_fit; fall back to seeding
                             self._recent_windows.append(list(window_layers))

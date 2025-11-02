@@ -177,7 +177,7 @@ class GptOssRingModel(BaseRingModel):
         return self.embed_tokens(x)
 
     def normalize(self, x: mx.array) -> mx.array:
-        return self.norm(x) if self.is_api_layer else x
+        return self.norm(x)
 
     def lm_project(self, x: mx.array) -> mx.array:
         use_tied = bool(getattr(self.config, "tie_word_embeddings", False))

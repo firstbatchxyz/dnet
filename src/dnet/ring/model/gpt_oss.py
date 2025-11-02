@@ -37,24 +37,21 @@ class GptOssRingModel(BaseRingModel):
             half = max(1, int(config.num_hidden_layers // 2))
             self.layer_types = (["sliding_attention", "full_attention"] * half)[: int(config.num_hidden_layers)]
 
-        # API layer owns embeddings/norm/head when used at endpoints
-        # Embedding / norm / head modules
-        # Create them unconditionally for consistency with other ring models
-        # (end shard needs lm_head; start shard needs embed)
+        q_overrides = model_config.get("quantization", {}) or {}
         try:
-            if "quantization" in model_config:
+            if any(k.startswith("model.embed_tokens") for k in q_overrides.keys()):
                 from mlx.nn.layers.quantized import QuantizedEmbedding  # type: ignore
-
-                qcfg = model_config["quantization"]
-                bits = int(qcfg.get("bits", 8))
-                group = int(qcfg.get("group_size", 64))
+                ov = next(
+                    (v for k, v in q_overrides.items() if k.startswith("model.embed_tokens")),
+                    {"bits": 8, "group_size": 64},
+                )
+                bits = int(ov.get("bits", 8))
+                group = int(ov.get("group_size", 64))
                 self.embed_tokens = QuantizedEmbedding(
                     config.vocab_size, config.hidden_size, group_size=group, bits=bits
                 )
             else:
-                self.embed_tokens = nn.Embedding(
-                    config.vocab_size, config.hidden_size
-                )
+                self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         except Exception:
             self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
 
@@ -74,25 +71,107 @@ class GptOssRingModel(BaseRingModel):
         self._cached_full_mask = None
         self._cached_swa_mask = None
 
-        # Optional post-init quantization of Linear layers for offload shards
-        self.is_quantized = "quantization" in model_config
-        if self.is_quantized and (not is_api_layer):
-            try:
-                qcfg = model_config["quantization"]
-                bits = int(qcfg.get("bits", 8))
-                group = int(qcfg.get("group_size", 64))
+        self._converted_to_quantized = False
+        try:
+            if not is_api_layer:
+                qc = model_config.get("quantization_config", {}) or {}
+                default_method = str(qc.get("quant_method", "mxfp4")).strip().lower()
+                modules_to_not_convert = list(qc.get("modules_to_not_convert", []) or [])
 
-                def _quant_pred(p, m):
-                    return isinstance(m, nn.Linear)
+                overrides_src = model_config.get("quantization", {}) or {}
+                override_groups: dict[tuple[int, int, str], set[str]] = {}
+                for k, v in overrides_src.items():
+                    try:
+                        bits = int(v.get("bits", 8))
+                    except Exception:
+                        bits = 8
+                    try:
+                        group = int(v.get("group_size", 64))
+                    except Exception:
+                        group = 64
+                    mode = str(v.get("mode", "affine")).strip().lower()
+                    # Map model.* absolute key to ring-local module path
+                    path = self._abskey_to_local_path(k)
+                    if path is None:
+                        continue
+                    override_groups.setdefault((bits, group, mode), set()).add(path)
 
-                nn.quantize(
-                    self, bits=bits, group_size=group, class_predicate=_quant_pred
-                )
-                self._converted_to_quantized = True
-            except Exception:
-                self._converted_to_quantized = False
-        else:
+                import fnmatch
+
+                def _excluded(path: str) -> bool:
+                    for pat in modules_to_not_convert:
+                        pat_norm = pat.replace("model.", "")
+                        if fnmatch.fnmatch(path, pat_norm) or path.endswith(pat_norm):
+                            return True
+                    return False
+
+                for (bits, group, mode), paths in override_groups.items():
+                    def _pred_override(p, m, paths=paths):
+                        return isinstance(m, nn.Linear) and (p in paths)
+                    try:
+                        nn.quantize(
+                            self,
+                            bits=bits,
+                            group_size=group,
+                            class_predicate=_pred_override,
+                            mode=mode,  # type: ignore[call-arg]
+                        )
+                    except TypeError:
+                        nn.quantize(
+                            self, bits=bits, group_size=group, class_predicate=_pred_override
+                        )
+                    self._converted_to_quantized = True
+
+                if default_method:
+                    def _pred_default(p, m):
+                        if not isinstance(m, nn.Linear):
+                            return False
+                        if _excluded(p):
+                            return False
+                        # Skip modules covered by overrides
+                        for _, paths in override_groups.items():
+                            if p in paths:
+                                return False
+                        return True
+
+                    try:
+                        nn.quantize(
+                            self,
+                            bits=4,
+                            group_size=32,
+                            class_predicate=_pred_default,
+                            mode=default_method,  # type: ignore[call-arg]
+                        )
+                    except TypeError:
+                        nn.quantize(
+                            self,
+                            bits=4,
+                            group_size=32,
+                            class_predicate=_pred_default,
+                        )
+                    self._converted_to_quantized = True
+        except Exception:
             self._converted_to_quantized = False
+
+    def _abskey_to_local_path(self, key: str) -> Optional[str]:
+        # Map 'model.layers.ABS.suffix' → 'layers.LOCAL.suffix'
+        # Also pass through top-level 'model.embed_tokens' and 'lm_head'
+        try:
+            if key.startswith("model.layers."):
+                parts = key.split(".")
+                abs_idx = int(parts[2])
+                local = self.abs_to_local.get(abs_idx)
+                if local is None:
+                    return None
+                suffix = ".".join(parts[3:])
+                return f"layers.{local}.{suffix}"
+            if key.startswith("model.embed_tokens"):
+                return "embed_tokens"
+            if key.startswith("lm_head"):
+                return "lm_head"
+            return None
+        except Exception:
+            return None
 
     def embed(self, x: mx.array) -> mx.array:
         return self.embed_tokens(x) if self.is_api_layer else x

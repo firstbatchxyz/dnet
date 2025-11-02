@@ -6,6 +6,7 @@ from ...utils.loader import subclass_where
 from .base import BaseRingModel
 from .deepseek_v2 import DeepseekV2RingModel
 from .llama import LlamaRingModel
+from .gpt_oss import GptOssRingModel
 from .qwen3 import Qwen3RingModel
 
 
@@ -40,6 +41,7 @@ __all__ = [
     "BaseRingModel",
     "DeepseekV2RingModel",
     "LlamaRingModel",
+    "GptOssRingModel",
     "Qwen3RingModel",
     "get_ring_model",
 ]

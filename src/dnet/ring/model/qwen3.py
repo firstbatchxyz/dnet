@@ -94,15 +94,7 @@ class Qwen3RingModel(BaseRingModel):
         self._cached_mask_state = None
         self._cached_mask = None
 
-        self._lazy_params = bool(getattr(shard_config, "lazy_params", False))
-        # Do not shrink params for quantized models; conversion relies on real shapes
-        if self.is_quantized and self._lazy_params:
-            self._lazy_params = False
-        if (not self.is_api_layer) and self._lazy_params:
-            try:
-                self._shrink_all_params()
-            except Exception as _e:
-                logger.warning(f"Lazy-param shrink failed: {_e}")
+        # Init-time lazy param shrink removed to simplify startup behavior.
 
     def _shrink_linear_like(self, mod):
         try:
@@ -143,10 +135,6 @@ class Qwen3RingModel(BaseRingModel):
                         self._shrink_linear_like(getattr(mlp, pn))
         except Exception:
             pass
-
-    def _shrink_all_params(self):
-        for b in self.layers:
-            self._shrink_block(b)
 
     def unload_layers(self, abs_layers: list[int]):
         """Shrink params for given absolute layer ids to placeholders.

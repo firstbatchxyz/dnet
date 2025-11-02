@@ -40,7 +40,6 @@ class ShardConfig:
     mode: str = "fit"  # "fit" | "offload"
 
     resident_windows: int = 2
-    lazy_params: bool = False
 
 
     wire_dtype: str = "fp16"
@@ -83,7 +82,6 @@ class ShardConfig:
             return ShardConfig(
                 mode="sliding_fit",
                 resident_windows=1,
-                lazy_params=True,
                 wire_dtype="fp16",
                 warmup_windows=1,
                 streaming=False,
@@ -98,7 +96,6 @@ class ShardConfig:
             return ShardConfig(
                 mode="offload",
                 resident_windows=1,
-                lazy_params=True,
                 wire_dtype="fp16",
                 warmup_windows=1,
                 streaming=False,
@@ -112,7 +109,6 @@ class ShardConfig:
         return ShardConfig(
             mode="fit",
             resident_windows=9999,
-            lazy_params=False,
             wire_dtype="fp16",
             warmup_windows=1,
             streaming=True,

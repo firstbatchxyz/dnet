@@ -1,14 +1,14 @@
 [submodule "lib/dnet-p2p"]
 	path = lib/dnet-p2p
-	url = https://github.com/firstbatchxyz/dnet-p2p
+	url = git@github.com:firstbatchxyz/dnet-p2p.git
 	branch = master
 
 [submodule "lib/dperf"]
 	path = lib/dperf
-	url = https://github.com/firstbatchxyz/py-dperf
+	url = git@github.com:firstbatchxyz/py-dperf.git
 	branch = master
 
 [submodule "lib/distilp"]
 	path = lib/distilp
-	url = https://github.com/firstbatchxyz/distilp
+	url = git@github.com:firstbatchxyz/distilp.git
 	branch = master

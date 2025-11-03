@@ -65,26 +65,16 @@ class WeightCache:
     def get_weight(self, layer_id: int, *, inc_ref: bool = False) -> Optional[Dict[str, mx.array]]:
         """Get weight from cache"""
         # First, fast path under lock for cache hit or in-flight load
-        with self.lock:
-            if layer_id in self.cache:
-                data, _ = self.cache[layer_id]
-                # refresh LRU timestamp
-                self.cache[layer_id] = (data, time.time())
-                if inc_ref:
-                    self.reference_counts[layer_id] = (
-                        self.reference_counts.get(layer_id, 0) + 1
-                    )
-                return data
-
         with self.tracer.frame("memory.weights", "cache.search") as f:
-            with self.lock:  
-                if layer_id in self.cache: 
+            with self.lock:
+                if layer_id in self.cache:
                     data, _ = self.cache[layer_id]
-                    self.cache[layer_id] = (data, time.time()) # refresh LRU timestamp
+                    # refresh LRU timestamp
+                    self.cache[layer_id] = (data, time.time())
                     if inc_ref:
-                        self.reference_counts[layer_id] = (self.reference_counts.get(layer_id, 0) + 1)
-                    logger.debug("Cache hit for layer %s, ref=%d inc=%d",
-                                 layer_id, self.reference_counts.get(layer_id, 0), int(inc_ref))
+                        self.reference_counts[layer_id] = (
+                            self.reference_counts.get(layer_id, 0) + 1
+                        )
                     return data
 
                 inflight = self.loading_futures.get(layer_id) # If a load is in-flight, wait on it outside the lock
@@ -137,74 +127,30 @@ class WeightCache:
                             self.loading_futures.pop(layer_id, None)
                     logger.exception("Failed to load weight %s: %s", layer_id, e)
                     return None
-
-        else: # Not the creator: wait for the in-flight load to complete
+        else:
+            # Not the creator: wait for the in-flight load to complete
             with self.tracer.frame("memory.weights", "cache.wait") as f:
+                t0w = time.perf_counter()
                 try:
                     inflight.result()  # block until the creator completes
                 except Exception as e:
                     logger.error("Wait for layer %s load failed: %s", layer_id, e)
                     return None
-
-                with self.lock: # Return from cache 
+                wait_ms = (time.perf_counter() - t0w) * 1000.0
+                logger.info("[PROFILE][WAIT-WEIGHT] layer=%s ms=%.2f", layer_id, wait_ms)
+                # Return from cache (now populated) and update ref/LRU
+                with self.lock:
                     data, _ = self.cache.get(layer_id, (None, 0.0))  # type: ignore[assignment]
                     if data is None:
-                        logger.error("Wait for layer %s load failed: data not in cache", layer_id)
                         return None
-
                     self.cache[layer_id] = (data, time.time())
                     if inc_ref:
-                        self.reference_counts[layer_id] = (self.reference_counts.get(layer_id, 0) + 1)
+                        self.reference_counts[layer_id] = (
+                            self.reference_counts.get(layer_id, 0) + 1
+                        )
                     else:
                         self.reference_counts.setdefault(layer_id, 0)
-                    # Resolve future and clear from tracking
-                    try:
-                        fut = self.loading_futures.pop(layer_id, None)
-                        if fut is not None and not fut.done():
-                            fut.set_result(True)
-                    except Exception:
-                        self.loading_futures.pop(layer_id, None)
-                logger.info(
-                    "[PROFILE][MATERIALIZE] layer=%s ms=%.2f bytes=%.2fMB",
-                    layer_id,
-                    dt_ms,
-                    (total_bytes / 1_048_576),
-                )
-                return data
-            except Exception as e:
-                # Signal failure to any waiters
-                with self.lock:
-                    try:
-                        fut = self.loading_futures.pop(layer_id, None)
-                        if fut is not None and not fut.done():
-                            fut.set_exception(e)
-                    except Exception:
-                        self.loading_futures.pop(layer_id, None)
-                logger.exception("Failed to load weight %s: %s", layer_id, e)
-                return None
-        else:
-            # Not the creator: wait for the in-flight load to complete
-            t0w = time.perf_counter()
-            try:
-                inflight.result()  # block until the creator completes
-            except Exception as e:
-                logger.error("Wait for layer %s load failed: %s", layer_id, e)
-                return None
-            wait_ms = (time.perf_counter() - t0w) * 1000.0
-            logger.info("[PROFILE][WAIT-WEIGHT] layer=%s ms=%.2f", layer_id, wait_ms)
-            # Return from cache (now populated) and update ref/LRU
-            with self.lock:
-                data, _ = self.cache.get(layer_id, (None, 0.0))  # type: ignore[assignment]
-                if data is None:
-                    return None
-                self.cache[layer_id] = (data, time.time())
-                if inc_ref:
-                    self.reference_counts[layer_id] = (
-                        self.reference_counts.get(layer_id, 0) + 1
-                    )
-                else:
-                    self.reference_counts.setdefault(layer_id, 0)
-                return data
+                    return data
 
     def decrease_reference(self, layer_id: int):
         """Decrease reference count for layer"""

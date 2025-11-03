@@ -74,6 +74,7 @@ class ComputeMixin(RingShardNodeAttributes):
             logger.error("Node %s: Cannot process activation - model not loaded", self.node_id)
             return
 
+        logger.error(f"PROCESS_ACTIVATION: {activation_msg.callback_url}")
         try:
             # per-nonce kvcache for concurrent requests
             with self.tracer.frame("compute.thread", "kvcache.init") as f:

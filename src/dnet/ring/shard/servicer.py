@@ -35,6 +35,7 @@ class ShardServicer(DnetRingServiceServicer):
                 request.activation.layer_id,
             )
 
+            logger.error(f"SERVICER: {request.callback_url}")
             await self.node.admit_frame(request)
 
             return ActivationResponse(

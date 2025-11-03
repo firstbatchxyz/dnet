@@ -251,8 +251,10 @@ class CommsMixin(RingShardNodeAttributes):
                                 )
                     except Exception:
                         pass
+
                     cb = activation_msg.callback_url or ""
                     parsed = urlparse(cb) if cb else None
+                    t_rpc = time.perf_counter()
                     if parsed and parsed.scheme == "grpc":
                         addr = parsed.netloc
                         if not addr:
@@ -282,15 +284,25 @@ class CommsMixin(RingShardNodeAttributes):
                                     tx_enq_prev_t=time.perf_counter(), 
                                 )
                                 resp = await self.api_stub.SendToken(req)  # type: ignore
+                                rpc_ms = (time.perf_counter() - t_rpc) * 1000.0
                                 if not resp.success:
                                     logger.error(
                                         "API SendToken failed for %s: %s",
                                         activation_msg.nonce,
                                         resp.message,
                                     )
+                                if self._profile:
+                                    logger.info(
+                                        "[PROFILE][TX-TOKEN][gRPC] node=%s nonce=%s token=%s rpc_ms=%.2f",
+                                        self.node_id,
+                                        activation_msg.nonce,
+                                        int(getattr(activation_msg, "token_id", -1)),
+                                        rpc_ms,
+                                    )
                             except Exception as e:
                                 logger.exception("Error sending token via gRPC: %s", e)
                     else:
+                        logger.error(activation_msg)
                         logger.error(
                             "No valid gRPC callback for token; cannot deliver nonce=%s",
                             activation_msg.nonce,
@@ -301,51 +313,49 @@ class CommsMixin(RingShardNodeAttributes):
 
             # FIXME: shaped var is a bit weird (is it np_array or mlx_array), @andthattoo shall check
             shaped = activation_msg.tensor
-            with self.tracer.frame("gprc.send_activations.default", "get_buffer") as fr:
-                fr.set("req_id", activation_msg.nonce)
-                fr.set("node", self._instance_name)
+            with self.tracer.frame("network.send_activations.default", "get_buffer") as f:
+                f.set("req_id", activation_msg.nonce)
+                f.set("node", self._instance_name)
                 if shaped is None:
                     output_buffer = self.output_pool.get_buffer(activation_msg.pool_id)
                     if output_buffer is None:
-                        logger.error(
-                            "Failed to get output buffer %s", activation_msg.pool_id
-                        )
+                        logger.error("Failed to get output buffer %s", activation_msg.pool_id)
                         return
 
-            if self._profile:
-                logger.info(
-                    "[PROFILE][SER-START] node=%s nonce=%s",
-                    self.node_id,
-                    activation_msg.nonce,
+                if self._profile:
+                    logger.info(
+                        "[PROFILE][SER-START] node=%s nonce=%s",
+                        self.node_id,
+                        activation_msg.nonce,
+                    )
+
+            with self.tracer.frame("network.tx", "cast") as f:
+                t_ser = time.perf_counter()
+                t_cast = t_ser
+                _len_bytes = int(getattr(shaped, "nbytes", 0))
+                _do_compress = bool(
+                    self._compress and _len_bytes >= self._compress_min_bytes
                 )
-            t_ser = time.perf_counter()
-            t_cast = t_ser
-            _len_bytes = int(getattr(shaped, "nbytes", 0))
-            _do_compress = bool(
-                self._compress and _len_bytes >= self._compress_min_bytes
-            )
-            if _do_compress:
-                # Skip compression for decode.
-                _do_compress = False
-            try:
-                wire_np_dtype = dtype_map[self._wire_dtype_str]
-            except Exception:
-                wire_np_dtype = np.float16  # reasonable default fallback
+                if _do_compress:
+                    # Skip compression for decode.
+                    _do_compress = False
+                try:
+                    wire_np_dtype = dtype_map[self._wire_dtype_str]
+                except Exception:
+                    wire_np_dtype = np.float16  # reasonable default fallback
 
-            if isinstance(shaped, np.ndarray):
-                logger.warning("Activation tensor is a numpy array!!!")
-                if shaped.dtype != wire_np_dtype:
-                    # FIXME: numpy vs mx array here
-                    shaped = shaped.astype(wire_np_dtype, copy=False)
+                if isinstance(shaped, np.ndarray):
+                    logger.warning("Activation tensor is a numpy array!!!")
+                    if shaped.dtype != wire_np_dtype:
+                        # FIXME: numpy vs mx array here
+                        shaped = shaped.astype(wire_np_dtype, copy=False)
 
-            else: # MLX array -> cast to desired wire dtype
-                if str(shaped.dtype) != self._wire_dtype_str:
-                    shaped = shaped.astype(self._wire_mx_dtype)
+                else: # MLX array -> cast to desired wire dtype
+                    if str(shaped.dtype) != self._wire_dtype_str:
+                        shaped = shaped.astype(self._wire_mx_dtype)
 
-            activation_msg.dtype = self._wire_dtype_str
-            t_cast = time.perf_counter()
-
-            with self.tracer.frame("grpc", "send_activations.cast_to_dtype") as f:
+                activation_msg.dtype = self._wire_dtype_str
+                t_cast = time.perf_counter()
 
                 if isinstance(shaped, np.ndarray):  # Cast to target dtype
                     if shaped.dtype != wire_np_dtype:
@@ -358,15 +368,15 @@ class CommsMixin(RingShardNodeAttributes):
                         f.event("mxarray.cast")
                     data = tensor_to_bytes(shaped)
 
-            activation_msg.dtype = self._wire_dtype_str
+                activation_msg.dtype = self._wire_dtype_str
 
-            nxt = activation_msg.layer_id + 1
-            if (nxt < self.model_metadata.num_layers) and (nxt not in self._assigned_set):
-                if self.next_node_stub:
+            with self.tracer.frame("memory", "prepare.window") as f:
+                f.set("req_id", activation_msg.nonce)
+                f.set("node", self._instance_name)
 
-                    with self.tracer.frame("network", "send_activation.next") as f:
-                        f.set("req_id", activation_msg.nonce)
-                        f.set("node", self._instance_name)
+                nxt = activation_msg.layer_id + 1
+                if (nxt < self.model_metadata.num_layers) and (nxt not in self._assigned_set):
+                    if self.next_node_stub:
                         request = activation_msg.to_proto(data)
                         request.timestamp = utc_epoch_now()
                         if self._mode == "offload" and self.window_size > 0:
@@ -476,81 +486,83 @@ class CommsMixin(RingShardNodeAttributes):
                                     ring_timeout,
                                     ring_retries,
                                 )
-                                t0 = time.perf_counter()
-                                last_exc: Optional[Exception] = None
-                                for attempt in range(1, ring_retries + 1):
-                                    try:
-                                        # FIXME: use response here?
-                                        _ = await self.next_node_stub.SendActivation(
-                                            request, timeout=ring_timeout
-                                        )  # type: ignore
-                                        break
-                                    except grpc.aio.AioRpcError as e:  # type: ignore
-                                        last_exc = e
-                                        code = e.code()
-                                        if code in {
-                                            grpc.StatusCode.UNAVAILABLE,
-                                            grpc.StatusCode.CANCELLED,
-                                            grpc.StatusCode.DEADLINE_EXCEEDED,
-                                        }:
-                                            logger.warning(
-                                                "SendActivation attempt %s/%s failed (%s); reconnecting...",
-                                                attempt,
-                                                ring_retries,
-                                                code.name,
-                                            )
-                                            await self._reconnect_next_node()
-                                            await asyncio.sleep(min(0.25 * attempt, 1.0))
-                                            continue
-                                        raise
-                                else:
-                                    raise last_exc  # type: ignore
-                                rpc_ms = (time.perf_counter() - t0) * 1000.0
-                                logger.info(
-                                    "[PROFILE][TX] node=%s nonce=%s next_layer=%s payload_kb=%.1f serialize_ms=%.3f rpc_ms=%.2f cast_ms=%.3f",
-                                    self.node_id,
-                                    activation_msg.nonce,
-                                    activation_msg.layer_id + 1,
-                                    (len(data) / 1024),
-                                    ser_ms,
-                                    rpc_ms,
-                                    cast_ms,
-                                )
+                            t0 = time.perf_counter()
+                            last_exc: Optional[Exception] = None
+                            for attempt in range(1, ring_retries + 1):
+                                try:
+                                    # FIXME: use response here?
+                                    _ = await self.next_node_stub.SendActivation(
+                                        request, timeout=ring_timeout
+                                    )  # type: ignore
+                                    break
+                                except grpc.aio.AioRpcError as e:  # type: ignore
+                                    last_exc = e
+                                    code = e.code()
+                                    if code in {
+                                        grpc.StatusCode.UNAVAILABLE,
+                                        grpc.StatusCode.CANCELLED,
+                                        grpc.StatusCode.DEADLINE_EXCEEDED,
+                                    }:
+                                        logger.warning(
+                                            "SendActivation attempt %s/%s failed (%s); reconnecting...",
+                                            attempt,
+                                            ring_retries,
+                                            code.name,
+                                        )
+                                        await self._reconnect_next_node()
+                                        await asyncio.sleep(min(0.25 * attempt, 1.0))
+                                        continue
+                                    raise
+                            else:
+                                raise last_exc  # type: ignore
+                            rpc_ms = (time.perf_counter() - t0) * 1000.0
+                            logger.info(
+                                "[PROFILE][TX] node=%s nonce=%s next_layer=%s payload_kb=%.1f serialize_ms=%.3f rpc_ms=%.2f cast_ms=%.3f",
+                                self.node_id,
+                                activation_msg.nonce,
+                                activation_msg.layer_id + 1,
+                                (len(data) / 1024),
+                                ser_ms,
+                                rpc_ms,
+                                cast_ms,
+                            )
+                    else:
+                        logger.error("Cannot forward activation - no next node configured; end shard should sample inline.")
+
+                # Final layer not annotated with 'is_final'
                 else:
-                    logger.error("Cannot forward activation - no next node configured; end shard should sample inline.")
+                    logger.error(
+                        "Final activation reached send path unexpectedly; sampling should occur on end shard."
+                    )
+                    # Clear scheduling at request end
+                    # Sequential offload: prefetch state is unused
 
-            # Final layer not annotated with 'is_final'
-            else:
-                logger.error(
-                    "Final activation reached send path unexpectedly; sampling should occur on end shard."
-                )
-                # Clear scheduling at request end
-                # Sequential offload: prefetch state is unused
+                    # Optional: explicitly end the per-nonce stream on request completion
+                    # Enable by setting RING_EXPLICIT_EOR=1 when you emit a true end-of-request signal.
+                    try:
+                        if self._explicit_eor:
+                            if (
+                                hasattr(self, "_streams")
+                                and activation_msg.nonce in self._streams
+                            ):
+                                await self._end_stream(activation_msg.nonce, eor=True)
+                    except Exception:
+                        pass
 
-                # Optional: explicitly end the per-nonce stream on request completion
-                # Enable by setting RING_EXPLICIT_EOR=1 when you emit a true end-of-request signal.
+                # Release resources at end of send
                 try:
-                    if self._explicit_eor:
-                        if (
-                            hasattr(self, "_streams")
-                            and activation_msg.nonce in self._streams
-                        ):
-                            await self._end_stream(activation_msg.nonce, eor=True)
+                    activation_msg.tensor = None
                 except Exception:
                     pass
-
-            # Release resources at end of send
-            try:
-                activation_msg.tensor = None
-            except Exception:
-                pass
-            if used_pool:
-                try:
-                    self.output_pool.release(activation_msg.pool_id)
-                except Exception:
-                    pass
+                if used_pool:
+                    try:
+                        self.output_pool.release(activation_msg.pool_id)
+                    except Exception:
+                        pass
         except Exception as e:
             logger.exception("Error sending activation: %s", e)
+
+
 
     async def _connect_next_node(self) -> bool:
         """Connect to next node in ring.

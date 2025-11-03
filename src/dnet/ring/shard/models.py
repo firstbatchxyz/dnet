@@ -53,7 +53,7 @@ class ShardUnloadModelResponse(BaseModel):
 class ShardProfileRequest(BaseModel):
     """Request to profile device and measure latencies."""
 
-    api_address: Optional[str] = Field( ..., description="API Address" ) 
+    #api_address: Optional[str] = Field( ..., description="API Address" ) 
     devices: Dict[str, DnetDeviceProperties] = Field(
         ..., description="Device information mapping"
     )

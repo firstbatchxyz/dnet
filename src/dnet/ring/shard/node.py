@@ -618,6 +618,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
     # FIXME This seems to still be dead code
     async def receive_activation(self, request: dnet_ring_pb2.ActivationRequest):
         """Receive activation from previous node and queue for local compute or forward."""
+        logger.debug("RECEIVE ACTIVATION")
         if self.input_pool is None:
             logger.error("Node %s: Cannot receive activation - input pool not initialized", self.node_id)
             return
@@ -792,6 +793,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                         # Queue for processing — non-blocking back-off loop (cancellable)
                         while self.running:
                             try:
+                                logger.error(f"NETWORK RX: {activation_msg.callback_url}")
                                 self.activation_recv_queue.put_nowait(activation_msg)
                                 activatino_msg.ex_enq_t = time.perf_counter()
                                 logger.debug("Queued activation for processing: nonce %s", activation_msg.nonce)
@@ -818,6 +820,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 request.rx_enq_t = rx_t
                 request.rx_inflight_t = 0.0 if request.tx_enq_prev_t == 0.0 else rx_t - request.tx_enq_prev_t
 
+                logger.error(f"ADMIT_FRAME: {request.callback_url}")
                 self.ingress_q.put_nowait(request)
                 logger.debug(f"[ENQUE] Enqueued activation request")
                 return
@@ -839,6 +842,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                     req = await self.ingress_q.get()
                     logger.debug(f"[DEQUE]Dequeued activation for processing")
                 except asyncio.CancelledError:
+                    logger.error("Error while waiting ingress worker.")
                     break
 
             # Trace processing of request, in-flight and in-wait times
@@ -849,30 +853,27 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 f.set("req_id", req.nonce)
 
                 try:
-                    await self._connect_next_node()
-
                     activation = req.activation
                     target_layer = activation.layer_id + 1
+
+                    try:
+                        payload_bytes = len(activation.data)
+                    except Exception:
+                        payload_bytes = -1
 
                     # Detect new sequence per node: initialize per-nonce KV
                     if req.nonce != self._active_nonce:
                         self._active_nonce = req.nonce
                         try:
-                            payload_bytes = len(activation.data)
+                            self._get_or_make_kv(req.nonce)
                         except Exception:
-                            logger.error(f"Unable to read length of data for {req.nonce}")
-                            payload_bytes = -1
-
-                        fr.set("req_id", req.nonce) 
-                        f.set("target", target_layer)
-                        f.set("payload_bytes", payload_bytes)
-                        f.event("received")
+                          pass
 
                     if target_layer in self._assigned_set:
                         # Heavy prep in executor (alloc/copy/decompress)
                         with self.tracer.frame("network.ingress", "prepare") as fr:
-                            fr.set("node", self._instance_name)
-                            fr.set("nonce", req.nonce) 
+                            #fr.set("node", self._instance_name)
+                            #fr.set("nonce", req.nonce) 
                             loop = asyncio.get_running_loop()
                             try:
                                 activation_msg = await loop.run_in_executor(
@@ -885,46 +886,32 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                                 continue
                             if activation_msg is None:
                                 continue
-                            if self._profile:
-                                activation_msg.recv_perf_t = t_recv
+                            #if self._profile:
+                            #    activation_msg.recv_perf_t = t_recv
 
                         # Enqueue for compute (cancellable back-off)
-                        with self.tracer.frame("network.ingress", "queue") as fr:
+                        with self.tracer.frame("network.rx", "enque") as fr:
+                            fr.set("req_id", req.nonce) 
+                            fr.set("node", self._instance_name)
                             while self.running:
                                 try:
-                                    activation_msg = await loop.run_in_executor(
-                                        self.executor,
-                                        self._prepare_activation_message_blocking,
-                                        req,
+                                    logger.error(f"NETWORK RX: {activation_msg.callback_url}")
+                                    self.activation_recv_queue.put_nowait(activation_msg)
+                                    logger.debug(
+                                        "Queued activation for processing: nonce %s",
+                                        activation_msg.nonce,
                                     )
-                                except Exception as e:
-                                    logger.error("Activation prepare failed for nonce %s: %s", req.nonce, e)
-                                    continue
-                                if activation_msg is None:
-                                    continue
-
-                            # Enqueue for compute 
-                            with self.tracer.frame("network.rx", "enque") as fr:
-                                fr.set("req_id", req.nonce) 
-                                fr.set("node", self._instance_name)
-                                while self.running:
-                                    try:
-                                        self.activation_recv_queue.put_nowait(activation_msg)
-                                        logger.debug(
-                                            "Queued activation for processing: nonce %s",
-                                            activation_msg.nonce,
-                                        )
-                                        break
-                                    except Full:
-                                        await asyncio.sleep(0)
-                                else:
-                                    logger.error("Failed to queue activation %s (node stopping)", activation_msg.nonce,)
-                                    try:
-                                        if self.input_pool:
-                                            # FIXME: !!!
-                                            self.input_pool.release(activation_msg.pool_id)
-                                    except Exception:
-                                        pass
+                                    break
+                                except Full:
+                                    await asyncio.sleep(0)
+                            else:
+                                logger.error("Failed to queue activation %s (node stopping)", activation_msg.nonce,)
+                                try:
+                                    if self.input_pool:
+                                        # FIXME: !!!
+                                        self.input_pool.release(activation_msg.pool_id)
+                                except Exception:
+                                    logger.error("Unable to release from input pool")
 
                     else: # Forward to next node (not our layer)
                       logger.debug(
@@ -1501,6 +1488,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 device_profile = await self._profile_device(
                     req.repo_id, req.max_batch_exp
                 )
+                logger.debug(device_profile)
 
                 # Overwrite `t_comm` with median latency (subprocess returns a dict)
                 median_latency = calculate_median_latency_seconds(latency_results)

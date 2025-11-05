@@ -2,13 +2,17 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import mlx.core as mx
 import mlx.nn as nn
+
 from mlx_lm.models.base import create_attention_mask
+from mlx_lm.models.gpt_oss import ModelArgs, TransformerBlock
 from mlx_lm.models.cache import KVCache, RotatingKVCache
 
 from .base import BaseRingModel
 
 
 class GptOssRingModel(BaseRingModel):
+    """Ring-topology, shardable GPT-OSS with MoE + sliding/full attention."""
+
     model_type = "gpt_oss"
 
     def __init__(
@@ -16,195 +20,179 @@ class GptOssRingModel(BaseRingModel):
         model_config: Any,
         assigned_layers: Optional[List[int]] = None,
         is_api_layer: bool = False,
-        shard_config: Optional[Any] = None,
+        model_metadata: Optional[Any] = None,
     ):
         super().__init__()
 
         if is_api_layer and assigned_layers:
             raise RuntimeError("API layer doesn't handle layers")
 
-        from mlx_lm.models.gpt_oss import ModelArgs, TransformerBlock  # type: ignore
-
         self.model_config = model_config
         self.is_api_layer = is_api_layer
-        self.config = config = ModelArgs.from_dict(model_config)
-
-        self.window_size: int = int(getattr(config, "sliding_window", 0) or 0)
-        # Layer types alternate sliding/full by default when not provided
-        if getattr(config, "layer_types", None):
-            self.layer_types: List[str] = list(config.layer_types)
-        else:
-            half = max(1, int(config.num_hidden_layers // 2))
-            self.layer_types = (["sliding_attention", "full_attention"] * half)[: int(config.num_hidden_layers)]
-
-        q_overrides = model_config.get("quantization", {}) or {}
+        self.config = cfg = ModelArgs.from_dict(model_config)
+        self.layer_types: List[str] = list(
+            cfg.layer_types
+            or (["sliding_attention", "full_attention"] * (cfg.num_hidden_layers // 2))
+        )
         try:
-            if any(k.startswith("model.embed_tokens") for k in q_overrides.keys()):
-                from mlx.nn.layers.quantized import QuantizedEmbedding  # type: ignore
-                ov = next(
-                    (v for k, v in q_overrides.items() if k.startswith("model.embed_tokens")),
-                    {"bits": 8, "group_size": 64},
-                )
-                bits = int(ov.get("bits", 8))
-                group = int(ov.get("group_size", 64))
-                self.embed_tokens = QuantizedEmbedding(
-                    config.vocab_size, config.hidden_size, group_size=group, bits=bits
-                )
-            else:
-                self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
+            ws = getattr(cfg, "sliding_window")
         except Exception:
-            self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
+            ws = None
+        if ws is None:
+            ws = getattr(cfg, "initial_context_length", 128)
+        try:
+            self.window_size = int(ws)
+        except Exception:
+            self.window_size = 128
 
-        self.norm = nn.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        if not getattr(config, "tie_word_embeddings", False):
-            self.lm_head = nn.Linear(
-                config.hidden_size, config.vocab_size, bias=False
-            )
+        self.embed_tokens = nn.Embedding(cfg.vocab_size, cfg.hidden_size)
+
+        self.norm = nn.RMSNorm(cfg.hidden_size, cfg.rms_norm_eps)
+        if not getattr(cfg, "tie_word_embeddings", False):
+            self.lm_head = nn.Linear(cfg.hidden_size, cfg.vocab_size, bias=False)
 
         self.layers: List[nn.Module] = []
         self.abs_to_local: Dict[int, int] = {}
-        for i, layer in enumerate(sorted(assigned_layers or [])):
-            self.layers.append(TransformerBlock(config))
-            self.abs_to_local[layer] = i
+        self.local_to_abs: List[int] = []
 
-        self._cached_mask_state: Optional[int] = None
-        self._cached_full_mask = None
-        self._cached_swa_mask = None
+        for i, abs_idx in enumerate(sorted(assigned_layers or [])):
+            self.layers.append(TransformerBlock(cfg))
+            self.abs_to_local[abs_idx] = i
+            self.local_to_abs.append(abs_idx)
 
+        # Quantization is handled at bind-time in load_weights
         self._converted_to_quantized = False
-        try:
-            if not is_api_layer:
-                qc = model_config.get("quantization_config", {}) or {}
-                default_method = str(qc.get("quant_method", "mxfp4")).strip().lower()
-                modules_to_not_convert = list(qc.get("modules_to_not_convert", []) or [])
-
-                overrides_src = model_config.get("quantization", {}) or {}
-                override_groups: dict[tuple[int, int, str], set[str]] = {}
-                for k, v in overrides_src.items():
-                    try:
-                        bits = int(v.get("bits", 8))
-                    except Exception:
-                        bits = 8
-                    try:
-                        group = int(v.get("group_size", 64))
-                    except Exception:
-                        group = 64
-                    mode = str(v.get("mode", "affine")).strip().lower()
-                    # Map model.* absolute key to ring-local module path
-                    path = self._abskey_to_local_path(k)
-                    if path is None:
-                        continue
-                    override_groups.setdefault((bits, group, mode), set()).add(path)
-
-                import fnmatch
-
-                def _excluded(path: str) -> bool:
-                    for pat in modules_to_not_convert:
-                        pat_norm = pat.replace("model.", "")
-                        if fnmatch.fnmatch(path, pat_norm) or path.endswith(pat_norm):
-                            return True
-                    return False
-
-                for (bits, group, mode), paths in override_groups.items():
-                    def _pred_override(p, m, paths=paths):
-                        return isinstance(m, nn.Linear) and (p in paths)
-                    try:
-                        nn.quantize(
-                            self,
-                            bits=bits,
-                            group_size=group,
-                            class_predicate=_pred_override,
-                            mode=mode,  # type: ignore[call-arg]
-                        )
-                    except TypeError:
-                        nn.quantize(
-                            self, bits=bits, group_size=group, class_predicate=_pred_override
-                        )
-                    self._converted_to_quantized = True
-
-                if default_method:
-                    def _pred_default(p, m):
-                        if not isinstance(m, nn.Linear):
-                            return False
-                        if _excluded(p):
-                            return False
-                        # Skip modules covered by overrides
-                        for _, paths in override_groups.items():
-                            if p in paths:
-                                return False
-                        return True
-
-                    try:
-                        nn.quantize(
-                            self,
-                            bits=4,
-                            group_size=32,
-                            class_predicate=_pred_default,
-                            mode=default_method,  # type: ignore[call-arg]
-                        )
-                    except TypeError:
-                        nn.quantize(
-                            self,
-                            bits=4,
-                            group_size=32,
-                            class_predicate=_pred_default,
-                        )
-                    self._converted_to_quantized = True
-        except Exception:
-            self._converted_to_quantized = False
-
-    def _abskey_to_local_path(self, key: str) -> Optional[str]:
-        # Map 'model.layers.ABS.suffix' → 'layers.LOCAL.suffix'
-        # Also pass through top-level 'model.embed_tokens' and 'lm_head'
-        try:
-            if key.startswith("model.layers."):
-                parts = key.split(".")
-                abs_idx = int(parts[2])
-                local = self.abs_to_local.get(abs_idx)
-                if local is None:
-                    return None
-                suffix = ".".join(parts[3:])
-                return f"layers.{local}.{suffix}"
-            if key.startswith("model.embed_tokens"):
-                return "embed_tokens"
-            if key.startswith("lm_head"):
-                return "lm_head"
-            return None
-        except Exception:
-            return None
 
     def embed(self, x: mx.array) -> mx.array:
-        return self.embed_tokens(x)
+        return self.embed_tokens(x) if hasattr(self, "embed_tokens") else x
 
     def normalize(self, x: mx.array) -> mx.array:
-        return self.norm(x)
+        return self.norm(x) if hasattr(self, "norm") else x
 
     def lm_project(self, x: mx.array) -> mx.array:
-        use_tied = bool(getattr(self.config, "tie_word_embeddings", False))
-        if use_tied or not hasattr(self, "lm_head"):
-            return self.embed_tokens.as_linear(x)
-        return self.lm_head(x)
+        if hasattr(self, "lm_head") or hasattr(self, "embed_tokens"):
+            use_tied = bool(getattr(self.config, "tie_word_embeddings", False))
+            if use_tied or not hasattr(self, "lm_head"):
+                return self.embed_tokens.as_linear(x)
+            return self.lm_head(x)
+        return x
 
-    def _mask_for_layer(self, abs_idx: int, x: mx.array, c: Any) -> Optional[mx.array]:
-        try:
-            T = int(x.shape[1]) if len(x.shape) > 1 else 1
-        except Exception:
-            T = 1
-        if T <= 1:
+    def _pick_cache(
+        self, cache: Optional[List[Any]] | Any, abs_idx: int, local_idx: int
+    ) -> Optional[Any]:
+        """Pick the correct cache object for a given absolute layer.
+
+        Supports both GLOBAL (abs-indexed) cache lists and LOCAL (per-shard) lists.
+        If `cache` is not a list, treat it as a single cache object.
+        """
+        if cache is None:
             return None
-        lt = self.layer_types[abs_idx] if 0 <= abs_idx < len(self.layer_types) else "full_attention"
-        if lt == "sliding_attention" and self.window_size > 0:
-            return create_attention_mask(x, c, window_size=self.window_size)
-        return create_attention_mask(x, c)
+        if not isinstance(cache, list):
+            return cache
+        try:
+            total = getattr(self.config, "num_hidden_layers", None)
+        except Exception:
+            total = None
+        # Prefer GLOBAL (abs-indexed) when detectable
+        try:
+            if (total and len(cache) >= int(total)) and (0 <= abs_idx < len(cache)):
+                return cache[abs_idx]
+        except Exception:
+            pass
+        # Otherwise LOCAL (per-shard sized)
+        if len(cache) == len(self.layers) and (0 <= local_idx < len(cache)):
+            return cache[local_idx]
+        # Fallbacks
+        if 0 <= abs_idx < len(cache):
+            return cache[abs_idx]
+        if 0 <= local_idx < len(cache):
+            return cache[local_idx]
+        return None
+
+    def _build_step_masks(self, x: mx.array, cache: Optional[List[Any]]):
+        """Per-step masks: build one full and one sliding mask and reuse within this step.
+
+        Do not cache across steps to ensure KV offsets are respected.
+        """
+        full_m = None
+        swa_m = None
+        ga_c = None
+        swa_c = None
+        ga_abs = None
+        swa_abs = None
+
+        # Only build masks we will actually use locally
+        local_types = {
+            self.layer_types[abs_i]
+            if abs_i < len(self.layer_types)
+            else "full_attention"
+            for abs_i in self.local_to_abs
+        }
+
+        # Choose representative local cache for each type present on this shard
+        if "full_attention" in local_types:
+            rep_li = next(
+                (
+                    i
+                    for i, abs_i in enumerate(self.local_to_abs)
+                    if (
+                        self.layer_types[abs_i]
+                        if abs_i < len(self.layer_types)
+                        else "full_attention"
+                    )
+                    == "full_attention"
+                ),
+                None,
+            )
+            if rep_li is not None:
+                ga_abs = self.local_to_abs[rep_li]
+                ga_c = self._pick_cache(cache, ga_abs, rep_li)
+                full_m = create_attention_mask(x, ga_c)
+
+        if "sliding_attention" in local_types:
+            rep_li = next(
+                (
+                    i
+                    for i, abs_i in enumerate(self.local_to_abs)
+                    if (
+                        self.layer_types[abs_i]
+                        if abs_i < len(self.layer_types)
+                        else "full_attention"
+                    )
+                    == "sliding_attention"
+                ),
+                None,
+            )
+            if rep_li is not None:
+                swa_abs = self.local_to_abs[rep_li]
+                swa_c = self._pick_cache(cache, swa_abs, rep_li)
+                swa_m = create_attention_mask(x, swa_c, window_size=self.window_size)
+
+        return full_m, swa_m, ga_c, swa_c, ga_abs, swa_abs
 
     def forward(self, x: mx.array, cache: Optional[List[Any]] = None) -> mx.array:
         if cache is None:
             cache = [None] * len(self.layers)
-        # Apply local layers in absolute index order
-        for abs_idx, local_idx in sorted(self.abs_to_local.items()):
-            c = cache[local_idx] if local_idx < len(cache) else None
-            mask = self._mask_for_layer(abs_idx, x, c)
-            x = self.layers[local_idx](x, mask, c)
+
+        full_m, swa_m, _, _, _, _ = self._build_step_masks(x, cache)
+
+        for i, layer in enumerate(self.layers):
+            abs_idx = self.local_to_abs[i]
+            lt = (
+                self.layer_types[abs_idx]
+                if abs_idx < len(self.layer_types)
+                else "full_attention"
+            )
+            c = self._pick_cache(cache, abs_idx, i)
+            m = full_m if lt == "full_attention" else swa_m
+            # If mask for this type was not built (should not happen if local_types contains it), build on-demand
+            if m is None:
+                if lt == "full_attention":
+                    m = create_attention_mask(x, c)
+                else:
+                    m = create_attention_mask(x, c, window_size=self.window_size)
+            x = layer(x, m, c)
+
         return x
 
     def apply_single_layer(
@@ -212,16 +200,128 @@ class GptOssRingModel(BaseRingModel):
     ) -> mx.array:
         if layer_idx not in self.abs_to_local:
             raise RuntimeError(f"Layer {layer_idx} not hosted on this model instance")
+
         local_idx = self.abs_to_local[layer_idx]
-        c = None
-        if cache is not None and local_idx < len(cache):
-            c = cache[local_idx]
-        mask = self._mask_for_layer(layer_idx, x, c)
+        c = self._pick_cache(cache, layer_idx, local_idx)
+        lt = (
+            self.layer_types[layer_idx]
+            if layer_idx < len(self.layer_types)
+            else "full_attention"
+        )
+        if lt == "full_attention":
+            mask = create_attention_mask(x, c)
+        else:
+            mask = create_attention_mask(x, c, window_size=self.window_size)
         return self.layers[local_idx](x, mask, c)
 
-    def load_weights(self, weights, strict=False):
-        shard_weights: Dict[str, mx.array] = {}
-        for key, value in weights:
+    def _sanitize_weights(self, weights: Dict[str, mx.array]) -> Dict[str, mx.array]:
+        # Port of non-ring Model.sanitize (supports quantized blocks/scales)
+        if any("gate_proj.weight" in k for k in weights.keys()):
+            return weights
+
+        new_w = {}
+        for k, v in weights.items():
+            if "gate_up_proj" in k and "bias" not in k:
+                if "_blocks" in k:
+                    v = v.view(mx.uint32).flatten(-2)
+                    k = k.replace("_blocks", ".weight")
+                if "_scales" in k:
+                    k = k.replace("_scales", ".scales")
+                new_w[k.replace("gate_up_proj", "gate_proj")] = mx.contiguous(
+                    v[..., ::2, :]
+                )
+                new_w[k.replace("gate_up_proj", "up_proj")] = mx.contiguous(
+                    v[..., 1::2, :]
+                )
+            elif "down_proj" in k and "bias" not in k:
+                if "_blocks" in k:
+                    v = v.view(mx.uint32).flatten(-2)
+                    k = k.replace("_blocks", ".weight")
+                if "_scales" in k:
+                    k = k.replace("_scales", ".scales")
+                new_w[k] = v
+            elif "gate_up_proj_bias" in k:
+                new_w[k.replace("gate_up_proj_bias", "gate_proj.bias")] = mx.contiguous(
+                    v[..., ::2]
+                )
+                new_w[k.replace("gate_up_proj_bias", "up_proj.bias")] = mx.contiguous(
+                    v[..., 1::2]
+                )
+            elif "down_proj_bias" in k:
+                new_w[k.replace("down_proj_bias", "down_proj.bias")] = v
+            else:
+                new_w[k] = v
+        return new_w
+
+    # Public sanitize hook so base quantization can normalize weight keyspace
+    # before deciding which modules to quantize based on presence of `.scales`.
+    # This version is tolerant of placeholder/non-array values (used by the
+    # quantization gating pass), and will only rewrite keys without touching
+    # values when arrays are not provided.
+    def sanitize(self, weights: Dict[str, Any]) -> Dict[str, Any]:
+        # Fast-path: if already sanitized (key contains gate_proj), return
+        if any("gate_proj.weight" in k for k in weights.keys()):
+            return weights
+        new_w: Dict[str, Any] = {}
+        for k, v in weights.items():
+            is_array = isinstance(v, mx.array)
+            if "gate_up_proj" in k and "bias" not in k:
+                k_eff = k
+                v_eff = v
+                if "_blocks" in k:
+                    # Only reshape when real arrays are provided; otherwise keep as-is
+                    if is_array:
+                        v_eff = v.view(mx.uint32).flatten(-2)
+                    k_eff = k.replace("_blocks", ".weight")
+                if "_scales" in k:
+                    k_eff = k.replace("_scales", ".scales")
+                # Duplicate into gate_proj and up_proj branches; keep values as-is when not arrays
+                new_w[k_eff.replace("gate_up_proj", "gate_proj")] = (
+                    mx.contiguous(v_eff[..., ::2, :]) if is_array else v_eff
+                )
+                new_w[k_eff.replace("gate_up_proj", "up_proj")] = (
+                    mx.contiguous(v_eff[..., 1::2, :]) if is_array else v_eff
+                )
+            elif "down_proj" in k and "bias" not in k:
+                k_eff = k
+                v_eff = v
+                if "_blocks" in k:
+                    if is_array:
+                        v_eff = v.view(mx.uint32).flatten(-2)
+                    k_eff = k.replace("_blocks", ".weight")
+                if "_scales" in k:
+                    k_eff = k.replace("_scales", ".scales")
+                new_w[k_eff] = v_eff
+            elif "gate_up_proj_bias" in k:
+                if is_array:
+                    new_w[k.replace("gate_up_proj_bias", "gate_proj.bias")] = (
+                        mx.contiguous(v[..., ::2])
+                    )
+                    new_w[k.replace("gate_up_proj_bias", "up_proj.bias")] = (
+                        mx.contiguous(v[..., 1::2])
+                    )
+                else:
+                    # Keep a single entry under gate_proj.bias for gating; value unused
+                    new_w[k.replace("gate_up_proj_bias", "gate_proj.bias")] = v
+                    new_w[k.replace("gate_up_proj_bias", "up_proj.bias")] = v
+            elif "down_proj_bias" in k:
+                new_w[k.replace("down_proj_bias", "down_proj.bias")] = v
+            else:
+                new_w[k] = v
+        return new_w
+
+    def load_weights(self, weights, strict: bool = False):
+        # to dict
+        try:
+            wdict = {k: v for k, v in weights}
+        except Exception:
+            wdict = dict(weights)
+
+        # sanitize first
+        wdict = self._sanitize_weights(wdict)
+
+        shard_w: Dict[str, mx.array] = {}
+        for key, value in wdict.items():
             if key.startswith("model.layers.") or key.startswith("layers."):
                 parts = key.split(".")
                 idx_pos = 2 if parts[0] == "model" else 1
@@ -236,94 +336,36 @@ class GptOssRingModel(BaseRingModel):
                 if parts[0] == "model":
                     parts = parts[1:]
                 new_key = ".".join(parts)
-                shard_weights[new_key] = value
-            elif key.startswith("embed_tokens") or key.startswith("norm") or key.startswith("lm_head"):
-                shard_weights[key] = value
+                shard_w[new_key] = value
 
-        if shard_weights:
-            shard_weights = self._sanitize_weights(shard_weights)
-            super().load_weights(list(shard_weights.items()), strict=strict)
+            elif key.startswith(
+                (
+                    "model.embed_tokens",
+                    "embed_tokens",
+                    "model.norm",
+                    "norm",
+                    "model.lm_head",
+                    "lm_head",
+                )
+            ):
+                new_key = key[6:] if key.startswith("model.") else key
+                shard_w[new_key] = value
 
-    def _sanitize_weights(self, weights: Dict[str, mx.array]) -> Dict[str, mx.array]:
-        # Mirror mlx-lm GPT-OSS sanitize behavior for fused gate_up_proj and quant keys
-        if any("gate_proj.weight" in k for k in weights.keys()):
-            return weights
-        new_weights: Dict[str, mx.array] = {}
-        for k, v in weights.items():
-            if "gate_up_proj" in k and "bias" not in k:
-                if "_blocks" in k:
-                    v = v.view(mx.uint32).flatten(-2)
-                    k = k.replace("_blocks", ".weight")
-                if "_scales" in k:
-                    k = k.replace("_scales", ".scales")
-                new_weights[k.replace("gate_up_proj", "gate_proj")] = mx.contiguous(
-                    v[..., ::2, :]
-                )
-                new_weights[k.replace("gate_up_proj", "up_proj")] = mx.contiguous(
-                    v[..., 1::2, :]
-                )
-            elif "down_proj" in k and "bias" not in k:
-                if "_blocks" in k:
-                    v = v.view(mx.uint32).flatten(-2)
-                    k = k.replace("_blocks", ".weight")
-                if "_scales" in k:
-                    k = k.replace("_scales", ".scales")
-                new_weights[k] = v
-            elif "gate_up_proj_bias" in k:
-                new_weights[k.replace("gate_up_proj_bias", "gate_proj.bias")] = (
-                    mx.contiguous(v[..., ::2])
-                )
-                new_weights[k.replace("gate_up_proj_bias", "up_proj.bias")] = (
-                    mx.contiguous(v[..., 1::2])
-                )
-            elif "down_proj_bias" in k:
-                new_weights[k.replace("down_proj_bias", "down_proj.bias")] = v
+        super().load_weights(list(shard_w.items()), strict=strict)
+
+    def make_cache(self) -> List[Any]:
+        caches: List[Any] = []
+        for abs_idx in self.local_to_abs:
+            lt = (
+                self.layer_types[abs_idx]
+                if abs_idx < len(self.layer_types)
+                else "full_attention"
+            )
+            if lt == "full_attention":
+                caches.append(KVCache())
             else:
-                new_weights[k] = v
-        return new_weights
-
-    def unload_layers(self, abs_layers: List[int]):
-        for abs_idx in abs_layers:
-            try:
-                local = self.abs_to_local.get(abs_idx)
-                if local is None:
-                    continue
-                block = self.layers[local]
-                self._shrink_block(block)
-            except Exception:
-                continue
-
-    def _shrink_linear_like(self, mod):
-        try:
-            for name in ("weight", "bias", "scales", "biases"):
-                if hasattr(mod, name):
-                    arr = getattr(mod, name)
-                    try:
-                        dt = arr.dtype
-                    except Exception:
-                        continue
-                    if name == "weight":
-                        new_arr = mx.zeros((1, 1), dtype=dt)
-                    else:
-                        new_arr = mx.zeros((1,), dtype=dt)
-                    setattr(mod, name, new_arr)
-        except Exception:
-            pass
-
-    def _shrink_block(self, block):
-        try:
-            if hasattr(block, "self_attn"):
-                attn = block.self_attn
-                for pn in ("q_proj", "k_proj", "v_proj", "o_proj"):
-                    if hasattr(attn, pn):
-                        self._shrink_linear_like(getattr(attn, pn))
-            if hasattr(block, "mlp"):
-                mlp = block.mlp
-                for pn in ("router", "gate_proj", "up_proj", "down_proj"):
-                    if hasattr(mlp, pn):
-                        self._shrink_linear_like(getattr(mlp, pn))
-        except Exception:
-            pass
+                caches.append(RotatingKVCache(max_size=self.window_size))
+        return caches
 
     @property
     def decoding_layers(self):
@@ -331,25 +373,12 @@ class GptOssRingModel(BaseRingModel):
 
     @property
     def head_dim(self) -> Tuple[int, int]:
-        hd = getattr(self.config, "head_dim", None)
-        if hd is None:
-            hd = int(self.config.hidden_size // self.config.num_attention_heads)
-        return (hd, hd)
+        return (self.config.head_dim, self.config.head_dim)
 
     @property
     def n_kv_heads(self) -> int:
-        return int(self.config.num_key_value_heads)
+        return self.config.num_key_value_heads
 
     @property
     def num_layers(self) -> int:
         return len(self.layers)
-
-    def make_cache(self):
-        caches: List[Any] = []
-        for abs_idx, local_idx in sorted(self.abs_to_local.items()):
-            lt = self.layer_types[abs_idx] if 0 <= abs_idx < len(self.layer_types) else "full_attention"
-            if lt == "sliding_attention" and self.window_size > 0:
-                caches.append(RotatingKVCache(max_size=self.window_size))
-            else:
-                caches.append(KVCache())
-        return caches

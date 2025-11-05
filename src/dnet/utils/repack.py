@@ -68,7 +68,9 @@ def _copy_non_weight_artifacts(src_root: Path, dst_root: Path) -> None:
             except Exception:
                 continue
         if copied:
-            print(f"[repack] Copied {copied} tokenizer/config artifact(s) to {dst_root}")
+            print(
+                f"[repack] Copied {copied} tokenizer/config artifact(s) to {dst_root}"
+            )
     except Exception:
         pass
 
@@ -167,7 +169,9 @@ def repack_per_layer(
     return out_root
 
 
-def ensure_repacked_for_layers(model_id: str, assigned_layers: List[int]) -> Tuple[Path, bool]:
+def ensure_repacked_for_layers(
+    model_id: str, assigned_layers: List[int]
+) -> Tuple[Path, bool]:
     """Create a deterministic per-model, per-assignment output directory and repack if needed.
 
     Returns the directory path containing repacked files.
@@ -177,7 +181,9 @@ def ensure_repacked_for_layers(model_id: str, assigned_layers: List[int]) -> Tup
     base_dir = Path(os.getenv("DNET_REPACK_DIR", "repacked_models"))
     out_root = base_dir / safe / layer_hash
     # Quick existence check: if at least one expected file exists, assume done
-    expected = out_root / f"layer_{int(sorted(set(assigned_layers))[0]):04d}.safetensors"
+    expected = (
+        out_root / f"layer_{int(sorted(set(assigned_layers))[0]):04d}.safetensors"
+    )
     repacked = False
     if not expected.exists():
         repack_per_layer(model_id, assigned_layers, out_root)

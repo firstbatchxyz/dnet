@@ -17,7 +17,13 @@ from .attrib import RingShardNodeAttributes
 class ComputeMixin(RingShardNodeAttributes):
     """Split out the hot-path compute from RingShardNode."""
 
-    def _delta_swap_eviction(self, window_layers: List[int], resident: List[int], activation_msg: ActivationMessage, early: bool = False) -> int:
+    def _delta_swap_eviction(
+        self,
+        window_layers: List[int],
+        resident: List[int],
+        activation_msg: ActivationMessage,
+        early: bool = False,
+    ) -> int:
         budget = max(1, int(self.window_size or 1))
         curr_set = set(window_layers)
         prev_only = [lid for lid in resident if lid not in curr_set]
@@ -133,14 +139,20 @@ class ComputeMixin(RingShardNodeAttributes):
                 # In sliding_fit with a single resident window, proactively evict only the
                 # non-needed head from the current resident set before loading new weights.
                 # This prevents LRU from evicting the useful tail during materialization.
-                if self._mode == "sliding_fit" and int(self._resident_windows) <= 1 and window_layers:
+                if (
+                    self._mode == "sliding_fit"
+                    and int(self._resident_windows) <= 1
+                    and window_layers
+                ):
                     try:
                         resident = []
                         try:
                             resident = self.weight_cache.get_resident_layers()  # type: ignore[union-attr]
                         except Exception:
                             resident = []
-                        evicted_cnt = self._delta_swap_eviction(window_layers, resident, activation_msg, early=True)
+                        evicted_cnt = self._delta_swap_eviction(
+                            window_layers, resident, activation_msg, early=True
+                        )
                         if evicted_cnt > 0:
                             did_early_swap = True
                     except Exception:
@@ -148,7 +160,10 @@ class ComputeMixin(RingShardNodeAttributes):
 
                 # Ensure weights for the window are resident and bind only if arrays changed
                 # if model fits and we've already bound these layers, skip the scan entirely.
-                fast_fit = (self._mode == "fit" and len(self._assigned_sorted) <= self.window_size)
+                fast_fit = (
+                    self._mode == "fit"
+                    and len(self._assigned_sorted) <= self.window_size
+                )
                 skip_scan = fast_fit and all(
                     (wl in self._bound_versions) for wl in window_layers
                 )
@@ -252,12 +267,16 @@ class ComputeMixin(RingShardNodeAttributes):
                                 self._recent_windows.append(list(window_layers))
                             else:
                                 prev = self._recent_windows.pop(0)
-                                self._delta_swap_eviction(window_layers, prev, activation_msg, early=False)
+                                self._delta_swap_eviction(
+                                    window_layers, prev, activation_msg, early=False
+                                )
                                 budget = max(1, int(self.window_size or 1))
                                 curr = list(window_layers)
                                 prev_only = [x for x in prev if x not in curr]
                                 keep_quota = max(0, budget - len(curr))
-                                keep_tail = prev_only[-keep_quota:] if keep_quota > 0 else []
+                                keep_tail = (
+                                    prev_only[-keep_quota:] if keep_quota > 0 else []
+                                )
                                 combined = list(keep_tail) + curr
                                 self._recent_windows.append(combined)
                         else:
@@ -293,10 +312,14 @@ class ComputeMixin(RingShardNodeAttributes):
                                     pass
                         else:
                             if not self._defer_unload:
-                                while len(self._recent_windows) > max(1, int(self._resident_windows)):
+                                while len(self._recent_windows) > max(
+                                    1, int(self._resident_windows)
+                                ):
                                     old = self._recent_windows.pop(0)
                                     try:
-                                        evicted_cnt = self.weight_cache.evict_layers(old)
+                                        evicted_cnt = self.weight_cache.evict_layers(
+                                            old
+                                        )
                                     except Exception:
                                         evicted_cnt = 0
                                     try:
@@ -436,16 +459,17 @@ class ComputeMixin(RingShardNodeAttributes):
                     logger.error(
                         "Failed to queue computed activation for sending: %s", e
                     )
-                
+
                 # Clean up input resources
                 self.input_pool.release(activation_msg.pool_id)
-                
 
                 # Optional unload/evict after stage
                 if self._mode != "sliding_fit":
                     if self._defer_unload:
                         try:
-                            while len(self._recent_windows) > max(1, int(self._resident_windows)):
+                            while len(self._recent_windows) > max(
+                                1, int(self._resident_windows)
+                            ):
                                 old = self._recent_windows.pop(0)
                                 try:
                                     evicted_cnt = self.weight_cache.evict_layers(old)

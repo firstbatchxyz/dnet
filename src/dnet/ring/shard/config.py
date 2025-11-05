@@ -41,7 +41,6 @@ class ShardConfig:
 
     resident_windows: int = 2
 
-
     wire_dtype: str = "fp16"
 
     # Warmup

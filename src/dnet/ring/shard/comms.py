@@ -237,7 +237,10 @@ class CommsMixin(RingShardNodeAttributes):
                                 self._prepare_window_blocking,
                                 list(first_window),
                             )
-                            self._prepared_by_nonce[activation_msg.nonce] = (list(first_window), fut)
+                            self._prepared_by_nonce[activation_msg.nonce] = (
+                                list(first_window),
+                                fut,
+                            )
                 except Exception:
                     pass
                 cb = activation_msg.callback_url or ""
@@ -359,16 +362,32 @@ class CommsMixin(RingShardNodeAttributes):
                     request = activation_msg.to_proto(data)
                     request.timestamp = utc_epoch_now()
                     if self._mode == "offload" and self.window_size > 0:
-                        next_window = self._next_local_layers(activation_msg.layer_id, self.window_size)
+                        next_window = self._next_local_layers(
+                            activation_msg.layer_id, self.window_size
+                        )
                         loop = asyncio.get_running_loop()
                         if next_window:
-                            fut = loop.run_in_executor(self.executor, self._prepare_window_blocking, list(next_window))
-                            self._prepared_by_nonce[activation_msg.nonce] = (list(next_window), fut)
+                            fut = loop.run_in_executor(
+                                self.executor,
+                                self._prepare_window_blocking,
+                                list(next_window),
+                            )
+                            self._prepared_by_nonce[activation_msg.nonce] = (
+                                list(next_window),
+                                fut,
+                            )
                         else:
                             first_window = self._assigned_sorted[: self.window_size]
                             if first_window:
-                                fut = loop.run_in_executor(self.executor, self._prepare_window_blocking, list(first_window))
-                                self._prepared_by_nonce[activation_msg.nonce] = (list(first_window), fut)
+                                fut = loop.run_in_executor(
+                                    self.executor,
+                                    self._prepare_window_blocking,
+                                    list(first_window),
+                                )
+                                self._prepared_by_nonce[activation_msg.nonce] = (
+                                    list(first_window),
+                                    fut,
+                                )
                     stream_used = False
                     ctx = await self._ensure_stream(activation_msg.nonce)
                     if (
@@ -404,7 +423,11 @@ class CommsMixin(RingShardNodeAttributes):
                         # In fit mode, avoid long unary stalls: use short deadline and min retries
                         # Streaming should be the norm; unary is a quick safety valve only.
                         ring_timeout = 3.0 if self._mode == "fit" else 30.0
-                        ring_retries = 1 if self._mode == "fit" else max(1, int(self._send_retries))
+                        ring_retries = (
+                            1
+                            if self._mode == "fit"
+                            else max(1, int(self._send_retries))
+                        )
                         # Emit a clear fallback log with reason/context
                         if self._profile:
                             if ctx is None:

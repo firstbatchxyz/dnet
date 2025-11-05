@@ -149,8 +149,8 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             asyncio.Queue(maxsize=queue_size)
         )
         # Token-delivery queue (final shard -> API)
-        self.activation_token_queue: asyncio.Queue[ActivationMessage] = (
-            asyncio.Queue(maxsize=queue_size)
+        self.activation_token_queue: asyncio.Queue[ActivationMessage] = asyncio.Queue(
+            maxsize=queue_size
         )
         self.ingress_q: asyncio.Queue[dnet_ring_pb2.ActivationRequest] = asyncio.Queue(
             maxsize=queue_size
@@ -281,7 +281,9 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 self.config = ShardConfig.for_mode(self._mode)
                 self._resident_windows = int(self.config.resident_windows)
                 eff_window_size = (
-                    local_count if (self._mode == "fit") else max(1, min(requested_w, local_count))
+                    local_count
+                    if (self._mode == "fit")
+                    else max(1, min(requested_w, local_count))
                 )
                 self.window_size = eff_window_size
 
@@ -319,7 +321,9 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             if self._mode in {"sliding_fit", "offload"}:
                 try:
                     t0_rep = time.perf_counter()
-                    repacked_dir, did_repack = ensure_repacked_for_layers(self.model_path, self._assigned_sorted)
+                    repacked_dir, did_repack = ensure_repacked_for_layers(
+                        self.model_path, self._assigned_sorted
+                    )
                     dt_rep_ms = (time.perf_counter() - t0_rep) * 1000.0
                     self.model_path = str(repacked_dir)
                     self.model_metadata = get_model_metadata(self.model_path)
@@ -335,7 +339,9 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                         dt_rep_ms,
                     )
                 except Exception as e:
-                    logger.warning("Node %s: Repack failed or skipped: %s", self.node_id, e)
+                    logger.warning(
+                        "Node %s: Repack failed or skipped: %s", self.node_id, e
+                    )
 
             # Initialize memory pools with final config sizes
             self.input_pool = LayerAwareMemoryPool(
@@ -361,8 +367,24 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 self.model_metadata.model_type,
                 self.model_metadata.model_config,
                 assigned_layers=self.assigned_layers,
-                shard_config=self.config,
+                is_api_layer=False,
             )
+            try:
+                applied = bool(
+                    self.model.apply_quantization_from_config(  # type: ignore[attr-defined]
+                        self.model_metadata.model_config,
+                        model_metadata=self.model_metadata,
+                    )
+                )
+                self.model.finalize_quantization_sinks()  # type: ignore[attr-defined]
+                logger.info(
+                    "[QUANT] applied=%s for model=%s",
+                    applied,
+                    self.model_metadata.model_type,
+                )
+
+            except RuntimeError as e:
+                logger.warning("[QUANT] apply failed: %s", e)
             self.model.eval()
             self.cache = make_cache(
                 self.model,
@@ -374,26 +396,16 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             try:
                 has_start = 0 in self.assigned_layers
                 has_end = (self.model_metadata.num_layers - 1) in self.assigned_layers
-                try:
-                    tied = bool(self.model.config.tie_word_embeddings)  # type: ignore[attr-defined]
-                except Exception:
-                    tied = False
+                tied = bool(getattr(self.model.config, "tie_word_embeddings", False))  # type: ignore[attr-defined]
 
                 loaded_cnt = 0
-                if has_start:
+                if has_start or (has_end and tied):
                     loaded_cnt += load_embeddings(self.model_metadata, self.model)
                 if has_end:
                     loaded_cnt += load_final_norm(self.model_metadata, self.model)
-                    if tied:
-                        # End shard needs embeddings for tied projection
-                        if not has_start:
-                            loaded_cnt += load_embeddings(self.model_metadata, self.model)  # fmt: skip
-                        try:
-                            setattr(self.model, "force_tied_head", True)
-                        except Exception:
-                            pass
-                    else:
+                    if not tied:
                         loaded_cnt += load_lm_head(self.model_metadata, self.model)
+
                 if loaded_cnt:
                     logger.info(
                         "Loaded %d API-layer tensors (start=%d end=%d tied=%d)",
@@ -430,11 +442,15 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 # Offload/sliding-fit: perform a small, offload-safe warmup for the first window
                 loop = asyncio.get_running_loop()
                 try:
-                    await loop.run_in_executor(self.executor, self._warmup_shard_offload)
+                    await loop.run_in_executor(
+                        self.executor, self._warmup_shard_offload
+                    )
                 except Exception:
                     self._warmup_shard_offload()
 
-            if self._mode == "offload" and not (self._warmup_completed and self._warmup_keep_flag):
+            if self._mode == "offload" and not (
+                self._warmup_completed and self._warmup_keep_flag
+            ):
                 initial_window = self._assigned_sorted[: self.window_size]
                 try:
                     fut = asyncio.get_running_loop().run_in_executor(

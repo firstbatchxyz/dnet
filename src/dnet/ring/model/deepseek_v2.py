@@ -16,6 +16,7 @@ class DeepseekV2RingModel(BaseRingModel):
         assigned_layers: Optional[List[int]] = None,
         is_api_layer: bool = False,
         shard_config: Optional[Any] = None,
+        model_metadata: Optional[Any] = None,
     ):
         super().__init__()
 
@@ -130,4 +131,3 @@ class DeepseekV2RingModel(BaseRingModel):
                 shard_weights[new_key] = value
         if shard_weights:
             super().load_weights(list(shard_weights.items()), strict=strict)
-

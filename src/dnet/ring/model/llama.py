@@ -6,7 +6,6 @@ from mlx_lm.models.base import create_attention_mask
 from mlx_lm.models.llama import ModelArgs, TransformerBlock
 
 from .base import BaseRingModel
-from ...utils.logger import logger
 
 
 class LlamaRingModel(BaseRingModel):
@@ -23,7 +22,7 @@ class LlamaRingModel(BaseRingModel):
         model_config: Any,
         assigned_layers: Optional[List[int]] = None,
         is_api_layer: bool = False,
-        shard_config: Optional[Any] = None,
+        model_metadata: Optional[Any] = None,
     ):
         super().__init__()
 
@@ -34,23 +33,8 @@ class LlamaRingModel(BaseRingModel):
         self.is_api_layer = is_api_layer
         self.config = config = ModelArgs.from_dict(model_config)
 
-        if "quantization" in model_config:
-            try:
-                from mlx.nn.layers.quantized import QuantizedEmbedding  # type: ignore
-
-                qcfg = model_config["quantization"]
-                bits = int(qcfg.get("bits", 8))
-                group = int(qcfg.get("group_size", 64))
-                self.embed_tokens = QuantizedEmbedding(
-                    config.vocab_size, config.hidden_size, group_size=group, bits=bits
-                )
-            except Exception as _e:
-                logger.warning(
-                    "QuantizedEmbedding unavailable (%s); using dense Embedding", _e
-                )
-                self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
-        else:
-            self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
+        # Always start dense; let nn.quantize handle conversion if configured
+        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         self.norm = nn.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         if not config.tie_word_embeddings:
             self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
@@ -58,83 +42,17 @@ class LlamaRingModel(BaseRingModel):
         self.layers: List[nn.Module] = []
         self.abs_to_local: Dict[int, int] = {}
 
-        self.is_quantized = "quantization" in model_config
-        if self.is_quantized:
-            self.quantization_config = model_config["quantization"]
-
         for i, layer in enumerate(sorted(assigned_layers or [])):
             self.layers.append(TransformerBlock(config))
             self.abs_to_local[layer] = i
 
-        # Optional post-init quantization of Linear layers for offload shards
-        if self.is_quantized and (not is_api_layer):
-            try:
-                bits = int(self.quantization_config.get("bits", 8))
-                group = int(self.quantization_config.get("group_size", 64))
+        # Quantization is handled at bind-time in load_weights
+        self._converted_to_quantized = False
 
-                def _quant_pred(p, m):
-                    return isinstance(m, nn.Linear)
-
-                nn.quantize(self, bits=bits, group_size=group, class_predicate=_quant_pred)
-                self._converted_to_quantized = True
-            except Exception as _e:
-                logger.warning("Init-time quantization failed: %s", _e)
-        else:
-            self._converted_to_quantized = False
-
-        self.force_tied_head: bool = False
         self._cached_mask_state = None
         self._cached_mask = None
 
         # Init-time lazy param shrink removed to simplify startup behavior.
-
-    def _shrink_linear_like(self, mod):
-        try:
-            for name in ("weight", "scales", "biases", "bias"):
-                if hasattr(mod, name):
-                    arr = getattr(mod, name)
-                    try:
-                        dt = arr.dtype
-                    except Exception:
-                        dt = mx.float16
-                    if name == "weight":
-                        new_arr = mx.zeros((1, 1), dtype=dt)
-                    elif name in ("scales", "biases", "bias"):
-                        new_arr = mx.zeros((1,), dtype=dt)
-                    else:
-                        continue
-                    setattr(mod, name, new_arr)
-        except Exception:
-            pass
-
-    def _shrink_block(self, block):
-        try:
-            if hasattr(block, "self_attn"):
-                attn = block.self_attn
-                for pn in ("q_proj", "k_proj", "v_proj", "o_proj"):
-                    if hasattr(attn, pn):
-                        self._shrink_linear_like(getattr(attn, pn))
-            if hasattr(block, "mlp"):
-                mlp = block.mlp
-                for pn in ("gate_proj", "up_proj", "down_proj"):
-                    if hasattr(mlp, pn):
-                        self._shrink_linear_like(getattr(mlp, pn))
-        except Exception:
-            pass
-
-    def unload_layers(self, abs_layers: List[int]):
-        # Shrink params for given absolute layer ids to placeholders.
-        # Safe for both quantized and unquantized models under windowed execution;
-        # layers will be re-bound before next use.
-        for abs_idx in abs_layers:
-            try:
-                local = self.abs_to_local.get(abs_idx)
-                if local is None:
-                    continue
-                block = self.layers[local]
-                self._shrink_block(block)
-            except Exception:
-                continue
 
     def embed(self, x: mx.array) -> mx.array:
         return self.embed_tokens(x)
@@ -143,7 +61,7 @@ class LlamaRingModel(BaseRingModel):
         return self.norm(x)
 
     def lm_project(self, x: mx.array) -> mx.array:
-        use_tied = bool(self.force_tied_head) or bool(getattr(self.config, "tie_word_embeddings", False))
+        use_tied = bool(getattr(self.config, "tie_word_embeddings", False))
         if use_tied or not hasattr(self, "lm_head"):
             return self.embed_tokens.as_linear(x)
         return self.lm_head(x)
@@ -206,17 +124,17 @@ class LlamaRingModel(BaseRingModel):
                     parts = parts[1:]
                 new_key = ".".join(parts)
                 shard_weights[new_key] = value
-            elif key.startswith("embed_tokens") or key.startswith("norm") or (
-                key.startswith("lm_head") and not self.config.tie_word_embeddings
+            elif (
+                key.startswith("embed_tokens")
+                or key.startswith("norm")
+                or (key.startswith("lm_head") and not self.config.tie_word_embeddings)
             ):
                 shard_weights[key] = value
 
-        try:
-            super().load_weights(list(shard_weights.items()), strict=strict)
-        except Exception as e:
-            logger.error("Failed to load weights: %s", e)
-            logger.error("Weight keys: %s", list(shard_weights.keys()))
-            raise
+        super().load_weights(list(shard_weights.items()), strict=strict)
+
+    # Map absolute config keys to local module paths for quantization overrides
+    # _abskey_to_local_path inherited from BaseRingModel handles mapping
 
     @property
     def decoding_layers(self):
@@ -224,7 +142,10 @@ class LlamaRingModel(BaseRingModel):
 
     @property
     def head_dim(self) -> Tuple[int, int]:
-        head_dim = self.config.head_dim or self.config.hidden_size // self.config.num_attention_heads
+        head_dim = (
+            self.config.head_dim
+            or self.config.hidden_size // self.config.num_attention_heads
+        )
         return (head_dim, head_dim)
 
     @property

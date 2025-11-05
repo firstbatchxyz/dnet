@@ -41,4 +41,3 @@ def print_startup_banner() -> None:
     if art.strip():
         # Prepend a newline so the art starts on a fresh line in logs
         logger.info("\n%s", art)
-

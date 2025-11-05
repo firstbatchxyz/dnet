@@ -270,8 +270,21 @@ def load_embeddings(model_metadata: ModelMetadata, model: BaseRingModel) -> int:
     weights: Dict[str, mx.array] = {}
     mapped_files: Dict[str, MappedFile] = {}
     try:
-        for k, wt in model_metadata.embed_tokens.items():
-            weights[get_model_embed_tokens_name(k)] = load_weight(wt, mapped_files)
+        embed_keys = set(model_metadata.embed_tokens.keys())
+        has_quant = any(("scales" in k) or ("blocks" in k) for k in embed_keys)
+        if has_quant:
+            for name in ("weight", "blocks", "scales", "biases"):
+                if name in embed_keys:
+                    wt = model_metadata.embed_tokens[name]
+                    weights[get_model_embed_tokens_name(name)] = load_weight(
+                        wt, mapped_files
+                    )
+        else:
+            if "weight" in embed_keys:
+                wt = model_metadata.embed_tokens["weight"]
+                weights[get_model_embed_tokens_name("weight")] = load_weight(
+                    wt, mapped_files
+                )
         if weights:
             model.load_weights(list(weights.items()), strict=False)
         return len(weights)
@@ -310,11 +323,13 @@ def load_lm_head(model_metadata: ModelMetadata, model: BaseRingModel) -> int:
         vocab_size = getattr(getattr(model, "config", {}), "vocab_size", None)
 
         lm_keys = set(model_metadata.lm_head.keys())
-        has_quant_head = any(k.startswith("scales") for k in lm_keys)
+        has_quant_head = any(("scales" in k) or ("blocks" in k) for k in lm_keys)
 
         if has_quant_head:
-            for k, wt in model_metadata.lm_head.items():
-                weights[get_lm_head_name(k)] = load_weight(wt, mapped_files)
+            for name in ("weight", "blocks", "scales", "biases"):
+                if name in lm_keys:
+                    wt = model_metadata.lm_head[name]
+                    weights[get_lm_head_name(name)] = load_weight(wt, mapped_files)
             logger.info("Loaded quantized lm_head params")
         else:
             w_info = model_metadata.lm_head.get("weight")
@@ -360,14 +375,11 @@ def load_api_layer_weights(model_metadata: ModelMetadata, model: BaseRingModel):
     cnt += load_embeddings(model_metadata, model)
     cnt += load_final_norm(model_metadata, model)
     # For head, respect tied setting if model exposes it
-    tied = bool(getattr(getattr(model, "config", object()), "tie_word_embeddings", False))
+    tied = bool(
+        getattr(getattr(model, "config", object()), "tie_word_embeddings", False)
+    )
     if not tied:
         cnt += load_lm_head(model_metadata, model)
-    else:
-        try:
-            setattr(model, "force_tied_head", True)
-        except Exception:
-            pass
     try:
         model.eval()
     except Exception:
@@ -464,9 +476,16 @@ def make_cache(
     kv_bits: int | None = None,
     kv_group: int | None = None,
 ):
-    """Create model KV cache with optional quantization.
-    """
-    caches = cache.make_prompt_cache(model)
+    """Create model KV cache with optional quantization."""
+    # Prefer a model-provided cache factory when available (e.g., GPT-OSS needs
+    # RotatingKVCache for sliding-attention layers). Fallback to mlx-lm default.
+    try:
+        if hasattr(model, "make_cache"):
+            caches = model.make_cache()  # type: ignore[attr-defined]
+        else:
+            caches = cache.make_prompt_cache(model)
+    except Exception:
+        caches = cache.make_prompt_cache(model)
     mode: str = (kv_mode or "fp16").strip().lower()
 
     if mode in {"8bit", "4bit", "quant", "q"}:

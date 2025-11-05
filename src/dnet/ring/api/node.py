@@ -6,7 +6,6 @@ import uuid
 import json
 from dataclasses import asdict
 from io import StringIO
-from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import httpx
@@ -44,7 +43,6 @@ from ...utils.logger import logger
 from ...utils.banner import print_startup_banner
 from ...utils.model import (
     ModelMetadata,
-    get_model_metadata,
     get_model_config_json,
     resolve_tokenizer_dir,
 )
@@ -327,7 +325,9 @@ class RingApiNode:
             results: Dict[str, Any] = {}
             async with httpx.AsyncClient() as http_client:
                 for name, props in shards.items():
-                    url = f"http://{props.local_ip}:{props.server_port}/cleanup_repacked"
+                    url = (
+                        f"http://{props.local_ip}:{props.server_port}/cleanup_repacked"
+                    )
                     try:
                         resp = await http_client.post(url, json=payload, timeout=30.0)
                         results[name] = resp.json()
@@ -462,7 +462,9 @@ class RingApiNode:
                 )
         except Exception:
             pass
-        print(f"Topology solution: k {solution.k}, w {solution.w}, n {solution.n}, objective: {solution.obj_value}")
+        print(
+            f"Topology solution: k {solution.k}, w {solution.w}, n {solution.n}, objective: {solution.obj_value}"
+        )
 
         logger.info(
             "Topology prepared: %d devices, %d layers",
@@ -574,7 +576,7 @@ class RingApiNode:
         # Decide model and assignments
         if self.topology:
             topology = self.topology
-            
+
             # Always use kv_bits from topology; log if caller asked for different
             kv_bits_use = topology.kv_bits
             if req.kv_bits != kv_bits_use:
@@ -583,7 +585,7 @@ class RingApiNode:
                     req.kv_bits,
                     kv_bits_use,
                 )
-            
+
             if topology.model:
                 logger.info(
                     "load_model request model %s overridden by topology model %s",

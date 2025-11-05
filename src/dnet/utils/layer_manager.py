@@ -269,7 +269,7 @@ class LayerManager:
                 return data
             except Exception:
                 data.clear()
-        
+
         # Default path: mmap-based per-tensor load
         for name, wt in weight_data.items():
             data[get_model_layer_name(layer_idx, name)] = load_weight(

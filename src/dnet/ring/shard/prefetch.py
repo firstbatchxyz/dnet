@@ -4,7 +4,6 @@ from .attrib import RingShardNodeAttributes
 
 
 class PrefetchMixin(RingShardNodeAttributes):
-
     def _prefetch_to_ram(self, layer_id: int):
         try:
             if self.weight_cache:

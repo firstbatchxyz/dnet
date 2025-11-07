@@ -488,6 +488,17 @@ def make_cache(
         caches = cache.make_prompt_cache(model)
     mode: str = (kv_mode or "fp16").strip().lower()
 
+    # GPT-OSS: attention sinks are not supported with quantized KV caches.
+    try:
+        if getattr(model, "model_type", None) == "gpt_oss" and mode in {"8bit", "4bit", "quant", "q"}:
+            logger.info(
+                "KV quantization requested (%s) but disabled for gpt_oss due to unsupported attention sinks; using fp16 KV cache",
+                mode,
+            )
+            return caches
+    except Exception:
+        pass
+
     if mode in {"8bit", "4bit", "quant", "q"}:
         bits_env = int(kv_bits if kv_bits is not None else 8)
         # Map mode shortcuts

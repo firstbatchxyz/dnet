@@ -300,7 +300,7 @@ class PrepareTopologyRequest(BaseModel):
     kv_bits: Literal["4bit", "8bit", "fp16"] = Field(
         default="4bit", description="KV cache quantization"
     )
-    seq_len: int = Field(default=256, description="Sequence length to optimize for")
+    seq_len: int = Field(default=512, description="Sequence length to optimize for")
     max_batch_exp: int = Field(
         default=2, description="Max batch size as power of 2 exponent"
     )

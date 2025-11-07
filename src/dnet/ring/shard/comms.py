@@ -540,7 +540,7 @@ class CommsMixin(RingShardNodeAttributes):
 
         try:
             # use thunderbolt here if available
-            this_properties = self.discovery.get_own_properties()
+            this_properties = await self.discovery.async_get_own_properties()
             thunderbolt_conn = discover_thunderbolt_connection(
                 this_properties,
                 self.next_node,

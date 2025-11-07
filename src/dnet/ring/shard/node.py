@@ -17,7 +17,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from grpc import aio as aio_grpc
 
-from dnet_p2p import DnetP2P, DnetDeviceProperties
+from dnet_p2p import AsyncDnetP2P, DnetDeviceProperties
 
 from dnet.utils.latency import calculate_median_latency_seconds
 from dnet.utils.serialization import tensor_to_bytes
@@ -187,7 +187,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         self.api_address: Optional[str] = None
 
         # Discovery
-        self.discovery = DnetP2P("lib/dnet-p2p/lib")
+        self.discovery = AsyncDnetP2P("lib/dnet-p2p/lib")
 
         # Background tasks
         self.background_tasks: List[asyncio.Task] = []
@@ -1135,8 +1135,8 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         # Stop discovery service
         if self.discovery.is_running():
             logger.info(f"Stopping discovery service for node {self.node_id}")
-            self.discovery.stop()
-            self.discovery.free_instance()
+            await self.discovery.async_stop()
+            await self.discovery.async_free_instance()
         else:
             logger.warning(f"Discovery service for node {self.node_id} was not running")
 
@@ -1177,7 +1177,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         self.compute_thread = threading.Thread(target=self._compute_worker, daemon=True)
         self.compute_thread.start()
 
-        self._start_discovery()
+        await self._start_discovery()
         logger.info(
             "Shard node %s started on gRPC port %s HTTP port %s",
             self.node_id,
@@ -1185,7 +1185,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             self.http_port,
         )
 
-    def _start_discovery(self) -> None:
+    async def _start_discovery(self) -> None:
         """Start discovery service."""
 
         hostname = gethostname()
@@ -1197,7 +1197,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             self.grpc_port,
             is_manager=False,  # shard is never a manager
         )
-        self.discovery.start()
+        await self.discovery.async_start()
         logger.info(
             "Discovery service started for shard node %s with name %s",
             self.node_id,

@@ -6,7 +6,7 @@ import threading
 from mlx.core import Dtype
 from queue import Queue
 from concurrent.futures import ThreadPoolExecutor
-from dnet_p2p import DnetDeviceProperties, DnetP2P
+from dnet_p2p import DnetDeviceProperties, AsyncDnetP2P
 
 from dnet.ring.data_types import ActivationMessage
 from dnet.ring.memory_pool import LayerAwareMemoryPool
@@ -45,7 +45,7 @@ class RingShardNodeAttributes:
     grpc_port: int
     http_port: int
     app: FastAPI
-    discovery: DnetP2P
+    discovery: AsyncDnetP2P
     next_node: Optional[DnetDeviceProperties]
     next_node_stub: Optional[Any]
 

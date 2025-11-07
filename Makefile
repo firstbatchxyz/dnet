@@ -23,6 +23,12 @@ pull:
 test:
 		uv run pytest -v
 
+.PHONY: reset-sync #   | Reset virtual environment and sync dependencies again
+reset-sync: 																																																
+		rm -rf .venv
+		rm uv.lock
+		uv sync
+
 .PHONY: help #         | List targets
 help:                                                                                                                    
 		@grep '^.PHONY: .* #' Makefile | sed 's/\.PHONY: \(.*\) # \(.*\)/\1 \2/' | expand -t20

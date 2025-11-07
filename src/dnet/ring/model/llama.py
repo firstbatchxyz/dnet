@@ -3,17 +3,19 @@ from typing import Any, Dict, List, Optional, Tuple
 import mlx.core as mx
 import mlx.nn as nn
 from mlx_lm.models.base import create_attention_mask
-from mlx_lm.models.qwen3 import ModelArgs, TransformerBlock
+from mlx_lm.models.llama import ModelArgs, TransformerBlock
 
 from .base import BaseRingModel
 
 
-class Qwen3RingModel(BaseRingModel):
-    """Qwen3 model for ring topology inference.
-    Supports layer-wise application and distributed inference.
+class LlamaRingModel(BaseRingModel):
+    """Llama model for ring topology inference.
+
+    Mirrors mlx-lm's Llama modules but constructs only the locally assigned
+    decoder blocks and exposes layer-wise application.
     """
 
-    model_type = "qwen3"
+    model_type = "llama"
 
     def __init__(
         self,
@@ -46,36 +48,30 @@ class Qwen3RingModel(BaseRingModel):
 
         # Quantization is handled at bind-time in load_weights
         self._converted_to_quantized = False
+
         self._cached_mask_state = None
         self._cached_mask = None
 
+        # Init-time lazy param shrink removed to simplify startup behavior.
+
     def embed(self, x: mx.array) -> mx.array:
-        if hasattr(self, "embed_tokens"):
-            return self.embed_tokens(x)
-        return x
+        return self.embed_tokens(x)
 
     def normalize(self, x: mx.array) -> mx.array:
-        if hasattr(self, "norm"):
-            return self.norm(x)
-        return x
+        return self.norm(x)
 
     def lm_project(self, x: mx.array) -> mx.array:
-        if hasattr(self, "lm_head") or hasattr(self, "embed_tokens"):
-            use_tied = bool(getattr(self.config, "tie_word_embeddings", False))
-            if use_tied or not hasattr(self, "lm_head"):
-                return self.embed_tokens.as_linear(x)
-            return self.lm_head(x)
-        return x
+        use_tied = bool(getattr(self.config, "tie_word_embeddings", False))
+        if use_tied or not hasattr(self, "lm_head"):
+            return self.embed_tokens.as_linear(x)
+        return self.lm_head(x)
 
     def forward(self, x: mx.array, cache: Optional[List[Any]] = None) -> mx.array:
         mask = create_attention_mask(x, cache)
-
         if cache is None:
             cache = [None] * len(self.layers)
-
         for i, layer in enumerate(self.layers):
             x = layer(x, mask, cache[i] if i < len(cache) else None)
-
         return x
 
     def apply_single_layer(
@@ -83,12 +79,11 @@ class Qwen3RingModel(BaseRingModel):
     ) -> mx.array:
         if layer_idx not in self.abs_to_local:
             raise RuntimeError(f"Layer {layer_idx} not hosted on this model instance")
-        #  TODO: Mask reuse should respect concurrent requests
+        # Create/reuse attention mask when T > 1
         try:
             T = int(x.shape[1]) if len(x.shape) > 1 else 1
         except Exception:
             T = 1
-        # dimension diagnostics removed
         mask = None
         if T > 1:
             if self._cached_mask_state is None or self._cached_mask_state != T:
@@ -102,17 +97,19 @@ class Qwen3RingModel(BaseRingModel):
                     self._cached_mask = mask
                     self._cached_mask_state = T
         local_idx = self.abs_to_local[layer_idx]
-
         c = None
         if cache is not None and local_idx < len(cache):
             c = cache[local_idx]
-
         return self.layers[local_idx](x, mask, c)
 
     # load_weights inherited from BaseRingModel
 
     def sanitize(self, weights):
-        # Qwen3: only handle tied embeddings
+        # Remove unused precomputed rotary freqs
+        weights = {
+            k: v for k, v in weights.items() if "self_attn.rotary_emb.inv_freq" not in k
+        }
+        # Respect tied embeddings
         try:
             if bool(getattr(self.config, "tie_word_embeddings", False)):
                 weights.pop("lm_head.weight", None)
@@ -120,13 +117,20 @@ class Qwen3RingModel(BaseRingModel):
             pass
         return weights
 
+    # Map absolute config keys to local module paths for quantization overrides
+    # _abskey_to_local_path inherited from BaseRingModel handles mapping
+
     @property
     def decoding_layers(self):
         return self.layers
 
     @property
     def head_dim(self) -> Tuple[int, int]:
-        return (self.config.head_dim, self.config.head_dim)
+        head_dim = (
+            self.config.head_dim
+            or self.config.hidden_size // self.config.num_attention_heads
+        )
+        return (head_dim, head_dim)
 
     @property
     def n_kv_heads(self) -> int:

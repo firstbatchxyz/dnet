@@ -1,13 +1,11 @@
 """Model metadata and weight loading utilities for dnet."""
 
-import os
 import ctypes
 import glob
 import json
 import mmap
 import re
 import struct
-import fcntl
 from collections import defaultdict
 from dataclasses import dataclass
 from functools import cached_property
@@ -17,7 +15,9 @@ from typing import Any, Dict, Tuple
 import mlx.core as mx
 import numpy as np
 from mlx_lm.utils import get_model_path
+from huggingface_hub import hf_hub_download
 from mlx_lm.models import cache
+from mlx_lm.models.cache import RotatingKVCache
 
 from .serialization import safetensor_dtype_map
 from ..ring.model.base import BaseRingModel
@@ -155,6 +155,63 @@ class ModelMetadata:
         return self.config
 
 
+def get_model_config_json(model_path: str) -> Dict[str, Any]:
+    """Load only the model's config.json without downloading weights.
+
+    If `model_path` is a local directory, reads config.json from it.
+    Otherwise, downloads just config.json from Hugging Face Hub.
+    """
+    p = Path(model_path)
+    if p.exists() and p.is_dir():
+        cfg_path = p / "config.json"
+        with open(cfg_path, "r") as f:
+            return json.load(f)
+    # Remote repo id: fetch config.json only
+    cfg_file = hf_hub_download(repo_id=model_path, filename="config.json")
+    with open(cfg_file, "r") as f:
+        return json.load(f)
+
+
+def resolve_tokenizer_dir(model: str | Path) -> Path:
+    """Return a local directory containing tokenizer assets for a model.
+
+    - If `model` is a local directory and contains tokenizer files, return it.
+    - Otherwise, download minimal tokenizer files from HF and return the cache dir.
+    """
+    p = Path(model)
+    if p.exists() and p.is_dir():
+        for name in ("tokenizer.json", "tokenizer.model"):
+            if (p / name).exists():
+                return p
+        # Fallback: still return p if it's a directory; load_tokenizer may handle variants
+        return p
+
+    # Remote repo id: fetch tokenizer files into HF cache and return their parent dir
+    candidates = [
+        "tokenizer.json",
+        "tokenizer.model",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+        "vocab.json",
+        "merges.txt",
+        "added_tokens.json",
+    ]
+    parent: Path | None = None
+    last_err: Exception | None = None
+    for fname in candidates:
+        try:
+            fpath = hf_hub_download(repo_id=str(model), filename=fname)
+            parent = Path(fpath).parent
+        except Exception as e:
+            last_err = e
+            continue
+    if parent is not None:
+        return parent
+    if last_err is not None:
+        raise last_err
+    raise FileNotFoundError("Could not resolve tokenizer files for model")
+
+
 class MappedFile:
     """Maps a file to memory."""
 
@@ -186,45 +243,11 @@ class MappedFile:
 
 def load_weight(wt: TensorInfo, mapped_files: Dict[str, MappedFile]) -> mx.array:
     offset, size = wt.offset, wt.size_bytes
-
-    # Optional direct-I/O mode (macOS friendly): avoid populating page cache.
-    try:
-        direct = os.getenv("RING_FILE_IO", "").strip().lower() == "direct"
-    except Exception:
-        direct = False
-
-    if direct:
-        try:
-            fd = os.open(wt.filename, os.O_RDONLY)
-        except Exception:
-            fd = -1
-        layer_bytes = None
-        if fd >= 0:
-            try:
-                try:
-                    fcntl.fcntl(
-                        fd, fcntl.F_NOCACHE, 1
-                    )  # macOS advisory: don't add to cache
-                except Exception:
-                    pass
-                try:
-                    layer_bytes = os.pread(fd, int(size), int(offset))
-                except OSError:
-                    layer_bytes = None
-            finally:
-                os.close(fd)
-        if layer_bytes is not None and len(layer_bytes) == size:
-            layer_data = memoryview(layer_bytes)
-        else:
-            # Fallback to mmap path if direct read fails
-            direct = False
-    if not direct:
-        if wt.filename not in mapped_files:
-            mapped_files[wt.filename] = MappedFile(wt.filename)
-        mapped_file = mapped_files[wt.filename]
-        # Use a memoryview into the mmap to avoid an intermediate bytes copy
-        mv = memoryview(mapped_file.mmap)
-        layer_data = mv[offset : offset + size]
+    if wt.filename not in mapped_files:
+        mapped_files[wt.filename] = MappedFile(wt.filename)
+    mapped_file = mapped_files[wt.filename]
+    mv = memoryview(mapped_file.mmap)
+    layer_data = mv[offset : offset + size]
 
     # Special handling for BF16
     if wt.dtype == "BF16":
@@ -247,8 +270,21 @@ def load_embeddings(model_metadata: ModelMetadata, model: BaseRingModel) -> int:
     weights: Dict[str, mx.array] = {}
     mapped_files: Dict[str, MappedFile] = {}
     try:
-        for k, wt in model_metadata.embed_tokens.items():
-            weights[get_model_embed_tokens_name(k)] = load_weight(wt, mapped_files)
+        embed_keys = set(model_metadata.embed_tokens.keys())
+        has_quant = any(("scales" in k) or ("blocks" in k) for k in embed_keys)
+        if has_quant:
+            for name in ("weight", "blocks", "scales", "biases"):
+                if name in embed_keys:
+                    wt = model_metadata.embed_tokens[name]
+                    weights[get_model_embed_tokens_name(name)] = load_weight(
+                        wt, mapped_files
+                    )
+        else:
+            if "weight" in embed_keys:
+                wt = model_metadata.embed_tokens["weight"]
+                weights[get_model_embed_tokens_name("weight")] = load_weight(
+                    wt, mapped_files
+                )
         if weights:
             model.load_weights(list(weights.items()), strict=False)
         return len(weights)
@@ -287,11 +323,13 @@ def load_lm_head(model_metadata: ModelMetadata, model: BaseRingModel) -> int:
         vocab_size = getattr(getattr(model, "config", {}), "vocab_size", None)
 
         lm_keys = set(model_metadata.lm_head.keys())
-        has_quant_head = any(k.startswith("scales") for k in lm_keys)
+        has_quant_head = any(("scales" in k) or ("blocks" in k) for k in lm_keys)
 
         if has_quant_head:
-            for k, wt in model_metadata.lm_head.items():
-                weights[get_lm_head_name(k)] = load_weight(wt, mapped_files)
+            for name in ("weight", "blocks", "scales", "biases"):
+                if name in lm_keys:
+                    wt = model_metadata.lm_head[name]
+                    weights[get_lm_head_name(name)] = load_weight(wt, mapped_files)
             logger.info("Loaded quantized lm_head params")
         else:
             w_info = model_metadata.lm_head.get("weight")
@@ -337,14 +375,11 @@ def load_api_layer_weights(model_metadata: ModelMetadata, model: BaseRingModel):
     cnt += load_embeddings(model_metadata, model)
     cnt += load_final_norm(model_metadata, model)
     # For head, respect tied setting if model exposes it
-    tied = bool(getattr(getattr(model, "config", object()), "tie_word_embeddings", False))
+    tied = bool(
+        getattr(getattr(model, "config", object()), "tie_word_embeddings", False)
+    )
     if not tied:
         cnt += load_lm_head(model_metadata, model)
-    else:
-        try:
-            setattr(model, "force_tied_head", True)
-        except Exception:
-            pass
     try:
         model.eval()
     except Exception:
@@ -425,7 +460,7 @@ def get_model_metadata(model_path) -> ModelMetadata:
     except Exception:
         cfg_layers = -1
     if cfg_layers > 0:
-        bad = [i for i in weight_info.keys() if i < 0 or i >= cfg_layers]
+        bad = [i for i in weight_info if i < 0 or i >= cfg_layers]
         if bad:
             raise RuntimeError(
                 f"Layer indices out of range for model (num_hidden_layers={cfg_layers}): {sorted(set(bad))}"
@@ -441,22 +476,35 @@ def make_cache(
     kv_bits: int | None = None,
     kv_group: int | None = None,
 ):
-    """Create model KV cache with optional quantization (config-only).
-
-    This function does not read environment variables. Callers must pass
-    kv_mode/bits/group explicitly, or rely on the defaults below.
-    """
-    caches = cache.make_prompt_cache(model)
-
-    # Resolve mode strictly from parameters (no env)
+    """Create model KV cache with optional quantization."""
+    # Prefer a model-provided cache factory when available (e.g., GPT-OSS needs
+    # RotatingKVCache for sliding-attention layers). Fallback to mlx-lm default.
+    try:
+        if hasattr(model, "make_cache"):
+            caches = model.make_cache()  # type: ignore[attr-defined]
+        else:
+            caches = cache.make_prompt_cache(model)
+    except Exception:
+        caches = cache.make_prompt_cache(model)
     mode: str = (kv_mode or "fp16").strip().lower()
 
-    if mode in {"int8", "int4", "quant", "q"}:
+    # GPT-OSS: attention sinks are not supported with quantized KV caches.
+    try:
+        if getattr(model, "model_type", None) == "gpt_oss" and mode in {"8bit", "4bit", "quant", "q"}:
+            logger.info(
+                "KV quantization requested (%s) but disabled for gpt_oss due to unsupported attention sinks; using fp16 KV cache",
+                mode,
+            )
+            return caches
+    except Exception:
+        pass
+
+    if mode in {"8bit", "4bit", "quant", "q"}:
         bits_env = int(kv_bits if kv_bits is not None else 8)
         # Map mode shortcuts
-        if mode == "int4":
+        if mode == "4bit":
             bits = 4
-        elif mode == "int8":
+        elif mode == "8bit":
             bits = 8
         else:
             bits = max(1, min(8, bits_env))
@@ -464,31 +512,41 @@ def make_cache(
 
         converted = []
         converted_any = False
+        skipped_rotating = 0
+        failed = 0
         for c in caches:
+            if isinstance(c, RotatingKVCache):
+                skipped_rotating += 1
+                converted.append(c)
+                continue
             if hasattr(c, "to_quantized"):
                 try:
-                    qc = c.to_quantized(group_size=group, bits=bits)  # type: ignore[attr-defined]
+                    qc = c.to_quantized(group_size=group, bits=bits)
                     converted.append(qc)
                     converted_any = True
-                except Exception as e:
-                    logger.warning(
-                        "KV quantization failed for one cache entry: %s; using fp16 entry",
-                        e,
-                    )
+                except Exception:
+                    failed += 1
                     converted.append(c)
             else:
                 converted.append(c)
 
         if converted_any:
-            logger.info(
-                "Enabled quantized KV cache: bits=%s, group_size=%s", bits, group
-            )
+            if skipped_rotating or failed:
+                logger.info(
+                    "Enabled quantized KV cache: bits=%s, group_size=%s (skipped_rotating=%s, failed=%s)",
+                    bits,
+                    group,
+                    skipped_rotating,
+                    failed,
+                )
+            else:
+                logger.info(
+                    "Enabled quantized KV cache: bits=%s, group_size=%s", bits, group
+                )
             return converted
         else:
             logger.info(
                 "KV quantization requested but not supported by cache type; using fp16 KV cache"
             )
             return caches
-
-    # Default fp16/unquantized cache
     return caches

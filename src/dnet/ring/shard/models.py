@@ -1,9 +1,8 @@
 """Shard models for dnet ring topology endpoints."""
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 from pydantic import BaseModel, Field
-from dnet_p2p.thunderbolt import ThunderboltConnection
-from dnet_p2p import DnetDeviceProperties
+from dnet_p2p import DnetDeviceProperties, ThunderboltConnection
 
 from dnet.utils.latency import LatencyResults
 
@@ -21,6 +20,12 @@ class ShardLoadModelRequest(BaseModel):
         default=None, description="Next shard in the ring"
     )
     window_size: int = Field(..., description="Window size (computed from k)")
+    residency_size: int = Field(
+        ..., description="Resident layers (n) allowed on GPU at once"
+    )
+    kv_bits: Literal["4bit", "8bit", "fp16"] = Field(
+        ..., description="KV cache quantization ('4bit'|'8bit'|'fp16')"
+    )
     api_callback_address: str = Field(
         ...,
         description="API callback address for final layer completion (gRPC host:port)",
@@ -84,6 +89,4 @@ class HealthResponse(BaseModel):
     queue_size: int = Field(..., description="Current activation queue size")
     grpc_port: int = Field(..., description="gRPC server port")
     http_port: int = Field(..., description="HTTP server port")
-    instance: Optional[str] = Field(
-        default=None, description="Short shard instance name (service label)"
-    )
+    instance: Optional[str] = Field(default=None, description="Shard name")

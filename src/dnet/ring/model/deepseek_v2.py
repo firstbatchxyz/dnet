@@ -16,6 +16,7 @@ class DeepseekV2RingModel(BaseRingModel):
         assigned_layers: Optional[List[int]] = None,
         is_api_layer: bool = False,
         shard_config: Optional[Any] = None,
+        model_metadata: Optional[Any] = None,
     ):
         super().__init__()
 
@@ -110,24 +111,4 @@ class DeepseekV2RingModel(BaseRingModel):
     def num_layers(self) -> int:
         return len(self.layers)
 
-    def load_weights(self, weights, strict=False):
-        """Load weights for local layers by remapping absolute -> local indices."""
-        shard_weights = {}
-        for key, value in weights:
-            # Accept both bare 'layers.*' and 'model.layers.*'
-            if key.startswith("model.layers.") or key.startswith("layers."):
-                parts = key.split(".")
-                idx_pos = 2 if parts[0] == "model" else 1
-                try:
-                    abs_idx = int(parts[idx_pos])
-                except Exception:
-                    continue
-                if abs_idx not in self.abs_to_local:
-                    continue
-                local_idx = self.abs_to_local[abs_idx]
-                parts[idx_pos] = str(local_idx)
-                new_key = ".".join(parts).replace("model.", "")
-                shard_weights[new_key] = value
-        if shard_weights:
-            super().load_weights(list(shard_weights.items()), strict=strict)
-
+    # load_weights inherited from BaseRingModel

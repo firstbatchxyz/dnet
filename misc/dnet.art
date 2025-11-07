@@ -1,0 +1,18 @@
+
+
+DNET [0.1.0]
+Distributed LLM inference on MLX.
+
+     .-----.  .-.--..                                               .-..=+--.  ----.   .....  +.    
+   ==-.    -==+##==#@#+-      -+#@@+======       .==-.        =###@+--.....=@o+.    ==-...===++=----    
+ =#-      .ooooo+  .oooo=    -@#-  .#ooooo-      #@-          @ooo#         @+.   -o#=. -oooo=   +o=
+=o       .oooo-.    oooo@          =#oooooo=    ##          .@ooo+          @-   +@-   .oooo-    @+ 
+@#      .oooo.     +oooo-         ++  @oooo=   ##     .    .oooo+   .@.      --.++    .oooo-     =  
+-@-    -oooo.     +oooo=         +=   @oooo=  ##     -#   .oooo+.--=o=               -oooo.         
+  ----+ooo@.     #ooo@-         #=    @oooo= @#      .@  -oooo-    ++  .            =oooo.          
+     =ooo@     .#ooo#.         #-     ooooo@@+        ++-oooo-       =#.           #oooo=           
+    =ooo@    -@oo@#.          #-      =@oooo#          @oooo=      .#+            #oooo=            
+ .=#ooo@   +###-.          .-@+        +ooo+         .+oooooo-...-#o=          --#oooo@.         
+
+                                                                                  https://dria.co/dnet
+                                                                                  Made with <3

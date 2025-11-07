@@ -12,7 +12,7 @@ from dnet.ring.shard import RingShardNode
 async def serve(
     grpc_port: int,
     http_port: int,
-    queue_size: int = 10,
+    queue_size: int = 128,
 ) -> None:
     """Serve the shard node.
 
@@ -69,7 +69,7 @@ def main() -> None:
         "-q",
         "--queue-size",
         type=int,
-        default=10,
+        default=256,
         help="Activation queue size (default: 10)",
     )
     args = ap.parse_args()

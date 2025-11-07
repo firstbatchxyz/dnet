@@ -146,16 +146,6 @@ curl http://localhost:8080/v1/devices \
   -H "Content-Type: application/json"
 ```
 
-> [!TIP]
->
-> You can use `dns-sd` in MacOS to check out devices over mDNS:
->
-> ```sh
-> dns-sd -Q _dnet_p2p._tcp.local. PTR
-> ```
->
-> See more instructions [here](https://github.com/firstbatchxyz/dnet-p2p?tab=readme-ov-file#discovering-with-dns-sd).
-
 ## Testing
 
 You can run Pytest tests via:

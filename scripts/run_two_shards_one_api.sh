@@ -80,7 +80,7 @@ if ! wait_for "http://localhost:${API_HTTP_PORT}/v1/health" 120 1; then
   exit 1
 fi
 
-echo "Discovering shard service names from API /v1/devices..."
+echo "Discovering shard names from API /v1/devices..."
 DEVICES_JSON=$(curl -X GET "http://localhost:${API_HTTP_PORT}/v1/devices")
 
 

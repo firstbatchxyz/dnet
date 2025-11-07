@@ -28,9 +28,8 @@ class WeightCache:
         prefetch_threads: int = 2,
         *,
         resident_windows: int = 2,
-        file_cache_mode: str = "auto",
-        file_dict_cap: Optional[int] = None,
-        eager_load: bool = False,
+        use_mxload_fastpath: bool = False,
+        prefetch_mode: str = "off",
     ):
         self.assigned_layers = assigned_layers
         # Resident budget: enforce up to N windows resident
@@ -48,9 +47,8 @@ class WeightCache:
             model_metadata,
             assigned_layers,
             thread_pool_size=int(prefetch_threads or 2),
-            file_cache_mode=file_cache_mode,
-            file_cache_cap=file_dict_cap,
-            eager_load=eager_load,
+            use_mxload_fastpath=bool(use_mxload_fastpath),
+            prefetch_mode=prefetch_mode,
         )
         self.lock = threading.Lock()
         # Track in-flight materializations so compute can wait on prefetch
@@ -72,12 +70,6 @@ class WeightCache:
                     self.reference_counts[layer_id] = (
                         self.reference_counts.get(layer_id, 0) + 1
                     )
-                logger.debug(
-                    "Cache hit for layer %s, ref=%d inc=%d",
-                    layer_id,
-                    self.reference_counts.get(layer_id, 0),
-                    int(inc_ref),
-                )
                 return data
 
             # If a load is in-flight, wait on it outside the lock
@@ -151,12 +143,7 @@ class WeightCache:
                 logger.error("Wait for layer %s load failed: %s", layer_id, e)
                 return None
             wait_ms = (time.perf_counter() - t0w) * 1000.0
-            try:
-                logger.info(
-                    "[PROFILE][WAIT-WEIGHT] layer=%s ms=%.2f", layer_id, wait_ms
-                )
-            except Exception:
-                pass
+            logger.info("[PROFILE][WAIT-WEIGHT] layer=%s ms=%.2f", layer_id, wait_ms)
             # Return from cache (now populated) and update ref/LRU
             with self.lock:
                 data, _ = self.cache.get(layer_id, (None, 0.0))  # type: ignore[assignment]
@@ -176,11 +163,6 @@ class WeightCache:
         with self.lock:
             if layer_id in self.reference_counts:
                 self.reference_counts[layer_id] -= 1
-                logger.debug(
-                    "Decreased ref count for %s: %d",
-                    layer_id,
-                    self.reference_counts[layer_id],
-                )
 
     def prefetch_to_ram(self, layer_id: int):
         """Asynchronously hint the OS to prefetch layer pages into RAM.
@@ -189,6 +171,9 @@ class WeightCache:
         pages to speed up subsequent `get_weight` loads.
         """
         try:
+            # Respect config: skip entirely if prefetch is off
+            if self.layer_manager._prefetch_mode == "off":
+                return None
             # Avoid spamming prefetch for the same layer; reuse in-flight
             f = self.prefetch_futures.get(layer_id)
             if f is not None and not f.done():
@@ -196,8 +181,7 @@ class WeightCache:
             f = self.layer_manager.async_prefetch(layer_id)
             self.prefetch_futures[layer_id] = f
             return f
-        except Exception as e:
-            logger.debug("Prefetch to RAM failed for layer %s: %s", layer_id, e)
+        except Exception:
             return None
 
     def cancel_all_prefetch(self):
@@ -254,7 +238,7 @@ class WeightCache:
             del self.cache[layer_id]
             if layer_id in self.reference_counts:
                 del self.reference_counts[layer_id]
-            logger.info("Proactively evicted layer %s from cache", layer_id)
+            logger.debug("Proactively evicted layer %s from cache", layer_id)
             return True
 
     def evict_layers(self, layer_ids: List[int]) -> int:
@@ -267,3 +251,13 @@ class WeightCache:
             except Exception:
                 continue
         return count
+
+    def get_resident_layers(self) -> List[int]:
+        """Return the current resident layer ids ordered by recency.
+
+        Ordering is from oldest to newest based on last access time. This allows
+        callers to keep the most recently used tail and evict the least recent head.
+        """
+        with self.lock:
+            items = sorted(self.cache.items(), key=lambda kv: kv[1][1])
+            return [lid for lid, _ in items]

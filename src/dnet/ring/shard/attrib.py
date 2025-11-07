@@ -1,4 +1,4 @@
-from typing import Callable, Optional, Any
+from typing import Literal, Optional, Any
 from fastapi import FastAPI
 import grpc.aio as aio_grpc
 import asyncio
@@ -24,11 +24,6 @@ class RingShardNodeAttributes:
     _mlx_lock: threading.Lock
 
     # prefetch-related
-    _prefetch_scheduled: set[int]
-    _prefetch_pending: set[int]
-    _prefetch_pause: threading.Event
-    _prefetch_active = 0
-
     _streaming_enabled: bool
 
     _resident_windows: int
@@ -36,15 +31,15 @@ class RingShardNodeAttributes:
     node_id: int
     running: bool
     weight_cache: WeightCache
-    weight_prefetch_queue: Queue[int]
-    _materialize_prefetch_default: bool
     executor: ThreadPoolExecutor
-    _touch_during_compute: bool
     _compute_busy: threading.Event
+    _prepared_window_layers: list[int]
+    _prepare_fut: Optional[Any]
 
     activation_computed_queue: asyncio.Queue[ActivationMessage]
     _defer_unload: bool
     _warmup_keep_flag: bool
+    _warmup_completed: bool
 
     # node
     grpc_port: int
@@ -78,15 +73,37 @@ class RingShardNodeAttributes:
     assigned_layers: list[int]
     window_size: int
 
+    _streams: dict[str, Any]
+    _stream_idle_s: float
+
     _assigned_sorted: list[int]
     _bound_versions: dict[int, int]
 
     next_node_channel: Optional[aio_grpc.Channel]
     next_node_stub: Optional[Any]
 
-    # shared methods
-    _prefetch_to_ram: Callable[[int], None]
-    _clear_prefetch_state: Callable[[], None]
-    _enqueue_weight_prefetch: Callable[[int], None]
-    _next_local_layers: Callable[[int, int], list[int]]
-    _get_or_make_kv: Callable[[str], list]
+    _mode: Literal["sliding_fit", "fit", "offload"]
+
+    # compression
+    _compression_pct: float
+    _compress: bool
+    _compress_min_bytes: int
+
+    # shared methods (declared for type checking; implemented by mixins/node)
+    def _prefetch_to_ram(
+        self, layer_id: int
+    ) -> None:  # pragma: no cover - interface stub
+        raise NotImplementedError
+
+    def _enqueue_weight_prefetch(
+        self, layer_id: int
+    ) -> None:  # pragma: no cover - interface stub
+        raise NotImplementedError
+
+    def _next_local_layers(
+        self, after_layer: int, count: int
+    ) -> list[int]:  # pragma: no cover - interface stub
+        raise NotImplementedError
+
+    def _get_or_make_kv(self, nonce: str) -> list:  # pragma: no cover - interface stub
+        raise NotImplementedError

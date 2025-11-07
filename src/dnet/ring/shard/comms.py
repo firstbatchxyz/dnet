@@ -13,8 +13,8 @@ import numpy as np
 from dnet_p2p import (
     DnetDeviceProperties,
     discover_thunderbolt_connection,
+    ThunderboltConnection,
 )
-from dnet_p2p.thunderbolt import ThunderboltConnection
 from dnet.utils.latency import DeviceLatencyResult, LatencyMeasurement, LatencyResults
 
 from ...utils.grpc_config import GRPC_AIO_OPTIONS
@@ -53,7 +53,7 @@ class CommsMixin(RingShardNodeAttributes):
             if not hasattr(self.next_node_stub, "StreamActivations"):
                 self._streaming_enabled = False
                 return None
-            ctx = getattr(self, "_streams", {}).get(nonce)
+            ctx = self._streams.get(nonce)
             if ctx and ctx.open:
                 # If the stream was temporarily disabled (e.g., backpressure),
                 # automatically re-enable after the backoff interval elapses.
@@ -66,8 +66,7 @@ class CommsMixin(RingShardNodeAttributes):
                 return ctx
 
             ctx = _StreamCtx(nonce=nonce, queue=asyncio.Queue(maxsize=64))
-            if not hasattr(self, "_streams"):
-                self._streams = {}
+            # _streams exists; initialized in node __init__
             self._streams[nonce] = ctx
 
             async def _req_iter():
@@ -95,7 +94,7 @@ class CommsMixin(RingShardNodeAttributes):
                         # Temporary backoff on backpressure; do not permanently disable
                         msg = str(getattr(ack, "message", "")).lower()
                         if "backpressure" in msg:
-                            backoff_s = float(getattr(self, "_stream_backoff_s", 0.5))
+                            backoff_s = float(self._stream_backoff_s)
                             loop = asyncio.get_running_loop()
                             ctx.disabled = True
                             ctx.disabled_until = loop.time() + backoff_s
@@ -111,7 +110,7 @@ class CommsMixin(RingShardNodeAttributes):
             return None
 
     async def _end_stream(self, nonce: str, *, eor: bool = False):
-        ctx = getattr(self, "_streams", {}).pop(nonce, None)
+        ctx = self._streams.pop(nonce, None)
         if not ctx:
             return
 
@@ -135,14 +134,14 @@ class CommsMixin(RingShardNodeAttributes):
             ctx.ack_task.cancel()
 
     async def _stream_sweeper(self):
-        idle_s = float(getattr(self, "_stream_idle_s", 2.0))
-        while getattr(self, "running", False):
+        idle_s = float(self._stream_idle_s)
+        while self.running:
             try:
                 if not self._streaming_enabled:
                     await asyncio.sleep(1.0)
                     continue
                 now = asyncio.get_running_loop().time()
-                for nonce, ctx in list(getattr(self, "_streams", {}).items()):
+                for nonce, ctx in list(self._streams.items()):
                     if (now - ctx.last_activity_t) > idle_s:
                         await self._end_stream(nonce, eor=False)
                 await asyncio.sleep(1.0)
@@ -173,7 +172,7 @@ class CommsMixin(RingShardNodeAttributes):
         ):
             try:
                 activation_msg = await self.activation_computed_queue.get()
-                if getattr(activation_msg, "tx_enq_perf_t", 0.0) and self._profile:
+                if activation_msg.tx_enq_perf_t and self._profile:
                     q_wait_ms = (
                         time.perf_counter() - activation_msg.tx_enq_perf_t
                     ) * 1000.0
@@ -190,6 +189,35 @@ class CommsMixin(RingShardNodeAttributes):
             except Exception as e:
                 logger.error("Send worker error: %s", e)
 
+    async def _send_token_worker(self):
+        """Dedicated worker for final token delivery to API.
+
+        Separating this from ring-forward sends avoids head-of-line blocking
+        when ring transport experiences retries/timeouts.
+        """
+        while self.running or (
+            hasattr(self, "activation_token_queue")
+            and not self.activation_token_queue.empty()
+        ):
+            try:
+                activation_msg = await self.activation_token_queue.get()
+                if activation_msg.tx_enq_perf_t and self._profile:
+                    q_wait_ms = (
+                        time.perf_counter() - activation_msg.tx_enq_perf_t
+                    ) * 1000.0
+                    logger.info(
+                        "[PROFILE][QUEUE-TX] node=%s nonce=%s wait_ms=%.3f size=%s",
+                        self.node_id,
+                        activation_msg.nonce,
+                        q_wait_ms,
+                        self.activation_token_queue.qsize(),
+                    )
+                await self._send_activation(activation_msg)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Token send worker error: %s", e)
+
     async def _send_activation(self, activation_msg: ActivationMessage):
         if not self.output_pool or not self.model_metadata:
             logger.error(
@@ -198,8 +226,23 @@ class CommsMixin(RingShardNodeAttributes):
             )
             return
         try:
-            # Handle final token path (end-shard sampling)
-            if getattr(activation_msg, "is_final", False):
+            if activation_msg.is_final:
+                try:
+                    if self._mode == "offload" and self.window_size > 0:
+                        first_window = self._assigned_sorted[: self.window_size]
+                        if first_window:
+                            loop = asyncio.get_running_loop()
+                            fut = loop.run_in_executor(
+                                self.executor,
+                                self._prepare_window_blocking,
+                                list(first_window),
+                            )
+                            self._prepared_by_nonce[activation_msg.nonce] = (
+                                list(first_window),
+                                fut,
+                            )
+                except Exception:
+                    pass
                 cb = activation_msg.callback_url or ""
                 parsed = urlparse(cb) if cb else None
                 t_rpc = time.perf_counter()
@@ -272,20 +315,16 @@ class CommsMixin(RingShardNodeAttributes):
 
             if self._profile:
                 logger.info(
-                    "[PROFILE][SER-START] node=%s nonce=%s prefetch_active=%s pending=%s queue=%s",
+                    "[PROFILE][SER-START] node=%s nonce=%s",
                     self.node_id,
                     activation_msg.nonce,
-                    self._prefetch_active,
-                    len(self._prefetch_pending),
-                    self.weight_prefetch_queue.qsize(),
                 )
             t_ser = time.perf_counter()
             t_cast = t_ser
 
             _len_bytes = int(getattr(shaped, "nbytes", 0))
             _do_compress = bool(
-                getattr(self, "_compress", False)
-                and _len_bytes >= getattr(self, "_compress_min_bytes", 65536)
+                self._compress and _len_bytes >= self._compress_min_bytes
             )
             if _do_compress:
                 # Skip compression for decode.
@@ -298,6 +337,7 @@ class CommsMixin(RingShardNodeAttributes):
             if isinstance(shaped, np.ndarray):
                 logger.warning("Activation tensor is a numpy array!!!")
                 if shaped.dtype != wire_np_dtype:
+                    # FIXME: numpy vs mx array here
                     shaped = shaped.astype(wire_np_dtype, copy=False)
             else:
                 # MLX array -> cast to desired wire dtype
@@ -321,7 +361,33 @@ class CommsMixin(RingShardNodeAttributes):
                 if self.next_node_stub:
                     request = activation_msg.to_proto(data)
                     request.timestamp = utc_epoch_now()
-                    # Prefer streaming if enabled/available; fallback to unary
+                    if self._mode == "offload" and self.window_size > 0:
+                        next_window = self._next_local_layers(
+                            activation_msg.layer_id, self.window_size
+                        )
+                        loop = asyncio.get_running_loop()
+                        if next_window:
+                            fut = loop.run_in_executor(
+                                self.executor,
+                                self._prepare_window_blocking,
+                                list(next_window),
+                            )
+                            self._prepared_by_nonce[activation_msg.nonce] = (
+                                list(next_window),
+                                fut,
+                            )
+                        else:
+                            first_window = self._assigned_sorted[: self.window_size]
+                            if first_window:
+                                fut = loop.run_in_executor(
+                                    self.executor,
+                                    self._prepare_window_blocking,
+                                    list(first_window),
+                                )
+                                self._prepared_by_nonce[activation_msg.nonce] = (
+                                    list(first_window),
+                                    fut,
+                                )
                     stream_used = False
                     ctx = await self._ensure_stream(activation_msg.nonce)
                     if (
@@ -354,14 +420,40 @@ class CommsMixin(RingShardNodeAttributes):
                             ctx.disabled = True
 
                     if not stream_used:
+                        # In fit mode, avoid long unary stalls: use short deadline and min retries
+                        # Streaming should be the norm; unary is a quick safety valve only.
+                        ring_timeout = 3.0 if self._mode == "fit" else 30.0
+                        ring_retries = (
+                            1
+                            if self._mode == "fit"
+                            else max(1, int(self._send_retries))
+                        )
+                        # Emit a clear fallback log with reason/context
+                        if self._profile:
+                            if ctx is None:
+                                reason = "no_stream_ctx"
+                            elif not ctx.open:
+                                reason = "stream_closed"
+                            elif ctx.disabled:
+                                reason = "stream_disabled"
+                            else:
+                                reason = "enqueue_failed"
+                            logger.warning(
+                                "[STREAM->UNARY] node=%s nonce=%s reason=%s mode=%s timeout_s=%.1f retries=%d",
+                                self.node_id,
+                                activation_msg.nonce,
+                                reason,
+                                self._mode,
+                                ring_timeout,
+                                ring_retries,
+                            )
                         t0 = time.perf_counter()
-                        max_attempts = max(1, int(getattr(self, "_send_retries", 3)))
                         last_exc: Optional[Exception] = None
-                        for attempt in range(1, max_attempts + 1):
+                        for attempt in range(1, ring_retries + 1):
                             try:
                                 # FIXME: use response here?
                                 _ = await self.next_node_stub.SendActivation(
-                                    request, timeout=30.0
+                                    request, timeout=ring_timeout
                                 )  # type: ignore
                                 break
                             except grpc.aio.AioRpcError as e:  # type: ignore
@@ -375,7 +467,7 @@ class CommsMixin(RingShardNodeAttributes):
                                     logger.warning(
                                         "SendActivation attempt %s/%s failed (%s); reconnecting...",
                                         attempt,
-                                        max_attempts,
+                                        ring_retries,
                                         code.name,
                                     )
                                     await self._reconnect_next_node()
@@ -395,40 +487,6 @@ class CommsMixin(RingShardNodeAttributes):
                             rpc_ms,
                             cast_ms,
                         )
-
-                    try:
-                        t_flush = time.perf_counter()
-                        flushed = 0
-                        for lid in list(self._prefetch_pending):
-                            self._prefetch_to_ram(lid)
-                            self.weight_prefetch_queue.put_nowait(lid)
-                            self._prefetch_pending.discard(lid)
-                            flushed += 1
-                        if self._profile:
-                            logger.info(
-                                "[PROFILE][SER-END] node=%s nonce=%s flushed=%s flush_ms=%.2f",
-                                self.node_id,
-                                activation_msg.nonce,
-                                flushed,
-                                (time.perf_counter() - t_flush) * 1000.0,
-                            )
-                    except Exception:
-                        pass
-                    finally:
-                        try:
-                            self._prefetch_pause.clear()
-                        except Exception:
-                            pass
-
-                    try:
-                        next_window = self._next_local_layers(
-                            activation_msg.layer_id, self.window_size
-                        )
-                        for nl in next_window:
-                            self._prefetch_to_ram(nl)
-                            self._enqueue_weight_prefetch(nl)
-                    except Exception:
-                        pass
                 else:
                     logger.error(
                         "Cannot forward activation - no next node configured; end shard should sample inline."
@@ -438,43 +496,15 @@ class CommsMixin(RingShardNodeAttributes):
                     "Final activation reached send path unexpectedly; sampling should occur on end shard."
                 )
 
-                # Resume prefetch and flush deferred
-                try:
-                    t_flush = time.perf_counter()
-                    flushed = 0
-                    for lid in list(self._prefetch_pending):
-                        self._prefetch_to_ram(lid)
-                        self.weight_prefetch_queue.put_nowait(lid)
-                        self._prefetch_pending.discard(lid)
-                        flushed += 1
-                    if self._profile:
-                        logger.info(
-                            "[PROFILE][SER-END] node=%s nonce=%s flushed=%s flush_ms=%.2f",
-                            self.node_id,
-                            activation_msg.nonce,
-                            flushed,
-                            (time.perf_counter() - t_flush) * 1000.0,
-                        )
-                except Exception:
-                    pass
-                finally:
-                    try:
-                        self._prefetch_pause.clear()
-                    except Exception:
-                        pass
-
                 # Clear scheduling at request end
-                try:
-                    self._clear_prefetch_state()
-                except Exception:
-                    pass
+                # Sequential offload: prefetch state is unused
 
                 # Optional: explicitly end the per-nonce stream on request completion
                 # Enable by setting RING_EXPLICIT_EOR=1 when you emit a true end-of-request signal.
                 try:
-                    if getattr(self, "_explicit_eor", False):
+                    if self._explicit_eor:
                         if (
-                            getattr(self, "_streams", None)
+                            hasattr(self, "_streams")
                             and activation_msg.nonce in self._streams
                         ):
                             await self._end_stream(activation_msg.nonce, eor=True)
@@ -566,17 +596,16 @@ class CommsMixin(RingShardNodeAttributes):
         """
         latency_results_dict: dict[str, DeviceLatencyResult] = {}
 
-        for service_name, device_info in devices.items():
+        for instance, device_info in devices.items():
             # Skip measuring latency to ourselves
-            # FIXME: just equals check should suffice here?
-            if service_name.startswith(self.discovery.instance_name()):
-                logger.debug("Skipping latency measurement to self: %s", service_name)
+            if instance == self.discovery.instance_name():
+                logger.debug("Skipping latency measurement to self: %s", instance)
                 continue
 
             # Skip measuring latency to API (manager) devices
             if device_info.is_manager:
                 logger.debug(
-                    "Skipping latency measurement to manager/API: %s", service_name
+                    "Skipping latency measurement to manager/API: %s", instance
                 )
                 continue
 
@@ -584,27 +613,25 @@ class CommsMixin(RingShardNodeAttributes):
                 shard_port = device_info.shard_port
 
                 # Check for Thunderbolt connection
-                if service_name in thunderbolts:
-                    tb_data = thunderbolts[service_name]
-                    service_ip = tb_data.ip_addr
+                if instance in thunderbolts:
+                    tb_data = thunderbolts[instance]
+                    instance_tb_ip = tb_data.ip_addr
                     logger.info(
                         "Using Thunderbolt for %s at %s, connected to instance %s",
-                        service_name,
-                        service_ip,
+                        instance,
+                        instance_tb_ip,
                         tb_data.instance,
                     )
                 else:
                     # No Thunderbolt, use WiFi
-                    service_ip = device_info.local_ip
+                    instance_tb_ip = device_info.local_ip
 
-                if not shard_port or not service_ip:
-                    logger.warning(
-                        "No shard_port or local_ip for device %s", service_name
-                    )
+                if not shard_port or not instance_tb_ip:
+                    logger.warning("No shard_port or local_ip for device %s", instance)
                     continue
 
                 # Connect to target shard's gRPC server
-                target_address = f"{service_ip}:{shard_port}"
+                target_address = f"{instance_tb_ip}:{shard_port}"
                 channel = aio_grpc.insecure_channel(target_address)
                 from ...protos.dnet_ring_pb2_grpc import DnetRingServiceStub
 
@@ -656,19 +683,19 @@ class CommsMixin(RingShardNodeAttributes):
                     success=True,
                     error=None,
                 )
-                latency_results_dict[service_name] = result
+                latency_results_dict[instance] = result
 
                 # Close channel
                 await channel.close()
 
             except Exception as e:
-                logger.error("Error measuring latency to %s: %s", service_name, e)
+                logger.error("Error measuring latency to %s: %s", instance, e)
                 result = DeviceLatencyResult(
                     target_node_id=None,
                     success=False,
                     error=str(e),
                     measurements=[],
                 )
-                latency_results_dict[service_name] = result
+                latency_results_dict[instance] = result
 
         return LatencyResults(results=latency_results_dict)

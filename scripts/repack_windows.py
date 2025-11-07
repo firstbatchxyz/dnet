@@ -15,6 +15,9 @@ Notes:
   - Resolves --model-dir like runtime (supports HF repo ids).
   - Loads only tensors for selected layers using memory-mapped I/O.
   - Saves keys as "model.layers.<idx>.<name>" for compatibility.
+  - Also copies non-weight artifacts (tokenizer, configs, etc.) from the source
+    model directory to the output root so the repacked set is loadable by the API
+    out of the box.
 """
 
 from __future__ import annotations
@@ -44,18 +47,39 @@ def repack_windows(
     md = get_model_metadata(str(model_dir))
     mapped_files: Dict[str, MappedFile] = {}
     written: List[Path] = []
-    # Ensure the destination root contains the correct config.json from the source model
+    # Ensure the destination root contains tokenizer/config artifacts from source
     try:
         out_root = out_prefix.parent
         out_root.mkdir(parents=True, exist_ok=True)
-        src_cfg = Path(md.path) / "config.json"
-        dst_cfg = out_root / "config.json"
-        if src_cfg.exists():
-            # Always copy the source config to avoid stale/mismatched configs
-            shutil.copy2(src_cfg, dst_cfg)
-            print(f"Copied config.json to {dst_cfg}")
+
+        src_root = Path(md.path)
+        # Copy "non-weight" artifacts: skip large weight formats
+        skip_exts = {
+            ".safetensors",
+            ".bin",
+            ".pt",
+            ".pth",
+            ".ckpt",
+            ".npz",
+            ".gguf",
+            ".onnx",
+        }
+        copied = 0
+        for entry in src_root.iterdir():
+            if not entry.is_file():
+                continue
+            if entry.suffix.lower() in skip_exts:
+                continue
+            try:
+                dst = out_root / entry.name
+                shutil.copy2(entry, dst)
+                copied += 1
+            except Exception as e:
+                print(f"Warning: failed to copy {entry.name}: {e}")
+        if copied:
+            print(f"Copied {copied} non-weight file(s) (tokenizer/config/etc.) to {out_root}")
     except Exception as e:
-        print(f"Warning: failed to place config.json: {e}")
+        print(f"Warning: failed to copy non-weight artifacts: {e}")
     try:
         for chunk in chunks:
             if not chunk:
@@ -78,6 +102,30 @@ def repack_windows(
             mx.save_safetensors(str(out_path), subset)
             written.append(out_path)
             print(f"Wrote {out_path} with {len(subset)} tensors")
+        # Always include API-layer tensors (embeddings, final norm, lm head)
+        api_subset: Dict[str, mx.array] = {}
+        try:
+            # Embeddings
+            for k, wt in md.embed_tokens.items():
+                api_subset[f"model.embed_tokens.{k}"] = load_weight(wt, mapped_files)
+            # Final norm
+            for k, wt in md.norm.items():
+                api_subset[f"model.norm.{k}"] = load_weight(wt, mapped_files)
+            # LM head
+            for k, wt in md.lm_head.items():
+                api_subset[f"lm_head.{k}"] = load_weight(wt, mapped_files)
+        except Exception as e:
+            print(f"Warning: failed to gather API-layer tensors: {e}")
+        if api_subset:
+            api_name = f"{out_prefix.name}_api.safetensors"
+            api_path = (out_prefix.parent / api_name)
+            mx.save_safetensors(str(api_path), api_subset)
+            written.append(api_path)
+            print(
+                f"Wrote {api_path} with {len(api_subset)} API-layer tensors (embed/norm/head)"
+            )
+        else:
+            print("Warning: No API-layer tensors found (embed/norm/head); check source model files")
     finally:
         for mf in mapped_files.values():
             try:

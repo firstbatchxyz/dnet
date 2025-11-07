@@ -5,6 +5,8 @@ from typing import Any, List, Optional
 from ...utils.loader import subclass_where
 from .base import BaseRingModel
 from .deepseek_v2 import DeepseekV2RingModel
+from .llama import LlamaRingModel
+from .gpt_oss import GptOssRingModel
 from .qwen3 import Qwen3RingModel
 
 
@@ -13,7 +15,6 @@ def get_ring_model(
     model_config: Any,
     assigned_layers: Optional[List[int]] = None,
     is_api_layer: bool = False,
-    shard_config: Optional[Any] = None,
 ) -> BaseRingModel:
     """Get ring model instance by type.
 
@@ -31,13 +32,14 @@ def get_ring_model(
         model_config=model_config,
         assigned_layers=assigned_layers,
         is_api_layer=is_api_layer,
-        shard_config=shard_config,
     )
 
 
 __all__ = [
     "BaseRingModel",
     "DeepseekV2RingModel",
+    "LlamaRingModel",
+    "GptOssRingModel",
     "Qwen3RingModel",
     "get_ring_model",
 ]

@@ -17,6 +17,53 @@ from .attrib import RingShardNodeAttributes
 class ComputeMixin(RingShardNodeAttributes):
     """Split out the hot-path compute from RingShardNode."""
 
+    def _delta_swap_eviction(
+        self,
+        window_layers: List[int],
+        resident: List[int],
+        activation_msg: ActivationMessage,
+        early: bool = False,
+    ) -> int:
+        budget = max(1, int(self.window_size or 1))
+        curr_set = set(window_layers)
+        prev_only = [lid for lid in resident if lid not in curr_set]
+        keep_quota = max(0, budget - len(window_layers))
+        idx = max(0, len(prev_only) - keep_quota)
+        keep_tail = prev_only[idx:]
+        evict_head = prev_only[:idx]
+        if not evict_head:
+            return 0
+        evicted: List[int] = []
+        for lid in evict_head:
+            try:
+                if self.weight_cache.evict_layer(lid):
+                    evicted.append(lid)
+            except Exception:
+                continue
+        if evicted:
+            try:
+                if hasattr(self.model, "unload_layers"):
+                    self.model.unload_layers(evicted)
+                for lid in evicted:
+                    self._bound_versions.pop(lid, None)
+            except Exception:
+                pass
+            if self._profile:
+                try:
+                    tag = "DELTA-SWAP-EARLY" if early else "DELTA-SWAP"
+                    logger.info(
+                        f"[PROFILE][{tag}] node=%s nonce=%s evict_head=%s keep_tail=%s add=%s evicted=%s",
+                        self.node_id,
+                        activation_msg.nonce,
+                        evict_head,
+                        keep_tail,
+                        window_layers,
+                        len(evicted),
+                    )
+                except Exception:
+                    pass
+        return len(evicted)
+
     def _process_activation(self, activation_msg: ActivationMessage):
         if (
             not self.model
@@ -67,6 +114,7 @@ class ComputeMixin(RingShardNodeAttributes):
             while True:
                 start_time = time.perf_counter()
                 processed = 0
+                did_early_swap = False
 
                 # Determine contiguous local window starting at current_layer
                 window_layers: List[int] = []
@@ -78,10 +126,42 @@ class ComputeMixin(RingShardNodeAttributes):
                     _tmp_layer += 1
                     processed += 1
 
+                if self._mode == "offload" and window_layers:
+                    prep = self._prepared_by_nonce.get(activation_msg.nonce)
+                    if prep is not None:
+                        layers, fut = prep
+                        if layers == window_layers and fut is not None:
+                            try:
+                                fut.result(timeout=30)
+                            except Exception:
+                                pass
+
+                # In sliding_fit with a single resident window, proactively evict only the
+                # non-needed head from the current resident set before loading new weights.
+                # This prevents LRU from evicting the useful tail during materialization.
+                if (
+                    self._mode == "sliding_fit"
+                    and int(self._resident_windows) <= 1
+                    and window_layers
+                ):
+                    try:
+                        resident = []
+                        try:
+                            resident = self.weight_cache.get_resident_layers()  # type: ignore[union-attr]
+                        except Exception:
+                            resident = []
+                        evicted_cnt = self._delta_swap_eviction(
+                            window_layers, resident, activation_msg, early=True
+                        )
+                        if evicted_cnt > 0:
+                            did_early_swap = True
+                    except Exception:
+                        pass
+
                 # Ensure weights for the window are resident and bind only if arrays changed
                 # if model fits and we've already bound these layers, skip the scan entirely.
                 fast_fit = (
-                    getattr(self, "_mode", "") == "fit"
+                    self._mode == "fit"
                     and len(self._assigned_sorted) <= self.window_size
                 )
                 skip_scan = fast_fit and all(
@@ -138,122 +218,29 @@ class ComputeMixin(RingShardNodeAttributes):
                             len(to_bind),
                             bind_ms,
                         )
-
-                # Opportunistically schedule prefetch for the next window to overlap with compute
-                try:
-                    next_win_pre = self._next_local_layers(
-                        (
-                            window_layers[-1]
-                            if window_layers
-                            else (activation_msg.layer_id)
-                        ),
-                        self.window_size,
-                    )
-                    for nl in next_win_pre:
-                        self._prefetch_to_ram(nl)
-                        self._enqueue_weight_prefetch(nl)
-                    if self._profile:
-                        logger.info(
-                            "[PROFILE][PREFETCH-SCHED] node=%s nonce=%s next_window(pre)=%s",
-                            self.node_id,
-                            activation_msg.nonce,
-                            next_win_pre,
-                        )
-                except Exception:
-                    pass
-
-                # Execute the window
-                self._beyond_cursor = (
-                    window_layers[-1] if window_layers else (activation_msg.layer_id)
-                )
                 t_comp = time.perf_counter()
-                # Prevent prefetch touching during encode/compute to minimize UMA pressure
                 try:
                     self._compute_busy.set()
                 except Exception:
                     pass
-                layer_times_ms: list[tuple[int, float]] = []
                 for i, lyr in enumerate(window_layers):
-                    t_l0 = time.perf_counter() if self._profile else 0.0
                     with self._mlx_lock:
                         x = self.model.apply_single_layer(lyr, x, cache=kv)
+                        try:
+                            if str(x.dtype) != str(self._wire_mx_dtype):
+                                x = x.astype(self._wire_mx_dtype)
+                        except Exception:
+                            pass
 
-                    # Optional per-n-layer sync for profiling, gated by settings
-                    if self._profile and self._sync_per_layer:
-                        do_sync = True
-                        n = self._sync_every_n
-                        if n > 0 and (i % n) != 0:
-                            do_sync = False
-
-                        if do_sync:
-                            try:
-                                with self._mlx_lock:
-                                    _s = mx.sum(x)
-                                    mx.eval(_s)
-                            except Exception:
-                                pass
-                            dt = (time.perf_counter() - t_l0) * 1000.0
-                            layer_times_ms.append((lyr, dt))
-                            self._prof.info(
-                                "[PROFILE][LAYER] node=%s nonce=%s layer=%s ms=%.3f",
-                                self.node_id,
-                                activation_msg.nonce,
-                                lyr,
-                                dt,
-                            )
-                t_comp_done = time.perf_counter()
                 last_layer = (
                     window_layers[-1] if window_layers else activation_msg.layer_id
                 )
-                # Ensure compute is complete before any cache/eviction ops
-                # try:
-                #    mx.eval(x)
-                # except Exception:
-                #    pass
+                try:
+                    mx.eval(x)
+                except Exception:
+                    pass
                 if self._profile:
-                    try:
-                        avg = (
-                            sum(t for _, t in layer_times_ms) / len(layer_times_ms)
-                            if layer_times_ms
-                            else 0.0
-                        )
-                        self._prof.info(
-                            "[PROFILE][LAYER-AVG] node=%s nonce=%s window=%s avg_ms=%.3f per_layer_ms=%.3f",
-                            self.node_id,
-                            activation_msg.nonce,
-                            window_layers,
-                            avg,
-                            (avg / len(layer_times_ms)) if layer_times_ms else 0.0,
-                        )
-                    except Exception:
-                        pass
-                    self._prof.info(
-                        "[PROFILE][EXEC-PATH] node=%s nonce=%s compiled=%s window=%s",
-                        self.node_id,
-                        activation_msg.nonce,
-                        0,
-                        window_layers,
-                    )
-                    # Optional activation stats at window boundary for debugging
-                    try:
-                        if getattr(self, "_x_stats", False):
-                            m = mx.mean(x)
-                            s = mx.std(x)
-                            mn = mx.min(x)
-                            mxv = mx.max(x)
-                            mx.eval(m, s, mn, mxv)
-                            logger.info(
-                                "[PROFILE][X-STATS] node=%s nonce=%s window_tail=%s mean=%s std=%s min=%s max=%s",
-                                self.node_id,
-                                activation_msg.nonce,
-                                last_layer,
-                                float(m.item()),
-                                float(s.item()),
-                                float(mn.item()),
-                                float(mxv.item()),
-                            )
-                    except Exception:
-                        pass
+                    t_comp_done = time.perf_counter()
                     logger.info(
                         "[PROFILE][WINDOW] node=%s nonce=%s layers=%s compute_ms=%.3f",
                         self.node_id,
@@ -262,20 +249,44 @@ class ComputeMixin(RingShardNodeAttributes):
                         (t_comp_done - t_comp) * 1000.0,
                     )
 
-                # Decrease references post-compute. Defer any eviction/unload of the
-                # just-computed window until after we synchronize (stage barrier)
-                # to avoid forcing MLX to re-materialize weights during eval.
                 for lid in window_layers:
                     self.weight_cache.decrease_reference(lid)
 
                 try:
-                    self._recent_windows.append(list(window_layers))
-                    if not self._defer_unload:
-                        while len(self._recent_windows) > max(
-                            1, int(getattr(self, "_resident_windows", 2))
-                        ):
+                    # Sliding-fit delta swap: maintain a single resident set by evicting
+                    # only what's needed to fit the next window into the budget. Prefer
+                    # keeping the tail of the previous window so we don't thrash weights
+                    # that are likely to be reused.
+                    if self._mode == "sliding_fit":
+                        if int(self._resident_windows) <= 1:
+                            if did_early_swap:
+                                # Early delta-swap already trimmed resident set for this window
+                                pass
+                            elif not self._recent_windows:
+                                # First window in token: seed resident set
+                                self._recent_windows.append(list(window_layers))
+                            else:
+                                prev = self._recent_windows.pop(0)
+                                self._delta_swap_eviction(
+                                    window_layers, prev, activation_msg, early=False
+                                )
+                                budget = max(1, int(self.window_size or 1))
+                                curr = list(window_layers)
+                                prev_only = [x for x in prev if x not in curr]
+                                keep_quota = max(0, budget - len(curr))
+                                keep_tail = (
+                                    prev_only[-keep_quota:] if keep_quota > 0 else []
+                                )
+                                combined = list(keep_tail) + curr
+                                self._recent_windows.append(combined)
+                        else:
+                            # resident_windows>1 not expected in sliding_fit; fall back to seeding
+                            self._recent_windows.append(list(window_layers))
+                    else:
+                        # Original eviction policy for other modes
+                        self._recent_windows.append(list(window_layers))
+                        if int(self._resident_windows) <= 1:
                             old = self._recent_windows.pop(0)
-                            # Proactively evict; shrink params for old window
                             try:
                                 evicted_cnt = self.weight_cache.evict_layers(old)
                             except Exception:
@@ -299,6 +310,37 @@ class ComputeMixin(RingShardNodeAttributes):
                                     )
                                 except Exception:
                                     pass
+                        else:
+                            if not self._defer_unload:
+                                while len(self._recent_windows) > max(
+                                    1, int(self._resident_windows)
+                                ):
+                                    old = self._recent_windows.pop(0)
+                                    try:
+                                        evicted_cnt = self.weight_cache.evict_layers(
+                                            old
+                                        )
+                                    except Exception:
+                                        evicted_cnt = 0
+                                    try:
+                                        if hasattr(self.model, "unload_layers"):
+                                            self.model.unload_layers(old)  # type: ignore[attr-defined]
+                                            for lid in old:
+                                                self._bound_versions.pop(lid, None)
+                                    except Exception:
+                                        pass
+                                    if self._profile:
+                                        try:
+                                            logger.info(
+                                                "[PROFILE][UNLOAD-WINDOW] node=%s nonce=%s old_layers=%s evicted=%s keep_windows=%s",
+                                                self.node_id,
+                                                activation_msg.nonce,
+                                                old,
+                                                evicted_cnt,
+                                                self._resident_windows,
+                                            )
+                                        except Exception:
+                                            pass
                 except Exception:
                     pass
 
@@ -336,12 +378,7 @@ class ComputeMixin(RingShardNodeAttributes):
                     self._compute_busy.clear()
                 except Exception:
                     pass
-                try:
-                    for lid in list(self._prefetch_pending):
-                        self._prefetch_pending.discard(lid)
-                        self._enqueue_weight_prefetch(lid)
-                except Exception:
-                    pass
+
                 if self._profile:
                     try:
                         logger.info(
@@ -404,94 +441,74 @@ class ComputeMixin(RingShardNodeAttributes):
                     output_msg.tx_enq_perf_t = time.perf_counter()
                 except Exception:
                     output_msg.tx_enq_perf_t = 0.0
-                # Enqueue to asyncio TX queue from compute thread
+                # Enqueue to appropriate asyncio TX queue from compute thread
                 try:
-                    loop = getattr(self, "_loop", None)
-                    if loop is not None:
-                        fut = asyncio.run_coroutine_threadsafe(
-                            self.activation_computed_queue.put(output_msg), loop
+                    if self._loop is not None:
+                        target_q = (
+                            self.activation_token_queue
+                            if output_msg.is_final
+                            else self.activation_computed_queue
                         )
-                        fut.result(timeout=10)
+                        fut = asyncio.run_coroutine_threadsafe(
+                            target_q.put(output_msg), self._loop
+                        )
+                        fut.result()
                     else:
-                        # Fallback: try immediate put_nowait via a temporary loop context
-                        # (should not happen in practice)
                         raise RuntimeError("Event loop not available for TX queue")
                 except Exception as e:
                     logger.error(
                         "Failed to queue computed activation for sending: %s", e
                     )
-                    # nothing to release when using direct tensor path
 
                 # Clean up input resources
                 self.input_pool.release(activation_msg.pool_id)
-                # After queuing TX, schedule prefetch and eviction in the background
-                # to avoid stalling the handoff to the next shard.
-                try:
-                    self._prefetch_pause.set()
-                except Exception:
-                    pass
-                next_window = self._next_local_layers(last_layer, self.window_size)
-                for nl in next_window:
-                    self._prefetch_to_ram(nl)
-                    self._enqueue_weight_prefetch(nl)
-                if self._profile:
-                    logger.info(
-                        "[PROFILE][PREFETCH-SCHED] node=%s nonce=%s next_window=%s",
-                        self.node_id,
-                        activation_msg.nonce,
-                        next_window,
-                    )
 
                 # Optional unload/evict after stage
-                if getattr(self, "_defer_unload", False):
-                    try:
-                        while len(self._recent_windows) > max(
-                            1, int(getattr(self, "_resident_windows", 2))
-                        ):
-                            old = self._recent_windows.pop(0)
-                            try:
-                                evicted_cnt = self.weight_cache.evict_layers(old)
-                            except Exception:
-                                evicted_cnt = 0
-                            try:
-                                if hasattr(self.model, "unload_layers"):
-                                    self.model.unload_layers(old)  # type: ignore[attr-defined]
-                                    for lid in old:
-                                        self._bound_versions.pop(lid, None)
-                            except Exception:
-                                pass
+                if self._mode != "sliding_fit":
+                    if self._defer_unload:
+                        try:
+                            while len(self._recent_windows) > max(
+                                1, int(self._resident_windows)
+                            ):
+                                old = self._recent_windows.pop(0)
+                                try:
+                                    evicted_cnt = self.weight_cache.evict_layers(old)
+                                except Exception:
+                                    evicted_cnt = 0
+                                try:
+                                    if hasattr(self.model, "unload_layers"):
+                                        self.model.unload_layers(old)  # type: ignore[attr-defined]
+                                        for lid in old:
+                                            self._bound_versions.pop(lid, None)
+                                except Exception:
+                                    pass
+                                if self._profile:
+                                    logger.info(
+                                        "[PROFILE][UNLOAD-WINDOW] node=%s nonce=%s old_layers=%s evicted=%s keep_windows=%s (post-stage)",
+                                        self.node_id,
+                                        activation_msg.nonce,
+                                        old,
+                                        evicted_cnt,
+                                        self._resident_windows,
+                                    )
+                        except Exception:
+                            pass
+
+                    if self._resident_windows <= 1:
+                        try:
+                            evicted = self.weight_cache.evict_layers(window_layers)
+                            if hasattr(self.model, "unload_layers"):
+                                self.model.unload_layers(window_layers)  # type: ignore[attr-defined]
                             if self._profile:
                                 logger.info(
-                                    "[PROFILE][UNLOAD-WINDOW] node=%s nonce=%s old_layers=%s evicted=%s keep_windows=%s (post-stage)",
+                                    "[PROFILE][EVICT] node=%s nonce=%s layers=%s evicted=%s",
                                     self.node_id,
                                     activation_msg.nonce,
-                                    old,
-                                    evicted_cnt,
-                                    self._resident_windows,
+                                    window_layers,
+                                    evicted,
                                 )
-                    except Exception:
-                        pass
-
-                if getattr(self, "_resident_windows", 2) <= 1:
-                    try:
-                        evicted = self.weight_cache.evict_layers(window_layers)
-                        if hasattr(self.model, "unload_layers"):
-                            self.model.unload_layers(window_layers)  # type: ignore[attr-defined]
-                        if self._profile:
-                            logger.info(
-                                "[PROFILE][EVICT] node=%s nonce=%s layers=%s evicted=%s",
-                                self.node_id,
-                                activation_msg.nonce,
-                                window_layers,
-                                evicted,
-                            )
-                    except Exception:
-                        pass
-
-                for nl in next_window:
-                    self._enqueue_weight_prefetch(nl)
-                # Finished all local work for this activation
+                        except Exception:
+                            pass
                 return
-
         except Exception as e:
             logger.exception("Error processing activation: %s", e)

@@ -6,8 +6,7 @@ import uuid
 import json
 from dataclasses import asdict
 from io import StringIO
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import httpx
 import mlx.core as mx
@@ -21,8 +20,8 @@ from dnet_p2p import (
     DnetDeviceProperties,
     DnetP2P,
     discover_all_thunderbolt_connections,
+    ThunderboltConnection,
 )
-from dnet_p2p.thunderbolt import ThunderboltConnection
 from dperf import profile_model
 from dperf.profiler import ModelProfileSplit
 from distilp import (
@@ -33,6 +32,7 @@ from distilp import (
     load_device_profile_from_dict,
 )
 from distilp.components.dense_common import HALDAResult
+from ..observability import load_settings
 
 from ...protos.dnet_ring_pb2_grpc import DnetRingServiceStub
 from ...protos.shard_api_comm_pb2_grpc import (
@@ -40,17 +40,24 @@ from ...protos.shard_api_comm_pb2_grpc import (
 )
 
 from ...utils.logger import logger
-from ...utils.model import ModelMetadata, get_model_metadata
+from ...utils.banner import print_startup_banner
+from ...utils.model import (
+    ModelMetadata,
+    get_model_config_json,
+    resolve_tokenizer_dir,
+)
 from .utils import (
     create_generate_step_for_ring_with_grpc,
     compute_layer_assignments,
     optimize_device_ordering,
+    postprocess_single_round,
 )
 from .models import (
-    ChatBaseParams,
+    ChatParams,
+    ChatUsage,
     ChatChoice,
     ChatCompletionReason,
-    ChatLogProp,
+    ChatLogProbs,
     ChatMessage,
     ChatRequestModel,
     ChatResponseModel,
@@ -71,7 +78,6 @@ from ..shard.models import (
     ShardProfileResponse,
 )
 from ..data_types import StopCondition
-from ..model import get_ring_model
 from .servicer import ShardApiServicer
 from ..common import TopologyInfo, LayerAssignment
 
@@ -111,37 +117,28 @@ class RingApiNode:
         self.http_port = http_port
         self.grpc_port = grpc_port
 
-        # Model state (loaded dynamically)
         self.model_metadata: Optional[ModelMetadata] = None
-        self.model: Optional[Any] = None
         self.tokenizer: Optional[Any] = None
         self.generate_step: Optional[Any] = None
-        self.model_name: Optional[str] = None
-
-        # Topology state
         self.topology: Optional[TopologyInfo] = None
-
-        # API
         self.app = FastAPI()
         self.running = False
-
-        # Compression
         try:
             self._compression_pct = max(0.0, min(100.0, float(compression_pct)))
         except ValueError:
             self._compression_pct = 0.0
-
-        # gRPC
         self.http_server: Optional[Any] = None
         self.api_grpc_server: Optional[aio_grpc.Server] = None
         self.first_shard_channel: Optional[aio_grpc.Channel] = None
         self.first_shard_stub: Optional[DnetRingServiceStub] = None
-
-        # Discovery
         self.discovery = DnetP2P("lib/dnet-p2p/lib")
-
-        # Callback tracking
         self.pending_requests: Dict[str, asyncio.Future] = {}
+
+        # Print ASCII art banner if available
+        try:
+            print_startup_banner()
+        except Exception:
+            pass
 
         logger.info(
             "API node initialized on HTTP port %s, gRPC port %s",
@@ -157,18 +154,13 @@ class RingApiNode:
         """
         self.running = True
 
-        # Start gRPC server for callbacks
         await self._start_grpc_server()
-
-        # Start discovery
         self._start_discovery()
-
-        # Start HTTP server (background)
         await self._start_http_server(shutdown_trigger)
         await asyncio.sleep(0.2)
 
     def _start_discovery(self) -> None:
-        """Start mDNS discovery service."""
+        """Start discovery service."""
         from secrets import token_hex
         from socket import gethostname
 
@@ -176,11 +168,9 @@ class RingApiNode:
         instance = f"api-{token_hex(4)}-{hostname}"
         self.discovery.create_instance(
             instance,
-            hostname,
-            "0.0.0.0",  # Bind to all addresses
             self.http_port,
             self.grpc_port,
-            is_manager=True,  # API is a manager
+            is_manager=True,
         )
         self.discovery.start()
         logger.info("Discovery service started for API node")
@@ -242,11 +232,14 @@ class RingApiNode:
 
         @self.app.get("/health")
         async def health() -> JSONResponse:
+            model_loaded = (self.tokenizer is not None) and (
+                self.generate_step is not None
+            )
             return JSONResponse(
                 content={
                     "status": "ok",
-                    "model_loaded": self.model is not None,
-                    "model_name": self.model_name,
+                    "model": self.topology.model if self.topology else None,
+                    "model_loaded": model_loaded,
                     "topology_configured": bool(self.topology),
                 }
             )
@@ -263,11 +256,10 @@ class RingApiNode:
 
         @self.app.get("/v1/devices")
         async def get_devices() -> JSONResponse:
-            """Get all discovered devices from mDNS."""
             devices = self.discovery.get_properties()
             devices_dict = {
-                service_name: device_props.model_dump()
-                for service_name, device_props in devices.items()
+                instance: device_props.model_dump()
+                for instance, device_props in devices.items()
             }
             return JSONResponse(content={"devices": devices_dict})
 
@@ -275,7 +267,6 @@ class RingApiNode:
         async def prepare_topology(
             req: PrepareTopologyRequest,
         ) -> TopologyInfo:
-            """Prepare topology for a model."""
             try:
                 return await self._handle_prepare_topology(req)
             except Exception as e:
@@ -289,9 +280,9 @@ class RingApiNode:
         async def prepare_topology_manual(
             req: PrepareTopologyManualRequest,
         ) -> TopologyInfo:
-            """Prepare topology manually (no discovery)."""
             try:
                 return await self._handle_prepare_topology_manual(req)
+
             except Exception as e:
                 logger.exception("Error in /v1/prepare_topology_manual: %s", e)
                 raise HTTPException(
@@ -301,7 +292,6 @@ class RingApiNode:
 
         @self.app.post("/v1/load_model")
         async def load_model(req: APILoadModelRequest) -> APILoadModelResponse:
-            """Load model on shards with prepared topology."""
             try:
                 return await self._handle_load_model(req)
             except Exception as e:
@@ -313,7 +303,6 @@ class RingApiNode:
 
         @self.app.post("/v1/unload_model")
         async def unload_model() -> UnloadModelResponse:
-            """Unload model from all shards."""
             try:
                 return await self._handle_unload_model()
             except Exception as e:
@@ -323,6 +312,29 @@ class RingApiNode:
                     detail=str(e),
                 ) from e
 
+        @self.app.post("/v1/cleanup_repacked")
+        async def cleanup_repacked(body: Dict[str, Any] | None = None) -> JSONResponse:  # type: ignore
+            """Ask all shards to delete repacked per-layer weights to free disk.
+
+            Body JSON (all fields optional):
+              - model_id: restrict cleanup to this model bucket
+              - all: when true, remove the entire repack directory base
+            """
+            payload = body or {}
+            shards = self._get_shards_from_discovery()
+            results: Dict[str, Any] = {}
+            async with httpx.AsyncClient() as http_client:
+                for name, props in shards.items():
+                    url = (
+                        f"http://{props.local_ip}:{props.server_port}/cleanup_repacked"
+                    )
+                    try:
+                        resp = await http_client.post(url, json=payload, timeout=30.0)
+                        results[name] = resp.json()
+                    except Exception as e:
+                        results[name] = {"error": str(e)}
+            return JSONResponse(content={"results": results})
+
         @self.app.post("/v1/chat/completions")
         async def chat_completions(
             req: ChatRequestModel,
@@ -330,7 +342,7 @@ class RingApiNode:
             """Handle chat completion requests.
 
             If streaming is requested, returns a StreamingResponse."""
-            if self.model is None:
+            if (self.tokenizer is None) or (self.generate_step is None):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="No model loaded. Call /v1/load_model first.",
@@ -344,13 +356,12 @@ class RingApiNode:
                 # FIXME: return type mismatch here
                 return StreamingResponse(
                     self._stream_chat(req), media_type="text/event-stream"
-                )
+                )  # type: ignore
             else:
                 return await self._handle_chat_completion(req)
 
         @self.app.post("/v1/completions")
         async def completions(req: CompletionRequestModel):  # type: ignore
-            """Handle completion requests."""
             if req.stream:
                 return StreamingResponse(
                     self._stream_completion(req), media_type="text/event-stream"
@@ -370,15 +381,29 @@ class RingApiNode:
         """
         logger.info("Preparing topology for model: %s", req.model)
 
-        # Load model metadata
-        model_metadata = get_model_metadata(req.model)
+        # Load only config.json to avoid weight downloads on API node
+        cfg = get_model_config_json(req.model)
+        num_layers_raw = cfg.get("num_hidden_layers")
+        if not isinstance(num_layers_raw, int):
+            raise ValueError(
+                "num_hidden_layers missing or invalid in config.json; cannot prepare topology without scanning weights"
+            )
+        num_layers = num_layers_raw
+
+        embedding_raw = cfg.get("embedding_size")
+        if isinstance(embedding_raw, int):
+            embedding_size = embedding_raw
+        else:
+            hidden_raw = cfg.get("hidden_size")
+            if not isinstance(hidden_raw, int):
+                raise ValueError(
+                    "embedding_size/hidden_size missing or invalid in config.json; cannot profile payload size"
+                )
+            embedding_size = hidden_raw
 
         # Profile model
-        batch_sizes = [1, 2]  # TODO: make it configurable
-        sequence_length = 512  # TODO: make it configurable
-        model_profile = await self._profile_model(
-            req.model, batch_sizes, sequence_length
-        )
+        batch_sizes = [1]
+        model_profile = await self._profile_model(req.model, batch_sizes, req.seq_len)
 
         # Get shards from discovery
         shards = self._get_shards_from_discovery()
@@ -387,46 +412,64 @@ class RingApiNode:
 
         logger.info("Discovered %d shards: %s", len(shards), list(shards.keys()))
 
-        # Collect shard profiles and thunderbolt connections
         shard_profiles, thunderbolt_conns = await self._collect_shard_profiles(
             shards,
             req.model,
-            model_metadata.embedding_size,
+            embedding_size,
             req.max_batch_exp,
             batch_sizes,
         )
-
-        # Optimize device ordering to place Thunderbolt-connected devices adjacently
         optimized_device_name_order = optimize_device_ordering(
             shard_profiles, thunderbolt_conns
         )
-
-        # Run solver with optimized device ordering
         solution = await self._run_solver(
-            shard_profiles, model_profile, optimized_device_name_order
+            shard_profiles, model_profile, optimized_device_name_order, req.kv_bits
         )
-        shards_list = [
-            shards[name] for name in optimized_device_name_order
-        ]  # shards ordered w.r.t to the solver
-
-        # Compute layer assignments, next service mapping, and prefetch windows
+        optimized_device_name_order, solution = postprocess_single_round(
+            optimized_device_name_order, solution
+        )
         layer_assignments = compute_layer_assignments(
-            optimized_device_name_order, solution.w, solution.k, shards
+            optimized_device_name_order,
+            shards,
+            solution.w,
+            solution.n,
+            solution.k,
         )
 
-        # Store topology (can be GET'ed later)
+        shards_list = [shards[name] for name in optimized_device_name_order]
         self.topology = TopologyInfo(
             model=req.model,
-            num_layers=model_metadata.num_layers,
+            kv_bits=req.kv_bits,
+            num_layers=num_layers,
             devices=shards_list,
             assignments=layer_assignments,
             solution=asdict(solution),
         )
 
+        # Optional, detailed solver print when profiling is enabled
+        try:
+            obs = load_settings()
+            if obs.enabled:
+                dev_order = ", ".join(optimized_device_name_order)
+                logger.info(
+                    "[SOLUTION] k=%s; devices=[%s]; w=%s; n=%s; obj=%s; total_layers=%s",
+                    solution.k,
+                    dev_order,
+                    list(solution.w),
+                    list(solution.n),
+                    solution.obj_value,
+                    num_layers,
+                )
+        except Exception:
+            pass
+        print(
+            f"Topology solution: k {solution.k}, w {solution.w}, n {solution.n}, objective: {solution.obj_value}"
+        )
+
         logger.info(
             "Topology prepared: %d devices, %d layers",
             len(shards_list),
-            model_metadata.num_layers,
+            num_layers,
         )
 
         return self.topology
@@ -437,30 +480,28 @@ class RingApiNode:
         """Handle manual topology preparation without discovery."""
         logger.info("Preparing manual topology for model: %s", req.model)
 
-        # Validate unique device names
-        device_names = [d.name for d in req.devices]
+        device_names = [d.instance for d in req.devices]
         if len(device_names) != len(set(device_names)):
             raise ValueError("Device names must be unique in manual topology")
 
-        # Normalize assignments and validate services
         # FIXME: may not need normalized array here, just use assignments
-        services = set(device_names)
+        device_names = set(device_names)
         normalized: List[LayerAssignment] = []
         for assignment in req.assignments:
-            if assignment.service not in services:
+            if assignment.instance not in device_names:
                 raise ValueError(
-                    f"Assignment references unknown service: {assignment.service}"
+                    f"Assignment references unknown device: {assignment.instance}"
                 )
             normalized.append(
                 LayerAssignment(
-                    service=assignment.service,
+                    instance=assignment.instance,
                     layers=assignment.layers,
-                    next_service=assignment.next_service,
+                    next_instance=assignment.next_instance,
                     window_size=assignment.window_size,
+                    residency_size=assignment.window_size,  # use window_size as residency_size for manual topology
                 )
             )
 
-        # Infer num_layers if not provided
         num_layers = req.num_layers
         if num_layers is None:
             flat = [layer for aa in normalized for rr in aa.layers for layer in rr]
@@ -468,24 +509,22 @@ class RingApiNode:
                 raise ValueError("No layers provided in assignments")
             num_layers = max(flat) + 1
 
-        # Build device properties from provided endpoints
+        # FIXME: we can perhaps use req.devices as is
         devices_props: List[DnetDeviceProperties] = []
         for d in req.devices:
             devices_props.append(
                 DnetDeviceProperties(
                     is_manager=False,
                     is_busy=False,
-                    instance=d.name,
-                    host=d.local_ip,
+                    instance=d.instance,
                     server_port=d.server_port,
                     shard_port=d.shard_port,
                     local_ip=d.local_ip,
                 )
             )
 
-        # If next_service missing and >1 device, compute simple ring by min layer
         # FIXME: may not need this edge case at all, probably redundant
-        if any(a.next_service is None for a in normalized) and len(normalized) > 1:
+        if any(a.next_instance is None for a in normalized) and len(normalized) > 1:
             order = sorted(
                 normalized,
                 key=lambda aa: min([layer for rr in aa.layers for layer in rr])
@@ -493,15 +532,16 @@ class RingApiNode:
                 else (1 << 30),
             )
             ring_map = {
-                order[i].service: order[(i + 1) % len(order)].service
+                order[i].instance: order[(i + 1) % len(order)].instance
                 for i in range(len(order))
             }
             normalized = [
                 LayerAssignment(
-                    service=a.service,
+                    instance=a.instance,
                     layers=a.layers,
-                    next_service=a.next_service or ring_map.get(a.service),
+                    next_instance=a.next_instance or ring_map.get(a.instance),
                     window_size=a.window_size,
+                    residency_size=a.window_size,
                 )
                 for a in normalized
             ]
@@ -509,7 +549,8 @@ class RingApiNode:
         # Persist manual topology
         self.topology = TopologyInfo(
             model=req.model,
-            num_layers=int(num_layers),
+            num_layers=num_layers,
+            kv_bits=req.kv_bits,
             devices=devices_props,
             assignments=normalized,
             solution={"source": "manual"},
@@ -536,30 +577,52 @@ class RingApiNode:
         if self.topology:
             topology = self.topology
 
-            if req.model and req.model != self.topology.model:
+            # Always use kv_bits from topology; log if caller asked for different
+            kv_bits_use = topology.kv_bits
+            if req.kv_bits != kv_bits_use:
+                logger.info(
+                    "load_model request kv_bits %s overridden by topology kv_bits %s",
+                    req.kv_bits,
+                    kv_bits_use,
+                )
+
+            if topology.model:
                 logger.info(
                     "load_model request model %s overridden by topology model %s",
                     req.model,
-                    self.topology.model,
+                    topology.model,
                 )
-        else:
-            # ensure model is given
-            if not req.model:
+                # use existing model from topology
+                model_to_load = topology.model
+            elif req.model:
+                model_to_load = req.model
+            else:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=(
-                        "No topology configured and no model provided. "
-                        "Call /v1/prepare_topology or /v1/prepare_topology_manual first, "
-                        "or include 'model' to bootstrap with discovery."
+                        "No model specified in request and no model in existing topology. "
+                        "Call /v1/prepare_topology or include 'model' to bootstrap with discovery."
                     ),
                 )
-
-            # Bootstrap: run discovery-based prepare
+        elif req.model:
+            # prepare topology on-the-fly
             topology = await self._handle_prepare_topology(
-                PrepareTopologyRequest(model=req.model)
+                PrepareTopologyRequest(
+                    model=req.model, kv_bits=req.kv_bits, seq_len=req.seq_len
+                )
             )
+            model_to_load = req.model
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "No topology configured and no model provided. "
+                    "Call /v1/prepare_topology or /v1/prepare_topology_manual first, "
+                    "or include 'model' to bootstrap with discovery."
+                ),
+            )
+            kv_bits_use = topology.kv_bits
 
-        model_to_load = topology.model
         assignments_to_use = topology.assignments
         shards = {dev.instance: dev for dev in topology.devices}
         logger.info("Loading model: %s", model_to_load)
@@ -569,7 +632,7 @@ class RingApiNode:
         shard_statuses: List[ShardLoadStatus] = []
         async with httpx.AsyncClient() as http_client:
             for assignment in assignments_to_use:
-                service_name = assignment.service
+                instance = assignment.instance
                 # Flatten layers for shard loading
                 layers = [
                     layer
@@ -577,11 +640,11 @@ class RingApiNode:
                     for layer in round_layers
                 ]
 
-                if service_name not in shards:
-                    logger.warning(f"Shard {service_name} not found in discovery")
+                if instance not in shards:
+                    logger.warning("Shard %s not found in discovery", instance)
                     shard_statuses.append(
                         ShardLoadStatus(
-                            service_name=service_name,
+                            instance=instance,
                             success=False,
                             message="Shard not found in discovery",
                             layers_loaded=[],
@@ -589,19 +652,19 @@ class RingApiNode:
                     )
                     continue
 
-                shard_props = shards[service_name]
+                shard_props = shards[instance]
 
                 # Get next node address from next_service in ring (if provided)
                 next_shard = None
-                if getattr(assignment, "next_service", None):
-                    ns = assignment.next_service  # type: ignore[attr-defined]
+                if assignment.next_instance is not None:
+                    ns = assignment.next_instance
                     if ns in shards:
                         next_shard = shards[ns]
-                        logger.info("Shard %s next node in ring: %s", service_name, ns)
+                        logger.info("Shard %s next node in ring: %s", instance, ns)
                     else:
                         logger.info(
-                            "Shard %s next service %s not found; skipping ring hop",
-                            service_name,
+                            "Shard %s next instance %s not found; skipping ring hop",
+                            instance,
                             ns,
                         )
 
@@ -611,23 +674,27 @@ class RingApiNode:
 
                     # Call load_model via HTTP (window_size unified)
                     url = f"http://{shard_props.local_ip}:{shard_props.server_port}/load_model"
+                    # Let the shard decide warmup based on its computed mode (fit/offload)
                     payload = ShardLoadModelRequest(
                         model_path=model_to_load,
                         layers=layers,
                         warmup=True,
                         next_node=next_shard,
                         window_size=assignment.window_size,
+                        residency_size=assignment.residency_size,
                         total_layers=topology.num_layers,
+                        kv_bits=kv_bits_use,
                         api_callback_address=api_callback_address,
                     ).model_dump()
 
                     # timeout is `None` because shards may actually be downloading weights for the first time
+                    # TODO: can we do this in a better way?
                     response = await http_client.post(url, json=payload, timeout=None)
                     result = ShardLoadModelResponse.model_validate_json(response.text)
 
                     shard_statuses.append(
                         ShardLoadStatus(
-                            service_name=service_name,
+                            instance=instance,
                             success=result.success,
                             message=result.message,
                             layers_loaded=result.layers_loaded,
@@ -635,17 +702,15 @@ class RingApiNode:
                     )
                     logger.info(
                         "Shard %s load result: success=%s (%s)",
-                        service_name,
+                        instance,
                         result.success,
                         result.message,
                     )
                 except Exception as e:
-                    logger.exception(
-                        "Error loading model on shard %s: %s", service_name, e
-                    )
+                    logger.exception("Error loading model on shard %s: %s", instance, e)
                     shard_statuses.append(
                         ShardLoadStatus(
-                            service_name=service_name,
+                            instance=instance,
                             success=False,
                             message=str(e),
                             layers_loaded=[],
@@ -655,20 +720,9 @@ class RingApiNode:
         # Check if all shards loaded successfully
         if all(status.success for status in shard_statuses):
             try:
-                self.model_metadata = get_model_metadata(model_to_load)
-                self.model_name = model_to_load
-
-                # Load tokenizer
-                self.tokenizer = load_tokenizer(Path(model_to_load), {})
-
-                # Load API-side model (embeddings, lm_head, etc.)
-                self.model = get_ring_model(
-                    self.model_metadata.model_type,
-                    self.model_metadata.model_config,
-                    is_api_layer=True,
-                )
-                # load_api_layer_weights(self.model_metadata, self.model)
-                # FIXME: I think we don't need to load lm_head + embedding at API side
+                # Load tokenizer without forcing weight downloads on API node
+                tok_dir = resolve_tokenizer_dir(model_to_load)
+                self.tokenizer = load_tokenizer(tok_dir, {})
 
                 # Connect to first shard (head device)
                 # this should be the first device in `self.topology.devices`
@@ -690,7 +744,7 @@ class RingApiNode:
                 )
         else:
             failed_shards = [
-                status.service_name for status in shard_statuses if not status.success
+                status.instance for status in shard_statuses if not status.success
             ]
             logger.error("Failed to load model on shards: %s", failed_shards)
             return APILoadModelResponse(
@@ -715,8 +769,6 @@ class RingApiNode:
                 message="No topology configured, nothing to unload",
             )
 
-        # Get shards from topology
-
         # Call unload_model on each shard via HTTP
         shard_statuses: List[ShardUnloadStatus] = []
         async with httpx.AsyncClient() as http_client:
@@ -729,7 +781,7 @@ class RingApiNode:
 
                     shard_statuses.append(
                         ShardUnloadStatus(
-                            service_name=shard.instance,
+                            instance=shard.instance,
                             success=result.get("success", False),
                             message=result.get("message", ""),
                         )
@@ -750,7 +802,7 @@ class RingApiNode:
                     )
                     shard_statuses.append(
                         ShardUnloadStatus(
-                            service_name=shard.instance,
+                            instance=shard.instance,
                             success=False,
                             message=f"Error: {str(e)}",
                         )
@@ -760,17 +812,17 @@ class RingApiNode:
         all_success = all(status.success for status in shard_statuses)
         if not all_success:
             failed_shards = [
-                status.service_name for status in shard_statuses if not status.success
+                status.instance for status in shard_statuses if not status.success
             ]
             logger.error(f"Failed to unload model on shards: {failed_shards}")
 
         # Unload API-side model components
         try:
-            self.model = None
             self.tokenizer = None
             self.model_metadata = None
-            self.model_name = None
             self.generate_step = None
+
+            self.topology.model = None
 
             # Close first shard connection
             if self.first_shard_channel:
@@ -786,7 +838,7 @@ class RingApiNode:
             all_success = False
             shard_statuses.append(
                 ShardUnloadStatus(
-                    service_name="api",
+                    instance="api",
                     success=False,
                     message=f"API model unload error: {str(e)}",
                 )
@@ -811,7 +863,7 @@ class RingApiNode:
             return False
 
         # Pick the device whose assignment contains layer 0; fallback to index 0
-        start_service: str | None = None
+        start_instance: str | None = None
         try:
             for assignment in self.topology.assignments:
                 # Flatten round layers
@@ -821,17 +873,17 @@ class RingApiNode:
                     for layer in round_layers
                 ]
                 if 0 in flat:
-                    start_service = assignment.service
+                    start_instance = assignment.instance
                     break
         except Exception:
-            start_service = None
+            start_instance = None
 
-        # find the start device w.r.t service name
+        # find the start device w.r.t name
         start_device = None
-        if start_service is not None:
+        if start_instance is not None:
             try:
                 for dev in self.topology.devices:
-                    if dev.instance == start_service:
+                    if dev.instance == start_instance:
                         start_device = dev
                         break
             except Exception:
@@ -850,7 +902,16 @@ class RingApiNode:
 
             # Prepare generate_step with gRPC callback
             api_properties = self.discovery.get_own_properties()
-            callback_addr = f"{api_properties.local_ip}:{self.grpc_port}"
+            # Prefer Thunderbolt IP for token callbacks if available
+            tb_ip = None
+            try:
+                tb = api_properties.thunderbolt
+                if tb and tb.ip_addr:
+                    tb_ip = tb.ip_addr
+            except Exception:
+                tb_ip = None
+            cb_ip = tb_ip or api_properties.local_ip
+            callback_addr = f"{cb_ip}:{self.grpc_port}"
             self.generate_step = create_generate_step_for_ring_with_grpc(
                 self.first_shard_stub,
                 callback_protocol="grpc",
@@ -875,7 +936,7 @@ class RingApiNode:
         devices = self.discovery.get_properties()
         # Normalize keys to the short "instance" form
         normalized: Dict[str, DnetDeviceProperties] = {}
-        for _fullname, props in devices.items():
+        for _instance, props in devices.items():
             if props.is_manager:
                 continue
             normalized[props.instance] = props
@@ -899,7 +960,7 @@ class RingApiNode:
             batch_sizes=batch_sizes,
             sequence_length=sequence_length,
         )
-        logger.info(f"Model profiling completed for {repo_id}.")
+        logger.info("Model profiling completed for %s.", repo_id)
         return load_model_profile_from_dict(asdict(model_profile_split))
 
     async def _collect_shard_profiles(
@@ -1004,6 +1065,7 @@ class RingApiNode:
         shard_profiles: Dict[str, DeviceProfile],
         model_profile: ModelProfile,
         device_order: List[str],
+        kv_bits: Literal["4bit", "8bit", "fp16"],
     ) -> HALDAResult:
         """Run distilp with model and device profiles.
 
@@ -1029,6 +1091,7 @@ class RingApiNode:
             model=model_profile,
             mip_gap=1e-4,
             plot=False,
+            kv_bits=kv_bits,
         )
 
         logger.info(
@@ -1101,7 +1164,7 @@ class RingApiNode:
 
     async def _handle_completion(
         self,
-        req: ChatRequestModel,
+        req: ChatParams,
         prompt: mx.array,
         stop_id_sequences: List[List[int]],
     ) -> ChatResponseModel:
@@ -1133,14 +1196,7 @@ class RingApiNode:
                 node_origin=f"localhost:{self.http_port}",
                 prompt=prompt,
                 pending_requests=self.pending_requests,
-                params=ChatBaseParams(
-                    model=req.model,
-                    temperature=req.temperature,
-                    top_p=req.top_p,
-                    repetition_penalty=req.repetition_penalty,
-                    repetition_context_size=req.repetition_context_size,
-                    logit_bias=req.logit_bias,
-                ),
+                params=req,
             ),  # type: ignore
             arange(req.max_tokens or 0),
         ):
@@ -1149,9 +1205,9 @@ class RingApiNode:
             detokenizer.add_token(token)
             tokens.append(token)
 
-            if (logprobs is not None) and (req.logprobs > 0) and logprobs.size != 0:
-                sorted_indices = mx.argpartition(-logprobs, kth=req.logprobs - 1)
-                top_indices = sorted_indices[: (req.logprobs or 0)]
+            if (logprobs is not None) and (req.logprobs) and logprobs.size != 0:
+                sorted_indices = mx.argpartition(-logprobs, kth=req.top_logprobs - 1)
+                top_indices = sorted_indices[: (req.top_logprobs or 0)]
                 top_logprobs_array = logprobs[top_indices]
                 top_token_info = zip(
                     top_indices.tolist(),  # type: ignore # FIXME: !!!
@@ -1206,6 +1262,7 @@ class RingApiNode:
         return await self._generate_response(
             nonce,
             text,
+            req.model,
             completion_reason,
             len(prompt),
             len(tokens),
@@ -1219,9 +1276,9 @@ class RingApiNode:
         prompt = mx.array(self.tokenizer.encode(req.prompt))  # type: ignore
         stop_id_sequences: List[List[int]] = [
             self.tokenizer.encode(stop_word, add_special_tokens=False)  # type: ignore
-            for stop_word in (req.stop or [])  # type: ignore
+            for stop_word in (req.stop or [])
         ]
-        chat_resp = await self._handle_completion(req, prompt, stop_id_sequences)  # type: ignore[arg-type]
+        chat_resp = await self._handle_completion(req, prompt, stop_id_sequences)
         text = chat_resp.choices[0].message.content
         return {
             "id": chat_resp.id,
@@ -1269,6 +1326,7 @@ class RingApiNode:
         self,
         nonce: str,
         text: str,
+        model: str,
         finish_reason: Optional[ChatCompletionReason] = None,
         prompt_token_count: Optional[int] = None,
         completion_token_count: Optional[int] = None,
@@ -1300,20 +1358,22 @@ class RingApiNode:
                     index=0,
                     finish_reason=finish_reason,
                     message=ChatMessage(role="assistant", content=text),
-                    logprop=ChatLogProp(
+                    logprobs=ChatLogProbs(
                         token_logprobs=token_logprobs or [],
                         top_logprobs=top_logprobs or [],
                         tokens=tokens,
                     ),
                 )
             ],
-            usage={
-                "prompt_tokens": prompt_token_count,
-                "completion_tokens": completion_token_count,
-                "total_tokens": (prompt_token_count or 0)
-                + (completion_token_count or 0),
-            },
+            # FIXME: bit too many `or 0`'s here?
+            usage=ChatUsage(
+                prompt_tokens=prompt_token_count or 0,
+                completion_tokens=completion_token_count or 0,
+                total_tokens=(prompt_token_count or 0) + (completion_token_count or 0),
+            ),
             metrics=metrics,
+            created=int(time.time()),
+            model=model,
         )
 
     def _stream_chat(self, req: ChatRequestModel):
@@ -1323,18 +1383,21 @@ class RingApiNode:
         async def gen():
             stop_id_sequences: List[List[int]] = [
                 self.tokenizer.encode(stop_word, add_special_tokens=False)  # type: ignore
-                for stop_word in (req.stop or [])  # type: ignore
+                for stop_word in (req.stop or [])
             ]
             prompt_text = await self._convert_chat(req.messages)
             prompt = mx.array(self.tokenizer.encode(prompt_text))  # type: ignore
-            detok = self.tokenizer.detokenizer
+            prompt_tokens = int(len(prompt))  # 1D token count
+            t_start = time.perf_counter()
+            t_first_token: Optional[float] = None
+            detok = self.tokenizer.detokenizer  # type: ignore
             detok.reset()
             # Initial role delta
             chunk = {
                 "id": nonce,
                 "object": "chat.completion.chunk",
                 "created": created,
-                "model": getattr(req, "model", None) or "default_model",
+                "model": req.model,
                 "choices": [
                     {"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}
                 ],
@@ -1348,29 +1411,23 @@ class RingApiNode:
                     node_origin=f"localhost:{self.http_port}",  # FIXME: Not sure of this, grpc-http port mix
                     prompt=prompt,
                     pending_requests=self.pending_requests,
-                    params=ChatBaseParams(
-                        model=req.model,
-                        temperature=req.temperature,
-                        top_p=req.top_p,
-                        repetition_penalty=req.repetition_penalty,
-                        repetition_context_size=req.repetition_context_size,
-                        logit_bias=req.logit_bias,
-                    ),  # type: ignore
-                ),
+                    params=req,
+                ),  # type: ignore
                 arange(req.max_tokens or 0),
             ):
+                if t_first_token is None:
+                    t_first_token = time.perf_counter()
                 tokens.append(token)
                 detok.add_token(token)
-                delta = (
-                    detok.delta
-                    if hasattr(detok, "delta")
-                    else self.tokenizer.decode([token])
-                )
+                try:
+                    delta = detok.delta
+                except Exception:
+                    delta = self.tokenizer.decode([token])  # type: ignore
                 chunk = {
                     "id": nonce,
                     "object": "chat.completion.chunk",
                     "created": created,
-                    "model": getattr(req, "model", None) or "default_model",
+                    "model": req.model,
                     "choices": [
                         {"index": 0, "delta": {"content": delta}, "finish_reason": None}
                     ],
@@ -1378,18 +1435,44 @@ class RingApiNode:
                 yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 
                 stop = await self._stopping_criteria(
-                    tokens, stop_id_sequences, self.tokenizer.eos_token_id
+                    tokens,
+                    stop_id_sequences,
+                    self.tokenizer.eos_token_id,  # type: ignore
                 )  # type: ignore
                 if stop.stop_met:
                     break
 
+            # Build end-of-stream chunk with usage + metrics
+            t_end = time.perf_counter()
+            total_s = max(t_end - t_start, 1e-9)
+            gen_s = max(t_end - (t_first_token or t_start), 1e-9)
+            tokens_generated = len(tokens)
             done = {
                 "id": nonce,
                 "object": "chat.completion.chunk",
                 "created": created,
-                "model": getattr(req, "model", None) or "default_model",
+                "model": req.model,
                 "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": tokens_generated,
+                    "total_tokens": prompt_tokens + tokens_generated,
+                },
             }
+            if req.profile:
+                metrics = {
+                    "total_ms": round(total_s * 1000.0, 3),
+                    "ttfb_ms": round(((t_first_token or t_end) - t_start) * 1000.0, 3),
+                    "token_gen_ms": round(gen_s * 1000.0, 3),
+                    "tokens_generated": tokens_generated,
+                    "tps_overall": round(
+                        (tokens_generated / total_s) if tokens_generated else 0.0, 4
+                    ),
+                    "tps_decoding": round(
+                        (tokens_generated / gen_s) if tokens_generated else 0.0, 4
+                    ),
+                }
+                done["metrics"] = metrics
             yield f"data: {json.dumps(done)}\n\n"
             yield "data: [DONE]\n\n"
 
@@ -1401,47 +1484,69 @@ class RingApiNode:
 
         async def gen():
             prompt = mx.array(self.tokenizer.encode(req.prompt))  # type: ignore
-            detok = self.tokenizer.detokenizer
+            prompt_tokens = int(len(prompt))
+            t_start = time.perf_counter()
+            t_first_token: Optional[float] = None
+            detok = self.tokenizer.detokenizer  # type: ignore
             detok.reset()
+            out_tokens = 0
             async for (token, _), _ in azip(
                 self.generate_step(
                     nonce=nonce,
                     node_origin=f"localhost:{self.http_port}",  # FIXME: Not sure of this, grpc-http port mix
                     prompt=prompt,
                     pending_requests=self.pending_requests,
-                    params=ChatBaseParams(
-                        model=req.model,
-                        temperature=req.temperature,
-                        top_p=req.top_p,
-                        repetition_penalty=req.repetition_penalty,
-                        repetition_context_size=req.repetition_context_size,
-                        logit_bias=req.logit_bias,
-                    ),
+                    params=req,
                 ),  # type: ignore
                 arange(req.max_tokens or 0),
             ):
+                if t_first_token is None:
+                    t_first_token = time.perf_counter()
+                out_tokens += 1
                 detok.add_token(token)
-                delta = (
-                    detok.delta
-                    if hasattr(detok, "delta")
-                    else self.tokenizer.decode([token])
-                )
+                try:
+                    delta = detok.delta
+                except Exception:
+                    delta = self.tokenizer.decode([token])  # type: ignore
                 chunk = {
                     "id": nonce,
                     "object": "text_completion.chunk",
                     "created": created,
-                    "model": getattr(req, "model", None) or "default_model",
+                    "model": req.model,
                     "choices": [{"index": 0, "text": delta, "finish_reason": None}],
                 }
                 yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 
+            # End-of-stream chunk with usage + metrics
+            t_end = time.perf_counter()
+            total_s = max(t_end - t_start, 1e-9)
+            gen_s = max(t_end - (t_first_token or t_start), 1e-9)
             done = {
                 "id": nonce,
                 "object": "text_completion.chunk",
                 "created": created,
-                "model": getattr(req, "model", None) or "default_model",
+                "model": req.model,
                 "choices": [{"index": 0, "text": "", "finish_reason": "stop"}],
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": out_tokens,
+                    "total_tokens": prompt_tokens + out_tokens,
+                },
             }
+            if req.profile:
+                metrics = {
+                    "total_ms": round(total_s * 1000.0, 3),
+                    "ttfb_ms": round(((t_first_token or t_end) - t_start) * 1000.0, 3),
+                    "token_gen_ms": round(gen_s * 1000.0, 3),
+                    "tokens_generated": out_tokens,
+                    "tps_overall": round(
+                        (out_tokens / total_s) if out_tokens else 0.0, 4
+                    ),
+                    "tps_decoding": round(
+                        (out_tokens / gen_s) if out_tokens else 0.0, 4
+                    ),
+                }
+                done["metrics"] = metrics
             yield f"data: {json.dumps(done)}\n\n"
             yield "data: [DONE]\n\n"
 

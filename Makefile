@@ -1,7 +1,3 @@
-.PHONY: mdns #         | Show dns-sd services
-mdns:
-		dns-sd -Q _dnet_p2p._tcp.local. PTR
-
 .PHONY: lint #         | Run linter
 lint:
 	  uvx ruff check
@@ -16,6 +12,11 @@ protos:
 
 .PHONY: update #       | Update git submodules
 update:
+		git submodule update --init --recursive
+
+.PHONY: pull #         | Pull and update git submodules
+pull:
+		git pull
 		git submodule update --init --recursive
 
 .PHONY: test #         | Run tests

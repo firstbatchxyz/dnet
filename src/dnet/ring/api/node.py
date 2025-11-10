@@ -386,6 +386,10 @@ class RingApiNode:
 
         # Load only config.json to avoid weight downloads on API node
         cfg = get_model_config_json(req.model)
+
+        if str(cfg.get("model_type", "")).strip().lower() == "gpt_oss" and req.kv_bits != "fp16":
+            raise ValueError("GPT-OSS models only support kv_bits='fp16'")
+
         num_layers_raw = cfg.get("num_hidden_layers")
         if not isinstance(num_layers_raw, int):
             raise ValueError(

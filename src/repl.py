@@ -38,7 +38,6 @@ from dnet.ring.common import TopologyInfo
 from dnet.ring.api.models import (
   PrepareTopologyManualRequest,
   PrepareTopologyRequest,
-  PrepareTopologyResponse,
   APILoadModelRequest,
   APILoadModelResponse,
 )

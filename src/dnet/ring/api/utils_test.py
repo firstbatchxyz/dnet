@@ -54,20 +54,15 @@ def test_single_round_postprocess_complex():
 
 
 def test_optimize_device_ordering():
-    from pydantic import BaseModel
-
-    # fake type for the sake of testing
-    class _DeviceProfileIsHead(BaseModel):
-        is_head: bool
 
     device_profiles: dict[str, DeviceProfile] = {
-        "dev1": _DeviceProfileIsHead(is_head=False),  # type: ignore
-        "dev2": _DeviceProfileIsHead(is_head=False),  # type: ignore
-        "dev3": _DeviceProfileIsHead(is_head=True),  # type: ignore
-        "dev4": _DeviceProfileIsHead(is_head=False),  # type: ignore
-        "dev5": _DeviceProfileIsHead(is_head=False),  # type: ignore
-        "dev6": _DeviceProfileIsHead(is_head=False),  # type: ignore
-        "dev7": _DeviceProfileIsHead(is_head=False),  # type: ignore
+        "dev1": {},  # type: ignore
+        "dev2": {},  # type: ignore
+        "dev3": {},  # type: ignore
+        "dev4": {},  # type: ignore
+        "dev5": {},  # type: ignore
+        "dev6": {},  # type: ignore
+        "dev7": {},  # type: ignore
     }
     thunderbolts: dict[str, dict[str, ThunderboltConnection]] = {
         "dev3": {"dev1": 1},  # type: ignore
@@ -77,10 +72,6 @@ def test_optimize_device_ordering():
     }
 
     optimized_order = optimize_device_ordering(device_profiles, thunderbolts)
-
-    # the ordering is not deterministic, but the connectino should be as follows:
-    # head must be the first
-    assert optimized_order[0] == "dev3"
 
     # dev1 and dev3 must be next to each other (due to thunderbolt)
     dev1_index = optimized_order.index("dev1")

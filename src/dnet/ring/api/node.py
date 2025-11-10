@@ -6,7 +6,6 @@ import uuid
 import json
 from dataclasses import asdict
 from io import StringIO
-from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import httpx
@@ -42,10 +41,9 @@ from ...protos.shard_api_comm_pb2_grpc import (
 
 from ...utils.logger import logger
 from ...utils.banner import print_startup_banner
-from ...utils.latency import calculate_median_latency_seconds
+from ...utils.latency import LatencyResults, calculate_median_latency_seconds
 from ...utils.model import (
     ModelMetadata,
-    get_model_metadata,
     get_model_config_json,
     resolve_tokenizer_dir,
 )
@@ -415,12 +413,14 @@ class RingApiNode:
 
         logger.info("Discovered %d shards: %s", len(shards), list(shards.keys()))
 
-        shard_profiles, thunderbolt_conns = await self._collect_shard_profiles(
+        thunderbolt_conns = discover_all_thunderbolt_connections(shards)
+        shard_profiles  = await self._collect_shard_profiles(
             shards,
             req.model,
             embedding_size,
             req.max_batch_exp,
             batch_sizes,
+            thunderbolt_conns
         )
         optimized_device_name_order = optimize_device_ordering(
             shard_profiles, thunderbolt_conns
@@ -971,7 +971,8 @@ class RingApiNode:
         embedding_size: int,
         max_batch_exp: int,
         batch_sizes: List[int],
-    ) -> Tuple[Dict[str, DeviceProfile], Dict[str, Dict[str, ThunderboltConnection]]]:
+        thunderbolt_conns: dict[str, dict[str, ThunderboltConnection]] = {},
+    ) -> Dict[str, DeviceProfile]:
         """Collect profile data from all shards.
 
         Args:
@@ -979,6 +980,8 @@ class RingApiNode:
             repo_id: Model repository ID
             embedding_size: Model embedding size
             max_batch_exp: Maximum batch size exponent
+            batch_sizes: List of batch sizes to profile
+            all_thunderbolts: Pre-discovered thunderbolt connections per shard
 
         Returns:
             Tuple of (collected shard profiles, thunderbolt connections)
@@ -987,8 +990,6 @@ class RingApiNode:
         base_size = embedding_size * 4  # 4*e due to paper
         payload_sizes = [base_size * batch_size for batch_size in batch_sizes]
 
-        this_device = self.discovery.get_own_properties()
-
         logger.info(
             "Model %s: embedding_size=%d, payload_sizes=%s",
             repo_id,
@@ -996,74 +997,68 @@ class RingApiNode:
             payload_sizes,
         )
 
-        # Find Thunderbolt connections
-        all_thunderbolts = discover_all_thunderbolt_connections(shards)
-
         async with httpx.AsyncClient() as client:
-            # Step 1: Health check all shards in parallel
+            # health-check all shards in parallel
             logger.info("Starting health checks for all shards...")
             health_tasks: list[asyncio._CoroutineLike[httpx.Response]] = []
             shard_list: list[tuple[str, DnetDeviceProperties]] = []
             for shard_name, shard_props in shards.items():
                 if shard_props.is_manager:
-                    logger.warning(
-                        "Skipping manager node %s in profile collection", shard_name
-                    )
+                    logger.warning("Skipping manager node %s in profile collection", shard_name)
                     continue
 
                 shard_list.append((shard_name, shard_props))
-                server_port, server_ip = shard_props.server_port, shard_props.local_ip
-                health_url = f"http://{server_ip}:{server_port}/health"
-                health_tasks.append(client.get(health_url, timeout=5.0))
+                health_tasks.append(client.get(f"http://{shard_props.local_ip}:{shard_props.server_port}/health", timeout=5.0))
 
             health_results = await asyncio.gather(*health_tasks, return_exceptions=True)
 
-            # Filter healthy shards
-            healthy_shards = []
+            # filter healthy shards
+            healthy_shards: list[tuple[str, DnetDeviceProperties]] = []
             for (shard_name, shard_props), health_result in zip(shard_list, health_results):
                 if isinstance(health_result, Exception):
                     logger.warning("Health check failed for %s: %s", shard_name, health_result)
                     continue
-                if health_result.status_code == 200:
+                elif isinstance(health_result, httpx.Response):
+                  if health_result.status_code == 200:
                     healthy_shards.append((shard_name, shard_props))
                     logger.info("Health check passed for %s", shard_name)
+                  else:
+                      logger.warning("Health check failed for %s: status %s", shard_name, health_result.status_code)
                 else:
-                    logger.warning("Health check failed for %s: status %s", shard_name, health_result.status_code)
+                  pass
+                
 
             logger.info("Healthy shards: %d/%d", len(healthy_shards), len(shard_list))
-
             if not healthy_shards:
                 logger.error("No healthy shards found!")
-                return {}, all_thunderbolts
+                return {}
 
-            # Step 2: Measure latencies on all healthy shards in parallel
+            # measure latencies on all healthy shards in parallel)
             logger.info("Measuring latencies for all healthy shards...")
-            latency_tasks = []
+            latency_tasks: list[asyncio._CoroutineLike[httpx.Response]] = []
             for shard_name, shard_props in healthy_shards:
                 server_port, server_ip = shard_props.server_port, shard_props.local_ip
                 latency_url = f"http://{server_ip}:{server_port}/measure_latency"
                 latency_request = MeasureLatencyRequest(
                     devices=shards,
-                    thunderbolts=all_thunderbolts.get(shard_name, {}),
+                    thunderbolts=thunderbolt_conns.get(shard_name, {}),
                     payload_sizes=payload_sizes,
                 )
                 latency_tasks.append(
                     client.post(latency_url, json=latency_request.model_dump(), timeout=1000.0)
                 )
-
             latency_results = await asyncio.gather(*latency_tasks, return_exceptions=True)
 
-            # Store latency data for each shard
-            shard_latencies = {}
+            # store latency data for each shard
+            shard_latencies: dict[str, LatencyResults] = {}
             final_healthy_shards = []
-
             for (shard_name, shard_props), latency_result in zip(healthy_shards, latency_results):
                 if isinstance(latency_result, Exception):
                     logger.warning(
                         "Latency measurement failed for %s: %s", shard_name, latency_result
                     )
                     continue
-                else:
+                elif isinstance(latency_result, httpx.Response):
                     if latency_result.status_code == 200:
                         latency_data = MeasureLatencyResponse.model_validate(latency_result.json())
                         shard_latencies[shard_name] = latency_data.latency
@@ -1075,34 +1070,33 @@ class RingApiNode:
                             shard_name,
                             latency_result.status_code,
                         )
+                else:
+                   pass # unexpected case
 
             logger.info("Latencies collected from %d shards", len(shard_latencies))
 
             if not final_healthy_shards:
                 logger.error("No shards with successful latency measurements!")
-                return {}, all_thunderbolts
+                return {}
 
-            # Step 3: Group healthy shards by local_ip (same device)
+            # group healthy shards by local_ip (same device), so that we can profile per-device
             shards_by_device: Dict[str, List[Tuple[str, DnetDeviceProperties]]] = {}
             for shard_name, shard_props in final_healthy_shards:
                 local_ip = shard_props.local_ip
                 if local_ip not in shards_by_device:
                     shards_by_device[local_ip] = []
                 shards_by_device[local_ip].append((shard_name, shard_props))
+            logger.info("Grouped %d shards into %d devices", len(final_healthy_shards), len(shards_by_device))
 
-            logger.info("Grouped shards into %d devices", len(shards_by_device))
-
-            # Step 4: Profile devices (parallel per device, sequential per shard within device)
+            # profile devices (parallel per device, sequential per shard within device)
             async def profile_device_shards(
-                device_ip: str, device_shards: List[Tuple[str, DnetDeviceProperties]]
+                device_shards: List[Tuple[str, DnetDeviceProperties]]
             ) -> List[Tuple[str, DeviceProfile]]:
-                """Profile all shards on a single device sequentially."""
                 profiles = []
 
                 for shard_name, shard_props in device_shards:
                     try:
-                        server_port, server_ip = shard_props.server_port, shard_props.local_ip
-                        profile_url = f"http://{server_ip}:{server_port}/profile"
+                        profile_url = f"http://{shard_props.local_ip}:{shard_props.server_port}/profile"
 
                         logger.info(
                             "Calling /profile endpoint for shard %s at %s",
@@ -1114,7 +1108,7 @@ class RingApiNode:
                             profile_url,
                             json=ShardProfileRequest(
                                 repo_id=repo_id,
-                                thunderbolts=all_thunderbolts.get(shard_name, {}),
+                                thunderbolts=thunderbolt_conns.get(shard_name, {}),
                                 payload_sizes=payload_sizes,
                                 max_batch_exp=max_batch_exp,
                                 devices=shards,
@@ -1125,11 +1119,6 @@ class RingApiNode:
                         if response.status_code == 200:
                             profile_data = ShardProfileResponse.model_validate(response.json())
                             profile = load_device_profile_from_dict(profile_data.profile)
-
-                            # Mark head device (same local IP as API)
-                            if shard_props.local_ip == this_device.local_ip:
-                                profile.is_head = True
-
                             profiles.append((shard_name, profile))
                             logger.info("Successfully collected profile from %s", shard_name)
                         else:
@@ -1144,39 +1133,38 @@ class RingApiNode:
 
                 return profiles
 
-            # Run profiling for all devices in parallel
+            # run profiling for all devices in parallel
             device_tasks = [
-                profile_device_shards(device_ip, device_shards)
-                for device_ip, device_shards in shards_by_device.items()
+                profile_device_shards(device_shards)
+                for device_shards in shards_by_device.values()
             ]
             device_results = await asyncio.gather(*device_tasks, return_exceptions=True)
 
-            # Step 5: Merge latency data into device profiles
+            # merge latency data into device profiles
             shard_profiles: Dict[str, DeviceProfile] = {}
-
             for device_result in device_results:
                 if isinstance(device_result, Exception):
                     logger.error("Device profiling failed: %s", device_result)
                     continue
+                elif isinstance(device_result, list):
+                  for shard_name, profile in device_result:
+                      # set t_comm using median latency
+                      if shard_name in shard_latencies:
+                          median_latency = calculate_median_latency_seconds(shard_latencies[shard_name])
+                          if median_latency is not None:
+                              profile.t_comm = float(median_latency)
+                              logger.info(
+                                  f"Set t_comm for {shard_name} to median latency: {profile.t_comm:.6f}s"
+                              )
+                          else:
+                              logger.warning(
+                                  f"No valid latency measurements for {shard_name}, keeping default t_comm"
+                              )
 
-                for shard_name, profile in device_result:
-                    # Set t_comm using median latency
-                    if shard_name in shard_latencies:
-                        median_latency = calculate_median_latency_seconds(shard_latencies[shard_name])
-                        if median_latency is not None:
-                            profile.t_comm = float(median_latency)
-                            logger.info(
-                                f"Set t_comm for {shard_name} to median latency: {profile.t_comm:.6f}s"
-                            )
-                        else:
-                            logger.warning(
-                                f"No valid latency measurements for {shard_name}, keeping default t_comm"
-                            )
-
-                    shard_profiles[shard_name] = profile
+                      shard_profiles[shard_name] = profile
 
         logger.info("Collected profiles from %d shards", len(shard_profiles))
-        return shard_profiles, all_thunderbolts
+        return shard_profiles
 
     # FIXME: move this to elsewhere
     async def _run_solver(
@@ -1202,6 +1190,10 @@ class RingApiNode:
         ]
         if not sorted_shard_profiles:
             raise ValueError("No valid shard profiles found")
+
+        # mark the first device as head, others as non-head
+        for i, profile in enumerate(sorted_shard_profiles):
+            profile.is_head = (i == 0)
 
         logger.info("Running solver with %d shard profiles", len(sorted_shard_profiles))
 

@@ -263,21 +263,9 @@ def optimize_device_ordering(
         thunderbolt_conns: Thunderbolt connections mapping (device -> {neighbor -> connection_info})
 
     Returns:
-        Optimized list of device names with head devices first and Thunderbolt neighbors adjacent
+        Optimized list of device names
     """
     device_names = list(shard_profiles.keys())
-
-    # Find all head devices (multiple shards can run on same machine as API)
-    head_devices = []
-    for device_name, profile_data in shard_profiles.items():
-        if profile_data.is_head:
-            head_devices.append(device_name)
-
-    if not head_devices:
-        logger.warning("No head device found in profiles, using first device")
-        head_devices = [device_names[0]] if device_names else []
-    else:
-        logger.info("Found %d head device(s): %s", len(head_devices), head_devices)
 
     # FIXME: shards on the same machine should be adjacent too!
 
@@ -292,8 +280,8 @@ def optimize_device_ordering(
                     tb_graph[neighbor_name].add(device_name)
 
     # Greedy ordering: Start with all head devices, then pick neighbors with most TB connections
-    ordered = head_devices.copy()
-    remaining = set(device_names) - set(head_devices)
+    ordered: list[str] = []
+    remaining: set[str] = set(device_names)
 
     while remaining:
         best_candidate = None

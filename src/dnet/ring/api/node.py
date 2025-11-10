@@ -6,7 +6,7 @@ import uuid
 import json
 from dataclasses import asdict
 from io import StringIO
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union, Callable
 
 import httpx
 import mlx.core as mx

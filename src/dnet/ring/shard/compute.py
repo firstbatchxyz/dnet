@@ -450,13 +450,10 @@ class ComputeMixin(RingShardNodeAttributes):
                     with self.tracer.frame("compute.thread", "cleanup") as f:
                         f.set("req_id", activation_msg.nonce)
                         f.set("node", self._instance_name)
-                        try:
-                            while len(self._recent_windows) > max(
-                                1, int(self._resident_windows)
-                            ):
-                                old = self._recent_windows.pop(0)
-                                try:
-                                    while len(self._recent_windows) > max(1, int(getattr(self, "_resident_windows", 2))):
+                        if self._mode != "sliding_fit":
+                            if self._defer_unload:
+                                try: 
+                                    while len(self._recent_windows) > max(1, int(self._resident_windows)):
                                         old = self._recent_windows.pop(0)
                                         try:
                                             evicted_cnt = self.weight_cache.evict_layers(old)

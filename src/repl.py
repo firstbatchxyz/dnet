@@ -190,52 +190,58 @@ class REPL(cmd.Cmd):
       pcmd = "    " + cmd.ljust(30, '.')
       sys.stdout.write(f"{pcmd} {desc}\n")
       for e in examples:
-        pex = e.rjust(len(e)+35)+"\n" if e != "" else ""
+        pex = e.rjust(len(e)+37)+"\n" if e != "" else ""
         sys.stdout.write(f"{pex}")
 
     sys.stdout.write("\033[1m\nAvailable commands:\n\033[0m")
     dprint("\033[1m\n    Common:\n\033[0m")
     _print_hf("model list ", "List locally available models.")
     _print_hf("model [REPO]", "Set the target model. [REPO] must be a valid repository")
-    _print_hf("nodes list ", "List mDNS discovered nodes.")
-    _print_hf("log [LEVEL]", "Set the logging level.")
+    _print_hf("api start [HTTP] [GRPC]", "Start the API server in a separate thread. Use provided ports if given.")
+    _print_hf("topo auto ", "Automatically optimize topology from available nodes.")
+    _print_hf("load ", "Load model into memory on all nodes.")
+    _print_hf("api log [LEVEL]", "Output live logs to current terminal.")
     dprint("\033[1m\n    Controlling the API Server:\n\033[0m")
     _print_hf("api start [HTTP] [GRPC]", "Start the API server in a separate thread. Use provided ports if given.")
     _print_hf("api stop ", "Stop the API server.")
-    _print_hf("api status ", "Prints the status of the API server.")
-    _print_hf("api log ", "Output live logs to current terminal.")
-    dprint("\033[1m\n    Topology construction:\n\033[0m")
-    _print_hf("search ", "Returns the current state of mDNS search.")
-    _print_hf("search [on/off] ", "Toggle mDNS search across the local network.")
+    _print_hf("api log [LEVEL]", "Output live logs to current terminal.")
+    dprint("\033[1m\n    Topology management:\n\033[0m")
+    _print_hf("search [on/off] ", "Toggle mDNS search across the local network. Default is ON.")
     _print_hf("nodes list ", "List all nodes in the current topology (including local ones).")
-    _print_hf("nodes all ", "List all nodes (including local ones).")
-    _print_hf("nodes ", "List mDNS discovered nodes.")
-    _print_hf("topo [AUTO/SETUP]", "Toggle between automatic and manual topology creation.")
+    _print_hf("nodes all ", "List all mDNS discovered nodes (including local ones).")
+    _print_hf("topo auto ", "Automatically optimize topology from available nodes.")
     _print_hf("topo add [NODE]", "Add [NODE] to the topology.")
-    _print_hf("topo remove [NODE]", "Remove [NODE] from the topology.")
+    _print_hf("topo [remove|rm] [NODE]", "Remove [NODE] from the topology.")
+    _print_hf("topo assign [NODE] [LAYERS] [ROUNDS] ", "Assign [LAYERS] to [NODE]. e.g:",
+              ["> topo assign dnet0 1-10"])
     sys.stdout.write("\033[1m\n    Scheduling:\n\033[0m")
     _print_hf("sched auto ", "Automatic search for best schedule given the active topology and the loaded model.")
-    _print_hf("sched assign [INDEX] [NODE]", "Assign the layer range between [START] and [END] to [NODE].",
-              ["Example: > sched assign 10 benny_234",
-               "         > sched assign 0-12 benny_234"])
+    _print_hf("sched assign [INDEX] [NODE]", "Assign the layer range between [START] and [END] to [NODE]. e.g:",
+              ["> sched assign 10 benny_234",
+               "> sched assign 0-12 benny_234"])
     sys.stdout.write("\033[1m\n    Benchmarking, Tracing and Profiling:\n\033[0m")
-    _print_hf("trace [ON|OFF][PATH][SYSTEM] ", "Trace [SYSTEM] and output to file at [PATH].")
-    _print_hf("trace status ", "See status of the trace, eg. number of frames captured")
-    _print_hf("trace focus [SUBSYSTEM] ", "Focus the trace on [SUBSYSTEM]. Do 'trace focus' for a list of available subsystems.")
-    _print_hf("trace stream [ON|OFF] ", "Stream the trace spans to current terminal.")
-    _print_hf("trace set [BUDGET] ", "Set the maximum amount of recoded events.")
     _print_hf("perf ", "Prints the current state of runtime performance tracking.")
-    _print_hf("perf stat [REQ_ID | WORKER_ID | MODEL] ", "Prints the runtime statistics of target system.")
-    _print_hf("bench [REPO]", "Benchmark the system using the model from [REPO]")
-    _print_hf("bench [KERNEL]", "Behcnmark the system using base kernel [KERNEL]")
-    _print_hf("bench [NODE]", "Behcnmark the network latency between the current system and [NODE]")
-    _print_hf("bench [NODE0] [NODE1]", "Behcnmark the network latency between [NODE0] and [NODE11")
+    _print_hf("perf stat [-n node] [-r req] ", "Prints the runtime statistics of target system.")
+    _print_hf("perf vm [interval]", "Prints virtual memory information for worker thread at [INTERVAL].")
+    _print_hf("bench [repo_id]", "Benchmark the system using the model from [REPO]")
+    _print_hf("bench [kernel]", "Behcnmark the system using base kernel [KERNEL]")
+    _print_hf("bench [node]", "Behcnmark the network latency between the current system and [NODE]")
+    _print_hf("bench [node0, node1]", "Behcnmark the network latency between [NODE0] and [NODE11")
     _print_hf("bench ", "Behcnmark the system using base library kernels")
+    _print_hf("trace [on|off] ", "Enable system tracing.")
+    _print_hf("trace [-o path] [-p [probes]]", "Trace [probes] and output to file at [path]. e.g:",
+               ["> trace on -p memory,network",
+                "> trace on -o ./trace_output.txt"])
+    _print_hf("trace list ", "List available trace probes.")
+    _print_hf("trace add [probe] ", "Activate [probe].")
+    _print_hf("trace stream [on|off] ", "Stream the trace events to the current terminal.")
+    _print_hf("trace [budget|b] [limit]", "Set the maximum budget for recoded events. Default is 1000.")
+    _print_hf("trace stat ", "See status of the trace, eg. number of frames captured")
     sys.stdout.write("\033[1m\n    System control:\n\033[0m")
-    _print_hf("limit [RESOURCE] [VALUE]", "Set a higher limit for a system resource.",
-              ["Examples  > limit memory 12000 (MB)",
-               "          > limit CPU_CORE_COUNT 4",
-               "          > limit GPU_SM 128"])
+    _print_hf("limit [RESOURCE] [VALUE]", "Set a higher limit for a system resource. e.g:",
+              ["> limit SYSMEM 12000 (MB)",
+               "> limit CPU_CORE_COUNT 4",
+               "> limit GPU_SM 128"])
     sys.stdout.write("\n")
     sys.stdout.flush()
     

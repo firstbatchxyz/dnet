@@ -52,6 +52,7 @@ except ModuleNotFoundError:
   hf_errors = import_module("huggingface_hub.utils")
 GatedRepoError = getattr(hf_errors, "GatedRepoError", Exception)
 HfHubHTTPError = getattr(hf_errors, "HfHubHTTPError", Exception)
+LocalEntryNotFoundError = getattr(hf_errors, "LocalEntryNotFoundError", Exception)
 
 
 def dprint(msg):
@@ -60,7 +61,7 @@ def dprint(msg):
 
 @dataclass
 class REPLState:
-  model: str = "NULL"
+  model: str = None 
   model_info: ModelMetadata = None,
   num_local_nodes: int = 1
   running_port = 50501
@@ -75,7 +76,7 @@ class REPL(cmd.Cmd):
   PS1 = "dnet > "
   WELCOME = "\nDNET Distributed Inference Engine, v0.1\nExperimental software. Type 'help' for usage hints.\n\n"
 
-  def __init__(self, model="NULL", nodes=1):
+  def __init__(self, model=None, nodes=1):
     assert nodes >= 1 and nodes < 10, "Invalid number of local nodes. Must be 0 < num < 10."
     super().__init__()
 
@@ -119,109 +120,69 @@ class REPL(cmd.Cmd):
     sys.stdout.write(self.WELCOME) 
     while True:
       dprint(self.PS1)
-      cmd = sys.stdin.readline().strip() 
+      cmd = sys.stdin.readline().strip().split(" ") 
 
-      if cmd == "":
-        #self.print_state()
-        continue
-      elif cmd in [".exit", "exit", "quit"]:
-        self.handle_terminate_signal()
-      elif cmd in [".help", "help", "h"]:
-        self.print_help()
+      match cmd[0]:
+        case "": continue
+        case s if s in ["exit", "quit", "q"]:  self.handle_terminate_signal()
+        case s if s in ["help", "h"]:          self.print_help()
+        case s if s in ["api", "server"]:      self.do_api(cmd)
+        case s if s in ["search", "s"]:        self.do_search(cmd)
+        case s if s in ["nodes", "n"]:         self.print_mdns_nodes()
+        case s if s in ["load", "l"]:          self.load_model(self.state.model)
+        case s if s in ["trace", ".trace", "t"]:  self.do_trace(cmd)
+        case s if s in ["perf", ".perf", "p"]:    self.do_perf(cmd)
+        case s if s in ["topo", "topology", "t"]: self.do_topo(cmd)
+        case s if s in ["model", "m"]:            self.do_model(cmd)
 
-      elif cmd.startswith(("api", ".api")):
-        self.do_api(cmd.split(" "))
-        continue
-      elif cmd.startswith("search"):
-        self.do_search(cmd.split(" "))
-        continue
-      elif cmd.startswith("nodes"):
-        self.print_mdns_nodes()
-        continue
-      elif cmd.startswith("load"):
-        model = "mlx-community/llama-3.3-70b-instruct-4bit"
-        self.load_model(model)
-        continue
-      elif cmd.startswith(("trace", ".trace")):
-        self.do_trace(cmd.split(" "))
-        continue
-      elif cmd.startswith(("perf", ".perf")):
-        self.do_perf(cmd.split(" "))
-        continue
-      elif cmd.startswith(("topo", ".topo", "t ")):
-        self.do_topo(cmd.split(" "))
-        continue
-      elif cmd.startswith((".model", "model", "m ")):
-        cmd.split(" ")
-        path = self._handle_model_pull(cmd[1])
-        if path:
-          self.state.model = path
-  
   def do_api(self, cmd: List[str]) -> None:
     if len(cmd) < 2:
       dprint("Invalid API command. Type 'help' for a list of valid commands.\n")
       return 
-    if cmd[1] in ["start", "run"]:
-      http_port, grpc_port = None, None
-      try:
-        http_port = cmd[2];
-        grpc_port = cmd[3]
-      except:
-        pass
-      self.start_api(
-        http_port or self.state.api_http_port,
-        grpc_port or self.state.api_grpc_port
-      )
-      self.api_call("set_trace_ingest_callback", self.__trace_cb, timeout=2.0)
+    match cmd[1]: # TODO Maybe allow kwargs here? > api start grpc_port=8080
+      case s if s in ["start", "run"]:
+        http_port, grpc_port = None, None
+        if len(cmd) > 2:
+          try:
+            http_port = cmd[2];
+            grpc_port = cmd[3]
+          except:
+            pass
+        self.start_api( http_port or self.state.api_http_port, grpc_port or self.state.api_grpc_port)
+        self.api_call("set_trace_ingest_callback", self.__trace_cb, timeout=2.0)
 
-    elif cmd[1] == "stop":
-      self.stop_api()
-    elif cmd[1] == "status":
-      dprint("Running\n" if self._api_running else "Stopped.\n") 
-    elif cmd[1] == "log":
-      dprint("Log print is not yet supported.\n")
-    else:
-      dprint("Invalid API command. Type 'help' for a list of valid commands.\n")
+      case "stop":   self.stop_api()
+      case "status": dprint("Running\n" if self._api_running else "Stopped.\n") 
+      case "log":    dprint("Log print is not yet supported.\n")
+      case _:        dprint("Invalid API command. Type 'help' for a list of valid commands.\n")
     return
 
   def do_search(self, cmd: List[str]) -> None:
     if len(cmd) != 2:
       dprint("mDNS search is " + ("ON\n\n" if self._api_searching else "OFF\n\n"))
       return 
-    if cmd[1] == "on":
-      if self._api_searching:
-        return
-      if not self._api_ready and self._api_running:
-        dprint("Starting API Server thread.\n")
-        self.start_api()
-      self.api_call("_start_discovery", timeout=10)
-      self._api_searching.set()
-      dprint("Starting mDNS search for worker nodes.\n")
-    elif cmd[1] == "off":
-      dprint("Stop discovery not yet implemented in the API node.\n")
-      pass
-    else:
-      dprint("Invalid topology command. Start searchign with 'search on'.\n")
-    return 
+    match cmd[1]: # NOTE on by default
+      case "on":
+        if self._api_searching:
+          return
+        if not self._api_ready and self._api_running:
+          dprint("Starting API Server thread.\n")
+          self.start_api()
+        self.api_call("_start_discovery", timeout=10)
+        self._api_searching.set()
+        dprint("Starting mDNS search for worker nodes.\n")
+      case "off": dprint("Stop discovery not yet implemented in the API node.\n")
+      case _: dprint("Invalid topology command. Start searchign with 'search on'.\n")
     
   def do_topo(self, cmd: List[str]) -> None:
     if len(cmd) < 2:
       dprint("Invalid topology command. Type 'help' for a list of valid commands.\n")
       return 
-    if cmd[1] == "search":
-      self.print_mdns_nodes()
-      pass
-    elif cmd[1] in ("auto", "build", "b"):
-      model = "mlx-community/llama-3.3-70b-instruct-4bit"
-      self.prepare_topo(model)
-      pass
-    elif cmd[1] == "setup":
-      pass
-    elif cmd[1] == "add":
-      pass
-    elif cmd[1] in ["remove", "rm"]:
-      pass
-    return
+    match cmd[1]:
+      case "search": self.print_mdns_nodes()
+      case s if s in ["auto", "build", "b"]: self.prepare_topo(self.state.model)
+      case "add": dprint("Not implemented.\n")
+      case s if s in ["remove", "rm"]: dprint("Not implemented.\n")
 
   # TODO: standardize ANSI escape codes for easy use
   def print_help(self):
@@ -234,15 +195,15 @@ class REPL(cmd.Cmd):
 
     sys.stdout.write("\033[1m\nAvailable commands:\n\033[0m")
     dprint("\033[1m\n    Common:\n\033[0m")
-    _print_hf("model [REPO]", "Set the target model. [REPO] must be a valid repository",
-              ["Examples  > model meta-llama/Meta-Llama-3-8B"])
+    _print_hf("model list ", "List locally available models.")
+    _print_hf("model [REPO]", "Set the target model. [REPO] must be a valid repository")
     _print_hf("nodes list ", "List mDNS discovered nodes.")
     _print_hf("log [LEVEL]", "Set the logging level.")
     dprint("\033[1m\n    Controlling the API Server:\n\033[0m")
-    _print_hf("api start [http_port=8080] [grpc_port=50500]", "Start the API server in a separate thread. Use provided ports if given.")
-    _print_hf("api stop ", "Signal clean shutdown of the API server.")
+    _print_hf("api start [HTTP] [GRPC]", "Start the API server in a separate thread. Use provided ports if given.")
+    _print_hf("api stop ", "Stop the API server.")
     _print_hf("api status ", "Prints the status of the API server.")
-    _print_hf("api log ", "Print latest logs to the current terminal.")
+    _print_hf("api log ", "Output live logs to current terminal.")
     dprint("\033[1m\n    Topology construction:\n\033[0m")
     _print_hf("search ", "Returns the current state of mDNS search.")
     _print_hf("search [on/off] ", "Toggle mDNS search across the local network.")
@@ -297,39 +258,98 @@ class REPL(cmd.Cmd):
       except Exception as e:
         dprint(f"Unable to load model {model}. Target needs to be a valid HF repository. Try again:{e}\n")
 
-  # Read HF access token
-  def _resolve_hf_token(self):
-    dprint("Ener the HuggingFace access token > ")
-    tok = sys.stdin.readline().strip()
-    return tok
+  def do_model(self, cmd):
+    if len(cmd) < 2:
+      if self.state.model is None: dprint("No target model.\n")
+      else: dprint(f"Target model: {self.state.model}.\n")
+      return
+
+    match cmd[1]:
+      case "list": # List locally available models
+        lists = self._list_local_models()
+        dprint("\nLocally available weights:\n")
+        for x in lists[0]:
+          dprint(f"   {x}\n")
+        dprint("\nMetadata only:\n")
+        for x in lists[1]:
+          dprint(f"   {x}\n")
+        dprint("\n")
+      case _: # Treat unknown commands as model repos
+        self._handle_model_pull(cmd[1])
+    
+  def _are_weights_local(self, repo_id, revision="main"):
+    try:
+      import re, os
+      from pathlib import Path
+      root = Path.home() / ".cache/huggingface/hub"
+      if os.getenv("HF_HOME") is not None: root = Path(f"{os.getenv("HF_HOME")}/huggingface/hub") 
+      if os.getenv("HF_HUB_CACHE") is not None: root = Path(f"{os.getenv("HF_HUB_CACHE")}/huggingface/hub")
+      files = os.scandir(root / f"models--{repo_id}/snapshots")
+      commit_hash = next(files).name 
+      files = os.scandir(root / f"models--{repo_id}/snapshots/{commit_hash}")
+      files = [x.name for x in files]
+    except Exception as e:
+      dprint(f"Failed to search files in local model cache: {e}\n")
+      return False
+    PATTERNS = [
+        re.compile(r".*?model.*\.safetensors$"),
+        re.compile(r"^(model|pytorch_model)([._-]\d+([-_]of[-_]\d+)?)?[._-]?\.safetensors$"),
+        re.compile(r"pytorch_model[-_]\d{3,}[.]bin$"),
+        re.compile(r"model[.]safetensors$"),          
+        re.compile(r"pytorch_model[.]bin$"),          
+        re.compile(r"tf_model[.]h5$"),                
+        re.compile(r"flax_model[.]msgpack$"),         
+    ]
+    for pat in PATTERNS:
+      if any(pat.search(f) for f in files):
+        return True
+    return False
+
+  def _list_local_models(self):
+    import os
+    from pathlib import Path
+    root = Path.home() / ".cache/huggingface/hub"
+    if os.getenv("HF_HOME") is not None: root = Path(f"{os.getenv("HF_HOME")}/huggingface/hub") 
+    if os.getenv("HF_HUB_CACHE") is not None: root = Path(f"{os.getenv("HF_HUB_CACHE")}/huggingface/hub")
+    models = [x.name.replace("models--", "") for x in os.scandir(root) if x.name.startswith("models--")]
+    weights_local = sorted([x for x in models if self._are_weights_local(x)], key=len)
+    config_local = sorted([x for x in models if x not in weights_local], key=len)
+    return [weights_local, config_local]
 
   # Require a HF access token for restricted repositories
   # Ask user for HF access token until they have a valid one
   def _handle_model_pull(self, repo_path):
+    local = self._are_weights_local(repo_path)
     try:
-      path = try_to_load_from_cache(repo_path)
-      if path is None:
-        dprint(f"Model {repo_path} not found in local cache\n")
-        path = get_model_path(repo_path)
+      if not local:
+        dprint(f"Weights for {repo_path} not found in local cache. Downloading.\n")
+        path = snapshot_download(repo_path)
+        dprint("Download complete\n")
+      else:
+        dprint("Target model found in local registry.\n")
+
       self.state.model = repo_path
-      return path 
-    except hb.errors.HTTPError:
-      dprint(f"Repository {repo_path} not found in Hugging Face registry.")
-      return Null 
+      return repo_path 
+
     except GatedRepoError as e:
-      dprint("Restricted model.\n")
       tok = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")
       while True:
-        tok = self._resolve_hf_token()
-        print(tok)
+        dprint("\nRestricted model. Ener the HuggingFace access token > ")
+        tok = sys.stdin.readline().strip()
         try:
           ret = snapshot_download(repo_id=repo_path, token=tok) 
+          self.state.model = path
           return ret
         except GatedRepoError as e:
           print(e)
           continue
         except Exception as e:
           raise RuntimeError(f"Unknown error during HF snapshot_download")
+
+    except HfHubHTTPError as e:
+      dprint(f"Repository {repo_path} not found in Hugging Face registry: {e}")
+      return None 
+
     except Exception as e:
       raise RuntimeError(f"Unable to pull model {repo_path} locally")
 
@@ -480,13 +500,8 @@ class REPL(cmd.Cmd):
     self._api_running.clear()
     self._api_ready.clear()
 
-  def api_call( # Call an API function from the REPL thread
-    self, 
-    method: str,
-    *args: Any, 
-    timeout: float=30.0, 
-    **kwargs: Any
-  ) -> Any:
+  # Call an API function from the REPL thread
+  def api_call( self, method: str, *args: Any, timeout: float=30.0, **kwargs: Any) -> Any:
     if not self._api_loop or not self._node:
       raise RuntimeError("API Thread not set up correctly.")
 
@@ -500,10 +515,8 @@ class REPL(cmd.Cmd):
       f = asyncio.run_coroutine_threadsafe(coroutine, self._api_loop) 
       return f.result(timeout)
 
-    # method is sync
-    f = concurrent.futures.Future()
+    f = concurrent.futures.Future() # method is sync
 
-    # TODO: this is a mess lol 
     def runner():
       try:
         ret = target(*args, **kwargs)
@@ -837,7 +850,7 @@ class REPL(cmd.Cmd):
   # ===== Handle chat
  
   def do_chat(self, cmd):
-    model = "mlx-community/llama-3.3-70b-instruct-4bit"
+    model = "mlx-community/Meta-Llama-3.1-70B-Instruct-4bit"
     if len(cmd) < 2:
       if not self.state.model or self.state.model == "":
         self.prompt_model()

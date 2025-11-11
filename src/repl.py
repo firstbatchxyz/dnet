@@ -2,6 +2,7 @@
 import io
 import os
 import sys
+import json
 import logging
 import cmd
 import time
@@ -40,6 +41,9 @@ from dnet.ring.api.models import (
   PrepareTopologyRequest,
   APILoadModelRequest,
   APILoadModelResponse,
+  ChatParams,
+  ChatMessage,
+  ChatRequestModel,
 )
 
 # Handle restricted repos
@@ -58,6 +62,13 @@ LocalEntryNotFoundError = getattr(hf_errors, "LocalEntryNotFoundError", Exceptio
 def dprint(msg):
   sys.stdout.write(msg) 
   sys.stdout.flush()
+
+@dataclass
+class ChatInterface:
+  id: str = ""
+  model: str = ""
+  params: ChatParams = None
+  messages: List[ChatMessage] = None 
 
 @dataclass
 class REPLState:
@@ -134,6 +145,7 @@ class REPL(cmd.Cmd):
         case s if s in ["perf", ".perf", "p"]:    self.do_perf(cmd)
         case s if s in ["topo", "topology", "t"]: self.do_topo(cmd)
         case s if s in ["model", "m"]:            self.do_model(cmd)
+        case "chat": self.do_chat(cmd)
 
   def do_api(self, cmd: List[str]) -> None:
     if len(cmd) < 2:
@@ -155,7 +167,6 @@ class REPL(cmd.Cmd):
       case "status": dprint("Running\n" if self._api_running else "Stopped.\n") 
       case "log":    dprint("Log print is not yet supported.\n")
       case _:        dprint("Invalid API command. Type 'help' for a list of valid commands.\n")
-    return
 
   def do_search(self, cmd: List[str]) -> None:
     if len(cmd) != 2:
@@ -244,12 +255,6 @@ class REPL(cmd.Cmd):
                "> limit GPU_SM 128"])
     sys.stdout.write("\n")
     sys.stdout.flush()
-    
-  def print_state(self):
-    dprint("Network state:\n")
-    dprint(f"{("Model".ljust(20)): >10}: {self.state.model}\n")
-    dprint(f"{("Local workers".ljust(20)): >10}: {self.state.num_local_nodes}\n")
-
 
   # ===== Handle Model input and pull from server
 
@@ -275,10 +280,10 @@ class REPL(cmd.Cmd):
         lists = self._list_local_models()
         dprint("\nLocally available weights:\n")
         for x in lists[0]:
-          dprint(f"   {x}\n")
+          dprint(f"   {x.replace("--", "/")}\n")
         dprint("\nMetadata only:\n")
         for x in lists[1]:
-          dprint(f"   {x}\n")
+          dprint(f"   {x.replace("--", "/")}\n")
         dprint("\n")
       case _: # Treat unknown commands as model repos
         self._handle_model_pull(cmd[1])
@@ -325,7 +330,7 @@ class REPL(cmd.Cmd):
   # Require a HF access token for restricted repositories
   # Ask user for HF access token until they have a valid one
   def _handle_model_pull(self, repo_path):
-    local = self._are_weights_local(repo_path)
+    local = self._are_weights_local(repo_path.replace("/", "--"))
     try:
       if not local:
         dprint(f"Weights for {repo_path} not found in local cache. Downloading.\n")
@@ -740,7 +745,7 @@ class REPL(cmd.Cmd):
       dprint(f"Unable to create topology: {e}\n\n")
       return False
     self.state.topo = topo
-    self.print_topo(topo)
+    #self.print_topo(topo)
     return True
 
   def load_model(self, model):
@@ -753,31 +758,91 @@ class REPL(cmd.Cmd):
       return False
     
   # ===== Handle chat
+
+  def _p_msg(self, msg: str, role: str):
+    match role:
+      case "user": 
+        ps = f"\n@\033[97;1m{role}\033[0m".rjust(10)
+        sys.stdout.write(f"{ps} > ")
+        sys.stdout.flush()
+        return
+      case "llm" | "think":
+        ps = f"@\033[97;1m{role}\033[0m".rjust(10)
+        sys.stdout.write(f"{ps} > ")
+        sys.stdout.flush()
+        return
+      case _: 
+        ps = f"@\033[1m{role}\033[0m".rjust(10)
+    sys.stdout.write(f"{ps} > {msg}\n")
+
+  def _chat_loop(self, ci: ChatInterface):
+    while True:
+      self._p_msg(" ", "user")
+      prompt = sys.stdin.readline().strip()
+
+      match prompt: # Match meta commands, else prompt
+        case s if s in [".quit", ".q"]:
+          break
+        case _:
+          msg = ChatMessage(role="user", content=prompt)
+          ci.messages.append(msg)
+
+      req = ChatRequestModel(
+        messages=ci.messages,
+        model=self.state.model,
+        max_tokens=5000,
+      )
+      # eval async generator in api thread
+      agen = self.api_call("_stream_chat", req)
+      msg = []
+      #self._p_msg("", "think")
+      self._p_msg("", "llm")
+      while True:
+        fut = asyncio.run_coroutine_threadsafe(agen.__anext__(), self._api_loop)
+        line = fut.result()
+        if not line.startswith("data: "):
+          sys.stdout.write(f"[stream error] Invalid data returned from API thread.\n")
+          break
+        payload = line[6:].strip()
+        if payload == "[DONE]":
+          dprint("\n")
+          break
+        obj = json.loads(payload)
+        choices = obj.get("choices", [])
+        if choices:
+          delta = choices[0].get("delta", {})
+          text = delta.get("content", "")
+          match text:
+            case "<think>":
+              sys.stdout.write("\033[90;3m")
+            case "</think>":
+              sys.stdout.write("\033[0m")
+            case "\n":
+              pass
+            case _:
+              sys.stdout.write(text)
+              sys.stdout.flush()
+              msg.append(text)
+              
+        # TODO: Capture usage and metrics
  
   def do_chat(self, cmd):
-    model = "mlx-community/Meta-Llama-3.1-70B-Instruct-4bit"
     if len(cmd) < 2:
       if not self.state.model or self.state.model == "":
         self.prompt_model()
-      if not self.state.topology:
-        if not self._prepare_topo(self.state.model):
+      sys.stdout.write(""+"-"*80+"\n\n")
+      if not hasattr(self.state, "topology"):
+        self._p_msg("Initializing topology", "system")
+        if not self.prepare_topo(self.state.model):
           raise RuntimeError("Unable to create topology.")
+      self._p_msg("Loading weights into memory", "system")
       if not self.load_model(self.state.model):
         raise RuntimeError("Unable to load model.")
 
-      while True:
-        prompt = input("\n> ")
-        prompt = self.format_prompt(prompt)
-        messages = prompt
-        req = ChatRequest(
-          messages=messages,
-          max_tokens=100,
-          temperature=0.7,
-          stream=True,
-        )
+      self._p_msg("New session initialized. Welcome :3", "system")
+      ci = ChatInterface(messages=[])
+      self._chat_loop(ci)
 
-        self.api_call("_handle_completion", req)
-        
       # Start default chat with selected model
       pass
     pass

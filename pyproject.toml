@@ -33,8 +33,7 @@ dependencies = [
   "mypy-protobuf>=3.0.0",
   "httpx[http2]>=0.24.0",
   "cryptography>=40.0.0",
-  "dperf @ file://${PROJECT_ROOT}/lib/dperf",
-  "distilp @ file://${PROJECT_ROOT}/lib/distilp",
+  "distilp[solver,profiler] @ file://${PROJECT_ROOT}/lib/distilp",
   "dnet-p2p @ file://${PROJECT_ROOT}/lib/dnet-p2p/bindings/py",
 ]
 

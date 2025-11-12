@@ -1,9 +1,9 @@
 """Shard models for dnet ring topology endpoints."""
 
-from typing import Any, Dict, List, Optional, Literal
+from typing import Dict, List, Optional, Literal
 from pydantic import BaseModel, Field
 from dnet_p2p import DnetDeviceProperties, ThunderboltConnection
-
+from distilp.common import DeviceProfile
 from dnet.utils.latency import LatencyResults
 
 
@@ -71,7 +71,7 @@ class ShardProfileRequest(BaseModel):
 class ShardProfileResponse(BaseModel):
     """Response from device profiling."""
 
-    profile: Dict[str, Any] = Field(..., description="Device profile information")
+    profile: DeviceProfile = Field(..., description="Device profile information")
 
 
 class MeasureLatencyRequest(BaseModel):

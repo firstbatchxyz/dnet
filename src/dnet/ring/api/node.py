@@ -22,16 +22,10 @@ from dnet_p2p import (
     discover_all_thunderbolt_connections,
     ThunderboltConnection,
 )
-from dperf import profile_model
-from dperf.profiler import ModelProfileSplit
-from distilp import (
-    DeviceProfile,
-    halda_solve,
-    ModelProfile,
-    load_model_profile_from_dict,
-    load_device_profile_from_dict,
-)
-from distilp.components.dense_common import HALDAResult
+from distilp.solver import halda_solve, HALDAResult
+from distilp.profiler import profile_model
+from distilp.common import DeviceProfile, ModelProfile
+
 from ..observability import load_settings
 
 from ...protos.dnet_ring_pb2_grpc import DnetRingServiceStub
@@ -957,7 +951,7 @@ class RingApiNode:
     async def _profile_model(
         self, repo_id: str, batch_sizes: List[int], sequence_length: int
     ) -> ModelProfile:
-        """Profile model using dperf.
+        """Profile model.
 
         Args:
             repo_id: Hugging Face repository ID
@@ -967,13 +961,13 @@ class RingApiNode:
         Returns:
             Model profile
         """
-        model_profile_split: ModelProfileSplit = profile_model(
+        model_profile_split = profile_model(
             repo_id=repo_id,
             batch_sizes=batch_sizes,
             sequence_length=sequence_length,
         )
         logger.info("Model profiling completed for %s.", repo_id)
-        return load_model_profile_from_dict(asdict(model_profile_split))
+        return model_profile_split.to_model_profile()
 
     async def _collect_shard_profiles(
         self,
@@ -1131,7 +1125,7 @@ class RingApiNode:
             async def profile_device_shards(
                 device_shards: List[Tuple[str, DnetDeviceProperties]],
             ) -> List[Tuple[str, DeviceProfile]]:
-                profiles = []
+                profiles: list[Tuple[str, DeviceProfile]] = []
 
                 for shard_name, shard_props in device_shards:
                     try:
@@ -1156,13 +1150,10 @@ class RingApiNode:
                         )
 
                         if response.status_code == 200:
-                            profile_data = ShardProfileResponse.model_validate(
+                            profile_response = ShardProfileResponse.model_validate(
                                 response.json()
                             )
-                            profile = load_device_profile_from_dict(
-                                profile_data.profile
-                            )
-                            profiles.append((shard_name, profile))
+                            profiles.append((shard_name, profile_response.profile))
                             logger.info(
                                 "Successfully collected profile from %s", shard_name
                             )
@@ -1227,7 +1218,7 @@ class RingApiNode:
 
         Args:
             shard_profiles: Collected shard profiles
-            model_profile: Model profile from dperf
+            model_profile: Model profile
             device_order: Optimized device ordering (head first, TB-connected adjacent)
 
         Returns:

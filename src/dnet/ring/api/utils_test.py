@@ -8,7 +8,8 @@ uv run pytest -v -k utils_test
 """
 
 from dnet_p2p import ThunderboltConnection, DnetDeviceProperties
-from distilp.components.dense_common import HALDAResult, DeviceProfile
+from distilp.common import DeviceProfile
+from distilp.solver import HALDAResult
 
 from .utils import (
     postprocess_single_round,

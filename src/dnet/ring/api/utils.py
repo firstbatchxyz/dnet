@@ -5,8 +5,8 @@ from typing import AsyncGenerator, Dict, Tuple
 from dnet_p2p import DnetDeviceProperties, ThunderboltConnection
 import mlx.core as mx
 import numpy as np
-from distilp import DeviceProfile
-from distilp.components.dense_common import HALDAResult
+from distilp.common import DeviceProfile
+from distilp.solver import HALDAResult
 
 from dnet.protos import dnet_ring_pb2
 from dnet.protos.dnet_ring_pb2_grpc import DnetRingServiceStub

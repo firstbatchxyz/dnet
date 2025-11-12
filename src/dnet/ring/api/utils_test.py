@@ -54,7 +54,6 @@ def test_single_round_postprocess_complex():
 
 
 def test_optimize_device_ordering():
-
     device_profiles: dict[str, DeviceProfile] = {
         "dev1": {},  # type: ignore
         "dev2": {},  # type: ignore

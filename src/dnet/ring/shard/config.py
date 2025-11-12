@@ -73,7 +73,6 @@ class ShardConfig:
     input_pool_mb: int = 512
     output_pool_mb: int = 512
 
-
     @staticmethod
     def for_mode(mode: str) -> "ShardConfig":
         m = (mode or "fit").strip().lower()

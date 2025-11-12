@@ -109,8 +109,7 @@ class BaseRingModel(nn.Module, metaclass=ABCMeta):
         """
 
     def load_weights(self, file_or_weights, strict: bool = False):
-        """Bind weights for this shard
-        """
+        """Bind weights for this shard"""
 
         wdict: Dict[str, Any]
         if isinstance(file_or_weights, dict):
@@ -118,7 +117,13 @@ class BaseRingModel(nn.Module, metaclass=ABCMeta):
         elif isinstance(file_or_weights, (list, tuple)):
             try:
                 wdict = {
-                    (k.decode("utf-8") if isinstance(k, (bytes, bytearray)) else str(k) if not isinstance(k, str) else k): v
+                    (
+                        k.decode("utf-8")
+                        if isinstance(k, (bytes, bytearray))
+                        else str(k)
+                        if not isinstance(k, str)
+                        else k
+                    ): v
                     for (k, v) in file_or_weights  # type: ignore[misc]
                 }
             except UnicodeError:
@@ -267,7 +272,7 @@ class BaseRingModel(nn.Module, metaclass=ABCMeta):
                 g_bits = int(qspec.get("bits", 0) or 0)
                 g_group = int(qspec.get("group_size", 0) or 0)
                 g_mode = str(qspec.get("mode", "affine")).strip().lower() or "affine"
-                
+
                 ds = qspec.get("disable_sinks")
                 if isinstance(ds, bool):
                     self._disable_sinks_on_quant = ds
@@ -415,8 +420,6 @@ class BaseRingModel(nn.Module, metaclass=ABCMeta):
             except Exception:
                 pass
             return False
-
-    
 
     @staticmethod
     def _shrink_linear_like(mod) -> None:

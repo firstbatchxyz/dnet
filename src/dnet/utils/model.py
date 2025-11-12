@@ -490,7 +490,12 @@ def make_cache(
 
     # GPT-OSS: attention sinks are not supported with quantized KV caches.
     try:
-        if getattr(model, "model_type", None) == "gpt_oss" and mode in {"8bit", "4bit", "quant", "q"}:
+        if getattr(model, "model_type", None) == "gpt_oss" and mode in {
+            "8bit",
+            "4bit",
+            "quant",
+            "q",
+        }:
             logger.info(
                 "KV quantization requested (%s) but disabled for gpt_oss due to unsupported attention sinks; using fp16 KV cache",
                 mode,

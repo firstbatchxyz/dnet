@@ -77,7 +77,9 @@ def repack_windows(
             except Exception as e:
                 print(f"Warning: failed to copy {entry.name}: {e}")
         if copied:
-            print(f"Copied {copied} non-weight file(s) (tokenizer/config/etc.) to {out_root}")
+            print(
+                f"Copied {copied} non-weight file(s) (tokenizer/config/etc.) to {out_root}"
+            )
     except Exception as e:
         print(f"Warning: failed to copy non-weight artifacts: {e}")
     try:
@@ -118,14 +120,16 @@ def repack_windows(
             print(f"Warning: failed to gather API-layer tensors: {e}")
         if api_subset:
             api_name = f"{out_prefix.name}_api.safetensors"
-            api_path = (out_prefix.parent / api_name)
+            api_path = out_prefix.parent / api_name
             mx.save_safetensors(str(api_path), api_subset)
             written.append(api_path)
             print(
                 f"Wrote {api_path} with {len(api_subset)} API-layer tensors (embed/norm/head)"
             )
         else:
-            print("Warning: No API-layer tensors found (embed/norm/head); check source model files")
+            print(
+                "Warning: No API-layer tensors found (embed/norm/head); check source model files"
+            )
     finally:
         for mf in mapped_files.values():
             try:

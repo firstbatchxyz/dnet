@@ -37,5 +37,5 @@ class TopologyInfo(BaseModel):
         ..., description="Layer assignments per device"
     )
     solution: Optional[HALDAResult] = Field(
-        default=None, description="Solver result details"
+        default=None, description="Solver result details (None for manual topology)"
     )

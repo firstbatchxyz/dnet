@@ -4,7 +4,6 @@ import asyncio
 import time
 import uuid
 import json
-from dataclasses import asdict
 from io import StringIO
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
@@ -449,7 +448,7 @@ class RingApiNode:
             num_layers=num_layers,
             devices=shards_list,
             assignments=layer_assignments,
-            solution=asdict(solution),
+            solution=solution,
         )
 
         # Optional, detailed solver print when profiling is enabled
@@ -559,7 +558,6 @@ class RingApiNode:
             kv_bits=req.kv_bits,
             devices=devices_props,
             assignments=normalized,
-            solution={"source": "manual"},
         )
         logger.info(
             "Manual topology prepared: %d devices, %d layers",

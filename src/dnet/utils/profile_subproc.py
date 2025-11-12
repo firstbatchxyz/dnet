@@ -2,12 +2,15 @@ import json
 import multiprocessing as mp
 from distilp.common import DeviceProfile
 
+
 def _child_profile_device(repo_id: str, max_batch_exp: int, debug: int, conn) -> None:
     try:
         # import inside child to avoid pre-initializing Metal/MLX in parent
         from distilp.profiler import profile_device as _profile_device
 
-        device_profile = _profile_device(repo_id, max_batch_exp=max_batch_exp, debug=debug)
+        device_profile = _profile_device(
+            repo_id, max_batch_exp=max_batch_exp, debug=debug
+        )
         conn.send(device_profile.model_dump_json())
     except ChildProcessError as e:
         try:

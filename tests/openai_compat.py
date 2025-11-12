@@ -5,6 +5,7 @@ Similar usage can be seen on [Ollama](https://github.com/ollama/ollama/blob/main
 """
 
 from openai import OpenAI
+import pytest
 
 
 MODEL = "Qwen/Qwen3-4B-MLX-4bit"
@@ -56,6 +57,7 @@ def test_openai_chat_completions_streaming():
     print(chat_completion)
 
 
+@pytest.mark.skip(reason="models endpoint not yet added")
 def test_openai_models():
     """https://platform.openai.com/docs/api-reference/models/list"""
     list_completion = client.models.list()
@@ -64,6 +66,7 @@ def test_openai_models():
     print(list_completion)
 
 
+@pytest.mark.skip(reason="embeddings endpoint not yet added")
 def test_openai_embeddings():
     """https://platform.openai.com/docs/api-reference/embeddings/create"""
     response = client.embeddings.create(

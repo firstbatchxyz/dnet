@@ -1,6 +1,7 @@
-from typing import Any, Dict, List, Optional, Literal
+from typing import List, Optional, Literal
 from dnet_p2p import DnetDeviceProperties
 from pydantic import BaseModel, Field
+from distilp.solver import HALDAResult
 
 
 class LayerAssignment(BaseModel):
@@ -35,4 +36,6 @@ class TopologyInfo(BaseModel):
     assignments: List[LayerAssignment] = Field(
         ..., description="Layer assignments per device"
     )
-    solution: Dict[str, Any] = Field(..., description="Solver result details")
+    solution: Optional[HALDAResult] = Field(
+        default=None, description="Solver result details"
+    )

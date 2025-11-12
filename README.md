@@ -13,8 +13,15 @@
 
 <p align="center">
     <a href="https://opensource.org/license/apache-2-0" target="_blank">
-        <img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache%202.0-7CB9E8.svg">
+        <img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache%202.0-D22128.svg?logo=apache">
     </a>
+    <a href="./.github/workflows/ci.yml" target="_blank">
+        <img alt="Workflow: Tests" src="https://github.com/firstbatchxyz/dnet/actions/workflows/ci.yml/badge.svg?branch=master">
+    </a>
+    <a href="https://discord.com/invite/XwxZFkpFuQ" target="_blank">
+        <img alt="License: Apache-2.0" src="https://img.shields.io/badge/discord-Dria-5865F2.svg?logo=discord">
+    </a>
+    
 </p>
 
 ## Installation

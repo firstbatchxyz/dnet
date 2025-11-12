@@ -6,7 +6,7 @@ import uuid
 import json
 from dataclasses import asdict
 from io import StringIO
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union, Callable
 
 import httpx
 import mlx.core as mx
@@ -39,6 +39,7 @@ from ...protos.shard_api_comm_pb2_grpc import (
     add_ShardApiServiceServicer_to_server,
 )
 
+from .api_logging import get_api_logger
 from ...utils.logger import logger
 from ...utils.banner import print_startup_banner
 from ...utils.latency import LatencyResults, calculate_median_latency_seconds
@@ -79,11 +80,16 @@ from ..shard.models import (
     ShardLoadModelRequest,
     ShardLoadModelResponse,
     ShardProfileResponse,
+    TraceIngestBatch,
+    TraceIngestResponse,
+    TraceConfigRequest,
+    TraceConfigResponse,
 )
 from ..data_types import StopCondition
 from .servicer import ShardApiServicer
 from ..common import TopologyInfo, LayerAssignment
 
+from dnet.perf import Tracer, TraceConfig
 
 async def arange(count: int):
     """Async range generator."""
@@ -100,6 +106,9 @@ async def azip(*async_iterables):
             yield results
         except StopAsyncIteration:
             break
+
+
+logger = get_api_logger()
 
 
 class RingApiNode:
@@ -143,11 +152,26 @@ class RingApiNode:
         except Exception:
             pass
 
+        cfg = TraceConfig(
+            file="./trace.json",
+            streaming=False,
+            include_prefixes = ("src/dnet/"),
+            include_c_calls = False,
+            budget = 10000,
+            enabled = True,
+            record_pid_tid = True,
+            aggregate=False,
+            aggregate_url=None, 
+        )
+        self.tracer = Tracer(cfg) 
+        self.tracer.start()
+
         logger.info(
             "API node initialized on HTTP port %s, gRPC port %s",
             self.http_port,
             self.grpc_port,
         )
+
 
     async def start(self, shutdown_trigger: Any = lambda: asyncio.Future()) -> None:
         """Start the API node.
@@ -156,6 +180,24 @@ class RingApiNode:
             shutdown_trigger: Shutdown trigger function
         """
         self.running = True
+        # Reduce third‑party library noise in this process (keeps REPL TTY clean)
+        try:
+            import logging as _logging
+            for name in (
+                "grpc",
+                "grpc._cython",
+                "asyncio",
+                "hpack",
+                "h2",
+                "hypercorn",
+                "hypercorn.error",
+                "hypercorn.access",
+            ):
+                lg = _logging.getLogger(name)
+                lg.setLevel(_logging.CRITICAL)
+                lg.propagate = False
+        except Exception:
+            pass
 
         await self._start_grpc_server()
         await self._start_discovery()
@@ -204,7 +246,7 @@ class RingApiNode:
 
         config = Config.from_mapping(
             bind=f"0.0.0.0:{self.http_port}",
-            log_level="info",
+            log_level="error",  # keep HTTP server quiet on console
             log_config=None,
             use_reloader=False,
             h2c=True,
@@ -370,6 +412,72 @@ class RingApiNode:
                     self._stream_completion(req), media_type="text/event-stream"
                 )
             return await self._handle_text_completion(req)
+
+        # Ingest trace buffers and forward to REPL
+        @self.app.post("/trace/ingest")
+        async def trace_ingest(batch: TraceIngestBatch) -> TraceIngestResponse:  # type: ignore
+            try:
+                if self._trace_ingest_cb is not None:
+                    logger.debug("Forwarding trace batch to REPL.")
+                    self._trace_ingest_cb(batch.model_dump())
+
+                    _t_batch = { "run_id": "NONE", "node_id": "API", "events": list(self.tracer._events) }
+                    self._trace_ingest_cb(_t_batch) # FIXME: Move this 
+                    self.tracer._events.clear()
+
+                    return TraceIngestResponse(ok=True, accepted=len(batch.events))
+
+                try:
+                    run_dir = Path("logs/trace/ingest") / batch.run_id
+                    logger.debug(f"callback not available. Dumping trace buffer to file {run_dir}")
+                    run_dir.mkdir(parents=True, exist_ok=True)
+                    fpath = run_dir / f"{batch.node_id}.jsonl"
+                    with fpath.open("a", encoding="utf-8") as f:
+                        f.write(batch.model_dump_json() + "\n")
+                except Exception:
+                    logger.warning(f"Unable to write trace ingest buffer to temp file {fpath}")
+                return TraceIngestResponse(
+                  ok=True, 
+                  accepted=len(batch.events), 
+                  message="no aggregator; appended"
+                )
+            except Exception as e:
+                logger.warning(f"Unable to ingest trace buffer: {e}")
+                return TraceIngestResponse(ok=False, accepted=0, message=str(e))
+
+    async def _forward_trace_config(self, cfg: Any) -> bool:
+        logger.debug("Forwarding Trace config")
+        shards = self._get_shards_from_discovery()
+        this = self.discovery.get_own_properties()
+        api_endpoint = f"http://{this.local_ip}:{this.server_port}/trace/ingest"
+        payload = TraceConfigRequest(
+            file=cfg.file,
+            streaming=cfg.streaming,
+            include_prefixes=cfg.include_prefixes,
+            include_c_calls=cfg.include_c_calls,
+            budget=cfg.budget,
+            enabled=cfg.enabled,
+            node_id=None,
+            record_pid_tid=cfg.record_pid_tid,
+            aggregate=cfg.aggregate,
+            aggregate_url=api_endpoint,
+            agg_max_events=cfg.agg_max_events
+        )
+
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            for name, props in shards.items():
+                url = f"http://{props.local_ip}:{props.server_port}/trace"
+                logger.debug(f"Forwarding trace config to {url}")
+                payload.node_id = name
+                try:
+                    res = await client.post(url, json=dict(payload))
+                    if res.status_code != 200:
+                        logger.error(f"Failed to POST tracer config to {url}.: {res.text}")
+                except Exception as e:
+                    logger.error(f"Failed to POST tracer config: {e}")
+                    return False 
+        return True
+
 
     async def _handle_prepare_topology(
         self, req: PrepareTopologyRequest
@@ -1342,6 +1450,16 @@ class RingApiNode:
         t_start = time.perf_counter()
         t_first_token = None
         nonce = f"chatcmpl-{uuid.uuid4()}"
+
+        self.tracer.mark("request.start", {
+          "tokenizer": "",
+          "model": req.model,
+          "temperature": req.temperature,
+          "prompt_tokens": prompt.size,
+          "req_id": nonce,
+          "t0": time.perf_counter(),
+        })
+
         detokenizer = self.tokenizer.detokenizer  # type: ignore
         detokenizer.reset()
         tokens: List[int] = []
@@ -1360,6 +1478,8 @@ class RingApiNode:
             ),  # type: ignore
             arange(req.max_tokens or 0),
         ):
+            self.tracer.mark("request.round", {"req_id": nonce,"t0": time.time_ns()})
+
             if profile_enabled and t_first_token is None:
                 t_first_token = time.perf_counter()
             detokenizer.add_token(token)
@@ -1397,6 +1517,12 @@ class RingApiNode:
             if stop_sequence_suffix is None
             else detokenizer.text[: -len(stop_sequence_suffix)]
         )
+
+        self.tracer.mark("request.end", { 
+          "generated_tokens": len(tokens), 
+          "req_id": nonce,
+          "t0": time.perf_counter(),
+        })
 
         # Build optional metrics
         metrics = None
@@ -1741,3 +1867,8 @@ class RingApiNode:
             logger.warning("Discovery service was not running")
 
         logger.info("API server shutdown complete")
+
+    # REPL helper to install a trace ingestion callback
+    def set_trace_ingest_callback(self, cb: Optional[Callable[[Dict[str, Any]], None]]) -> None:
+        logger.debug(f"Registered tracer ingest callback.")
+        self._trace_ingest_cb = cb

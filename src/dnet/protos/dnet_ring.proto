@@ -34,6 +34,9 @@ message ActivationRequest {
     int64 timestamp = 3;
     string node_origin = 4;
     string callback_url = 5;
+    float rx_enq_t = 6;
+    float tx_enq_prev_t = 7;
+    float rx_inflight_t = 8;
 }
 
 // Response message for activation sending

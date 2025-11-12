@@ -14,7 +14,7 @@ def get_logger() -> logging.Logger:
     Returns:
         Configured logger instance
     """
-    logLevelEnv = os.getenv("DNET_LOG", "INFO").strip().upper()
+    logLevelEnv = os.getenv("DNET_LOG", "DEBUG").strip().upper()
     logLevel = logging.INFO  # default
     if logLevelEnv in logging._nameToLevel:
         logLevel = logging._nameToLevel[logLevelEnv]

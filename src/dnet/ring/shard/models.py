@@ -1,6 +1,6 @@
 """Shard models for dnet ring topology endpoints."""
 
-from typing import Any, Dict, List, Optional, Literal
+from typing import Any, Dict, List, Optional, Literal, Tuple
 from pydantic import BaseModel, Field
 from dnet_p2p import DnetDeviceProperties, ThunderboltConnection
 
@@ -53,6 +53,7 @@ class ShardUnloadModelResponse(BaseModel):
 class ShardProfileRequest(BaseModel):
     """Request to profile device and measure latencies."""
 
+    #api_address: Optional[str] = Field( ..., description="API Address" ) 
     devices: Dict[str, DnetDeviceProperties] = Field(
         ..., description="Device information mapping"
     )
@@ -109,3 +110,45 @@ class HealthResponse(BaseModel):
     grpc_port: int = Field(..., description="gRPC server port")
     http_port: int = Field(..., description="HTTP server port")
     instance: Optional[str] = Field(default=None, description="Shard name")
+
+
+# Tracer 
+
+class TraceConfigRequest(BaseModel):
+    file: str = Field(..., description="File for trace streaming")
+    streaming: bool = Field(..., description="Toggle for trace streaming to file")
+    include_prefixes: List[str] = Field(default=("src/dnet/"), description="")
+    include_c_calls: bool = Field(default=False, description="")
+    budget: int = Field(default=0, description="Max amount of traces in memory")
+    enabled: bool = Field(default=False, description="Start or stop tracing")
+    node_id: Optional[str] = Field(default="NONE", description="")
+    record_pid_tid: bool = Field(default=True, descriptino="") 
+    aggregate: bool = Field(default=True, description="")
+    aggregate_url: Optional[str] = Field(default=None, description="")
+    agg_max_events: int = Field(default=300, description="Threshold for sending frames to API")
+
+class TraceConfigResponse(BaseModel):
+    ok: bool = True
+    
+class TraceEvent(BaseModel):
+    type: str = Field(..., description="Event type/phase")
+    name: str = Field(..., description="Span/mark name")
+    ts: float = Field(..., description="Timestamp in microseconds")
+    args: Dict[str, Any] = Field(default_factory=dict)
+    req_id: Optional[str] = None
+    pid: Optional[int] = None
+    tid: Optional[int] = None
+
+class TraceIngestBatch(BaseModel):
+    run_id: str = Field(..., description="Bench run identifier")
+    node_id: str = Field(..., description="Shard/service identity")
+    events: List[TraceEvent] = Field(default_factory=list)
+    #dropped: Optional[int] = Field(default=0, description="Events dropped on sender")
+    #max_ts: Optional[int] = Field(default=None, description="Max ts_us in this batch")
+    #last: Optional[bool] = Field(default=False, description="Sender indicates end-of-run")
+    #schema_version: int = Field(default=1)
+
+class TraceIngestResponse(BaseModel):
+    ok: bool = True
+    accepted: int = 0
+    message: Optional[str] = None

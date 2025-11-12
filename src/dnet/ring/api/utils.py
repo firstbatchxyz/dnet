@@ -16,7 +16,8 @@ from dnet.ring.common import LayerAssignment
 
 
 from .models import ChatParams
-
+from .api_logging import get_api_logger
+logger = get_api_logger()
 
 def create_generate_step_for_ring_with_grpc(
     stub: DnetRingServiceStub,

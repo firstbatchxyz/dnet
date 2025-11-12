@@ -34,6 +34,8 @@ from .models import (
     ShardProfileRequest,
     ShardProfileResponse,
     ShardUnloadModelResponse,
+    TraceConfigRequest,
+    TraceConfigResponse,
 )
 
 from ..model.base import BaseRingModel
@@ -63,6 +65,8 @@ from .compute import ComputeMixin
 from .prefetch import PrefetchMixin
 from .comms import CommsMixin
 from ..weight_cache import WeightCache
+
+from dnet.perf import TraceConfig, Tracer
 
 
 class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
@@ -105,7 +109,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         self._assigned_sorted = sorted(self.assigned_layers or [])
         self._assigned_set = set(self._assigned_sorted)
 
-        # Topology (configured later)
+        # Topology 
         self.next_node: Optional[DnetDeviceProperties] = None
         self.total_layers: int = 0  # Total layers in model
         self.api_callback_address: Optional[str] = None
@@ -190,6 +194,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
 
         # Discovery
         self.discovery = AsyncDnetP2P("lib/dnet-p2p/lib")
+        self._instance_name = ""
 
         # Background tasks
         self.background_tasks: List[asyncio.Task] = []
@@ -199,8 +204,21 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         self._sync_per_layer = obs.sync_per_layer
         self._sync_every_n = obs.sync_every_n
         self._prof = make_profiler(self._profile)
-        if self._profile:
-            logger.info("[PROFILE] enabled on shard node %s", self.node_id)
+
+        # Debug tracing
+        cfg = TraceConfig(
+            file="./trace.json",
+            streaming=False,
+            include_prefixes = ("src/dnet/"),
+            include_c_calls = False,
+            budget = 10000,
+            enabled = True,
+            record_pid_tid = True,
+            aggregate=False,
+            aggregate_url=None, 
+        )
+        self.tracer = Tracer(cfg) 
+        self.tracer.start()
 
         # Per-nonce KV caches (concurrent requests)
         self._kv_by_nonce: Dict[str, list] = {}
@@ -220,11 +238,8 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         )
 
     async def load_model(self, req: ShardLoadModelRequest) -> ShardLoadModelResponse:
-        """Load model with specified layers."""
-        try:
-            start_time = time.perf_counter()
-
-            # Check if already loaded with same configuration
+        """Load model with specified layers"""
+        try: # Check if already loaded with same configuration
             if (
                 self.model is not None
                 and self.model_path == req.model_path
@@ -242,22 +257,24 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 )
 
             # If model loaded with different config, unload first
-            if self.model is not None and (
-                self.model_path != req.model_path or self.assigned_layers != req.layers
+            if (self.model is not None 
+                and (self.model_path != req.model_path or self.assigned_layers != req.layers)
             ):
-                logger.info(
-                    "Node %s: Unloading current model to load new configuration",
-                    self.node_id,
-                )
-                await self.unload_model()
+                logger.info("Node %s: Unloading current model to load new configuration", self.node_id)
+                with self.tracer.frame("memory.model", "unload") as f:
+                    f.set("node", self._instance_name)
+                    await self.unload_model()
 
             # Load model metadata
-            self.model_metadata = get_model_metadata(req.model_path)
+            with self.tracer.frame("memory.model", "load_metadata"):
+                self.model_metadata = get_model_metadata(req.model_path)
+
             self.assigned_layers = req.layers
             self._assigned_sorted = sorted(self.assigned_layers)
             self._assigned_set = set(self._assigned_sorted)
 
             self.model_path = req.model_path
+
             # Decide mode dynamically from assignment + requested window
             requested_w = int(max(1, int(req.window_size)))
             local_count = max(1, len(self.assigned_layers))
@@ -353,45 +370,53 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             )
 
             # Initialize weight cache
-            self.weight_cache = WeightCache(
-                self.assigned_layers,
-                self.model_metadata,
-                window_size=self.window_size,
-                prefetch_threads=self._prefetch_threads,
-                resident_windows=self._resident_windows,
-                use_mxload_fastpath=self.config.mxload_fastpath,
-                prefetch_mode=self.config.prefetch_mode,
-            )
+            with self.tracer.frame("memory.weights", "cache.init") as f:
+                f.set("node", self._instance_name)
+                self.weight_cache = WeightCache(
+                    self.assigned_layers,
+                    self.model_metadata,
+                    window_size=self.window_size,
+                    prefetch_threads=self._prefetch_threads,
+                    resident_windows=self._resident_windows,
+                    use_mxload_fastpath=self.config.mxload_fastpath,
+                    prefetch_mode=self.config.prefetch_mode,
+                    tracer=self.tracer,
+                )
 
             # Load the model
-            self.model = get_ring_model(
-                self.model_metadata.model_type,
-                self.model_metadata.model_config,
-                assigned_layers=self.assigned_layers,
-                is_api_layer=False,
-            )
-            try:
-                applied = bool(
-                    self.model.apply_quantization_from_config(  # type: ignore[attr-defined]
-                        self.model_metadata.model_config,
-                        model_metadata=self.model_metadata,
-                    )
-                )
-                logger.info(
-                    "[QUANT] applied=%s for model=%s",
-                    applied,
+            with self.tracer.frame("memory.model", "load") as f:
+                f.set("node", self._instance_name)
+                self.model = get_ring_model(
                     self.model_metadata.model_type,
+                    self.model_metadata.model_config,
+                    assigned_layers=self.assigned_layers,
+                    is_api_layer=False,
                 )
+                try:
+                    applied = bool(
+                        self.model.apply_quantization_from_config(  # type: ignore[attr-defined]
+                            self.model_metadata.model_config,
+                            model_metadata=self.model_metadata,
+                        )
+                    )
+                    logger.info(
+                        "[QUANT] applied=%s for model=%s",
+                        applied,
+                        self.model_metadata.model_type,
+                    )
 
-            except RuntimeError as e:
-                logger.warning("[QUANT] apply failed: %s", e)
-            self.model.eval()
-            self.cache = make_cache(
-                self.model,
-                kv_mode=self.config.kv_cache.mode,
-                kv_bits=self.config.kv_cache.bits,
-                kv_group=self.config.kv_cache.group_size,
-            )
+                except RuntimeError as e:
+                    logger.warning("[QUANT] apply failed: %s", e)
+                self.model.eval()
+
+            with self.tracer.frame("memory.cache", "make_cache") as f:
+                f.set("node", self._instance_name)
+                self.cache = make_cache(
+                    self.model,
+                    kv_mode=self.config.kv_cache.mode,
+                    kv_bits=self.config.kv_cache.bits,
+                    kv_group=self.config.kv_cache.group_size,
+                )
 
             try:
                 has_start = 0 in self.assigned_layers
@@ -425,28 +450,31 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             self.total_layers = req.total_layers
             self.api_callback_address = req.api_callback_address
 
-            if self.next_node:
-                await self._connect_next_node()
-            else:
-                logger.warning("Node %s: No next node configured", self.node_id)
+            with self.tracer.frame("network.connect", "next_node") as f:
+                f.set("node", self._instance_name)
+                if self.next_node:
+                    await self._connect_next_node()
+                else:
+                    logger.warning("Node %s: No next node configured", self.node_id)
 
             # Warmup: compile hot path and stabilize allocators before first request
-            if req.warmup and self._mode == "fit":
-                loop = asyncio.get_running_loop()
-                try:
-                    await loop.run_in_executor(self.executor, self._warmup_shard)
-                except Exception:
-                    # Fall back to direct call if executor is unavailable
-                    self._warmup_shard()
-            elif req.warmup and self._mode != "fit":
-                # Offload/sliding-fit: perform a small, offload-safe warmup for the first window
-                loop = asyncio.get_running_loop()
-                try:
-                    await loop.run_in_executor(
-                        self.executor, self._warmup_shard_offload
-                    )
-                except Exception:
-                    self._warmup_shard_offload()
+            with self.tracer.frame("memory", "warmup"):
+                if req.warmup and self._mode == "fit":
+                    loop = asyncio.get_running_loop()
+                    try:
+                        await loop.run_in_executor(self.executor, self._warmup_shard)
+                    except Exception:
+                        # Fall back to direct call if executor is unavailable
+                        self._warmup_shard()
+                elif req.warmup and self._mode != "fit":
+                    # Offload/sliding-fit: perform a small, offload-safe warmup for the first window
+                    loop = asyncio.get_running_loop()
+                    try:
+                        await loop.run_in_executor(
+                            self.executor, self._warmup_shard_offload
+                        )
+                    except Exception:
+                        self._warmup_shard_offload()
 
             if self._mode == "offload" and not (
                 self._warmup_completed and self._warmup_keep_flag
@@ -467,10 +495,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 if m % self.window_size != 0:
                     logger.warning(
                         "Window size %s does not divide local layer count %s. Rounds per token will vary; consider setting k*w = %s.",
-                        self.window_size,
-                        m,
-                        m,
-                    )
+                        self.window_size, m, m)
                 else:
                     k = m // self.window_size
                     logger.info(
@@ -480,20 +505,12 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                         k,
                     )
 
-            load_time_ms = (time.perf_counter() - start_time) * 1000.0
-            logger.info(
-                "Node %s: Successfully loaded model %s with layers %s in %.2fms",
-                self.node_id,
-                req.model_path,
-                req.layers,
-                load_time_ms,
-            )
 
             return ShardLoadModelResponse(
                 success=True,
                 message="Model loaded successfully",
                 layers_loaded=req.layers,
-                load_time_ms=load_time_ms,
+                load_time_ms=0.0,
             )
 
         except Exception as e:
@@ -539,23 +556,24 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             self._assigned_set = set()
 
             # Clear memory pools
-            if self.weight_cache:
-                # Stop any in-flight prefetch and close layer manager resources
-                try:
-                    self.weight_cache.cancel_all_prefetch()
-                except Exception:
-                    pass
-                # Clear all cached weights
-                for layer_id in list(self._bound_versions.keys()):
+            with self.tracer.frame("memory", "cache.evict"):
+                if self.weight_cache:
+                    # Stop any in-flight prefetch and close layer manager resources
                     try:
-                        self.weight_cache.evict_layer(layer_id)
+                        self.weight_cache.cancel_all_prefetch()
                     except Exception:
                         pass
-                try:
-                    self.weight_cache.layer_manager.close()
-                except Exception:
-                    pass
-                self.weight_cache = None
+                    # Clear all cached weights
+                    for layer_id in list(self._bound_versions.keys()):
+                        try:
+                            self.weight_cache.evict_layer(layer_id)
+                        except Exception:
+                            pass
+                    try:
+                        self.weight_cache.layer_manager.close()
+                    except Exception:
+                        pass
+                    self.weight_cache = None
 
             self.input_pool = None
             self.output_pool = None
@@ -583,334 +601,332 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
     async def reset_cache(self) -> None:
         """Reset LLM KV cache."""
         if not self.model:
-            logger.warning(
-                "Node %s: Cannot reset cache - no model loaded", self.node_id
-            )
+            logger.warning("Node %s: Cannot reset cache - no model loaded", self.node_id)
             return
 
-        try:
-            self.cache = make_cache(
-                self.model,  # type: ignore[arg-type]
-                kv_mode=self.config.kv_cache.mode,
-                kv_bits=self.config.kv_cache.bits,
-                kv_group=self.config.kv_cache.group_size,
-            )
-            logger.info("Node %s: Cache reset successfully", self.node_id)
-        except Exception as e:
-            logger.error("Node %s: Error resetting cache: %s", self.node_id, e)
+        with self.tracer.frame("memory", "cache.reset"):
+            try:
+                self.cache = make_cache(
+                    self.model,  # type: ignore[arg-type]
+                    kv_mode=self.config.kv_cache.mode,
+                    kv_bits=self.config.kv_cache.bits,
+                    kv_group=self.config.kv_cache.group_size,
+                )
+                logger.info("Node %s: Cache reset successfully", self.node_id)
+            except Exception as e:
+                logger.error("Node %s: Error resetting cache: %s", self.node_id, e)
 
+
+    # FIXME This seems to still be dead code
     async def receive_activation(self, request: dnet_ring_pb2.ActivationRequest):
         """Receive activation from previous node and queue for local compute or forward."""
+        logger.debug("RECEIVE ACTIVATION")
         if self.input_pool is None:
-            logger.error(
-                "Node %s: Cannot receive activation - input pool not initialized",
-                self.node_id,
-            )
+            logger.error("Node %s: Cannot receive activation - input pool not initialized", self.node_id)
             return
 
-        t_recv = time.perf_counter()
-        await self._connect_next_node()
+        with self.tracer.frame("network.rx", "connect_next_node") as f:
+            f.set("req_id", request.nonce) 
+            f.set("node", self._instance_name)
+            await self._connect_next_node()
 
-        try:
-            activation = request.activation
-            target_layer = activation.layer_id + 1
-
+        with self.tracer.frame("network.rx", "process_activation") as f:
+            f.set("req_id", request.nonce) 
             try:
-                payload_bytes = len(activation.data)
-            except Exception:
-                payload_bytes = -1
-            transport_ms = float(utc_epoch_now() - request.timestamp)
-            logger.info(
-                "[PROFILE][RX] node=%s nonce=%s target_layer=%s transport_ms=%.1f payload_kb=%.1f",
-                self.node_id,
-                request.nonce,
-                target_layer,
-                transport_ms,
-                (payload_bytes / 1024.0),
-            )
-
-            # Detect new sequence per node: initialize per-nonce KV
-            if request.nonce != self._active_nonce:
-                self._active_nonce = request.nonce
-                try:
-                    self._get_or_make_kv(request.nonce)
-                except Exception:
-                    pass
-
-            if target_layer in self._assigned_set:
-                # Allocate input pool and copy payload (with optional decompression)
-                t_alloc = time.perf_counter()
-                if "|" in activation.dtype:
+                activation = request.activation
+                target_layer = activation.layer_id + 1
+                  
+                # Detect new sequence per node: initialize per-nonce KV
+                if request.nonce != self._active_nonce:
+                    self._active_nonce = request.nonce
                     try:
-                        deq = decompress_tensor_from_protobuf_data(
-                            tensor_data=activation.data,
-                            shape=list(activation.shape),
-                            dtype_with_metadata=activation.dtype,
-                        )
-                    except Exception as e:
-                        logger.error(
-                            "Decompression failed for nonce %s: %s", request.nonce, e
-                        )
-                        return
+                        payload_bytes = len(activation.data)
+                    except Exception:
+                        payload_bytes = -1
+                    f.event("process_payload")
 
-                    pool_id = self.input_pool.allocate_for_layer(
-                        layer_id=activation.layer_id,
-                        dtype=deq.dtype,
-                        shape=cast(tuple[int, ...], tuple(deq.shape)),
-                    )
-                    if pool_id is None:
-                        logger.warning(
-                            "Failed to allocate input pool buffer for nonce %s",
-                            request.nonce,
-                        )
-                        return
-                    buffer = self.input_pool.get_buffer(pool_id)
-                    if buffer is not None:
-                        flat = deq.reshape(-1)
-                        buffer[: flat.size] = flat
-                        alloc_copy_ms = (time.perf_counter() - t_alloc) * 1000.0
-                        logger.info(
-                            "[PROFILE][RX] node=%s nonce=%s alloc_copy_ms=%.3f (decompressed)",
-                            self.node_id,
-                            request.nonce,
-                            alloc_copy_ms,
-                        )
-                    # Update activation message with true dtype/shape
-                    new_dtype_str = str(deq.dtype)
-                    activation_msg = ActivationMessage.from_proto(request, pool_id)
-                    activation_msg.dtype = new_dtype_str
-                    activation_msg.shape = tuple(deq.shape)
-                else:
-                    # Special token stream support: dtype='tokens' carries int32 token IDs
-                    if activation.dtype == "tokens":
-                        try:
-                            tokens = np.frombuffer(
-                                request.activation.data, dtype=np.int32
+                if target_layer in self._assigned_set:
+                    # Allocate input pool and copy payload (with optional decompression)
+                    t_alloc = time.perf_counter()
+                    if "|" in activation.dtype:
+                        with self.tracer.frame("grpc.receive", "decompress") as fr:
+                            fr.set("req_id", request.nonce) 
+                            fr.set("node", self._instance_name)
+                            try:
+                                deq = decompress_tensor_from_protobuf_data(
+                                    tensor_data=activation.data,
+                                    shape=list(activation.shape),
+                                    dtype_with_metadata=activation.dtype,
+                                )
+                            except Exception as e:
+                                logger.error(
+                                    "Decompression failed for nonce %s: %s", request.nonce, e
+                                )
+                                return
+
+                        with self.tracer.frame("grpc.receive", "alloc.buffer") as fr:
+                            pool_id = self.input_pool.allocate_for_layer(
+                                layer_id=activation.layer_id,
+                                dtype=deq.dtype,
+                                shape=cast(tuple[int, ...], tuple(deq.shape)),
                             )
-                            shp = (int(len(tokens)),)
-                        except Exception as e:
-                            logger.error(
-                                "Failed to parse tokens for nonce %s: %s",
-                                request.nonce,
-                                e,
-                            )
-                            return
-                        pool_id = self.input_pool.allocate_for_layer(
-                            layer_id=activation.layer_id,
-                            dtype=mx.int32,
-                            shape=cast(tuple[int, ...], shp),
-                        )
-                        if pool_id is None:
-                            logger.warning(
-                                "Failed to allocate input pool buffer for nonce %s",
-                                request.nonce,
-                            )
-                            return
-                        buffer = self.input_pool.get_buffer(pool_id)
-                        if buffer is not None:
-                            buffer[: len(tokens)] = tokens
-                            if self._profile:
+                            if pool_id is None:
+                                logger.warning(
+                                    "Failed to allocate input pool buffer for nonce %s",
+                                    request.nonce,
+                                )
+                                return
+                            buffer = self.input_pool.get_buffer(pool_id)
+                            if buffer is not None:
+                                flat = deq.reshape(-1)
+                                buffer[: flat.size] = flat
                                 alloc_copy_ms = (time.perf_counter() - t_alloc) * 1000.0
                                 logger.info(
-                                    "[PROFILE][RX] node=%s nonce=%s alloc_copy_ms=%.3f (tokens)",
+                                    "[PROFILE][RX] node=%s nonce=%s alloc_copy_ms=%.3f (decompressed)",
                                     self.node_id,
                                     request.nonce,
                                     alloc_copy_ms,
                                 )
+
+                        # Update activation message with true dtype/shape
+                        new_dtype_str = str(deq.dtype)
                         activation_msg = ActivationMessage.from_proto(request, pool_id)
-                        # Ensure dtype reflects token payload for compute path
-                        activation_msg.dtype = "tokens"
-                        activation_msg.shape = shp
+                        activation_msg.dtype = new_dtype_str
+                        activation_msg.shape = tuple(deq.shape)
                     else:
-                        # Safety: byte length must match shape*dtype
-                        try:
-                            expected = (
-                                int(np.prod(activation.shape))
-                                * np.dtype(dtype_map[activation.dtype]).itemsize
-                            )
-                            actual = len(request.activation.data)
-                        except Exception:
-                            expected = -1
-                            actual = -1
-                        if expected != actual:
-                            logger.error(
-                                "Payload size mismatch for nonce=%s: expected=%d actual=%d dtype=%s shape=%s",
-                                request.nonce,
-                                expected,
-                                actual,
-                                activation.dtype,
-                                activation.shape,
-                            )
-                            return
+                        # Special token stream support: dtype='tokens' carries int32 token IDs
+                        if activation.dtype == "tokens":
+                            with self.tracer.frame("grpc.receive", "token_stream") as fr: 
+                                try:
+                                    deq = decompress_tensor_from_protobuf_data(
+                                        tensor_data=activation.data,
+                                        shape=list(activation.shape),
+                                        dtype_with_metadata=activation.dtype)
+                                except Exception as e:
+                                    logger.error("Decompression failed for nonce %s: %s", request.nonce, e)
+                                    return
 
-                        pool_id = self.input_pool.allocate_for_layer(
-                            layer_id=activation.layer_id,
-                            dtype=mlx_dtype_map[activation.dtype],
-                            shape=cast(tuple[int, ...], activation.shape),
-                        )
-                        if pool_id is None:
-                            logger.warning(
-                                "Failed to allocate input pool buffer for nonce %s",
-                                request.nonce,
-                            )
-                            return
-                        buffer = self.input_pool.get_buffer(pool_id)
-                        if buffer is not None:
-                            data = request.activation.data
-                            input_data = np.frombuffer(
-                                data, dtype=dtype_map[activation.dtype]
-                            )
-                            buffer[: len(input_data)] = input_data
-                            alloc_copy_ms = (time.perf_counter() - t_alloc) * 1000.0
-                            logger.info(
-                                "[PROFILE][RX] node=%s nonce=%s alloc_copy_ms=%.3f",
-                                self.node_id,
-                                request.nonce,
-                                alloc_copy_ms,
-                            )
-                        activation_msg = ActivationMessage.from_proto(request, pool_id)
+                            with self.tracer.frame("network.rx", "alloc.buffer") as fr:
+                                fr.set("req_id", request.nonce) 
+                                fr.set("node", self._instance_name)
+                                pool_id = self.input_pool.allocate_for_layer(
+                                    layer_id=activation.layer_id,
+                                    dtype=deq.dtype,
+                                    shape=cast(tuple[int, ...], tuple(deq.shape)))
 
-                if self._profile:
-                    activation_msg.recv_perf_t = t_recv
+                                if pool_id is None:
+                                    logger.warning("Failed to allocate input pool buffer for nonce %s", request.nonce)
+                                    return
 
-                # Queue for processing — non-blocking back-off loop (cancellable)
-                if self._profile:
-                    activation_msg.enq_perf_t = time.perf_counter()
-                while self.running:
-                    try:
-                        self.activation_recv_queue.put_nowait(activation_msg)
-                        logger.debug(
-                            "Queued activation for processing: nonce %s",
-                            activation_msg.nonce,
-                        )
-                        break
-                    except Full:
-                        await asyncio.sleep(0)
-                else:
-                    logger.error(
-                        "Failed to queue activation %s (node stopping)",
-                        activation_msg.nonce,
-                    )
-                    self.input_pool.release(pool_id)
-            else:
-                # Forward to next node (not our layer)
-                logger.debug(
-                    "Forwarding activation (layer %s) to next node, nonce: %s",
-                    target_layer,
-                    request.nonce,
-                )
-                await self._forward_activation(request)
+                                buffer = self.input_pool.get_buffer(pool_id)
+                                if buffer is not None:
+                                    flat = deq.reshape(-1)
+                                    buffer[: flat.size] = flat
 
-        except Exception as e:
-            logger.exception("Error receiving activation: %s", e)
+                            # Update activation message with true dtype/shape
+                            new_dtype_str = str(deq.dtype)
+                            activation_msg = ActivationMessage.from_proto(request, pool_id)
+                            activation_msg.dtype = new_dtype_str
+                            activation_msg.shape = tuple(deq.shape)
+
+                        else: # Special token stream support: dtype='tokens' carries int32 token IDs
+                            if activation.dtype == "tokens":
+                                with self.tracer.frame("network.rx", "token_stream") as fr: 
+                                    fr.set("req_id", request.nonce) 
+                                    fr.set("node", self._instance_name)
+                                    try:
+                                        tokens = np.frombuffer(request.activation.data, dtype=np.int32)
+                                        shp = (int(len(tokens)), )
+                                    except Exception as e:
+                                        logger.error("Failed to parse tokens for nonce %s: %s", request.nonce, e,)
+                                        return
+
+                                    pool_id = self.input_pool.allocate_for_layer(
+                                        layer_id=activation.layer_id,
+                                        dtype=mx.int32,
+                                        shape=cast(tuple[int, ...], shp))
+
+                                    if pool_id is None:
+                                        logger.warning("Failed to allocate input pool buffer for nonce %s", request.nonce)
+                                        return
+
+                                    buffer = self.input_pool.get_buffer(pool_id)
+                                    if buffer is not None:
+                                        buffer[: len(tokens)] = tokens
+                                    activation_msg = ActivationMessage.from_proto(request, pool_id)
+
+                                    # Ensure dtype reflects token payload for compute path
+                                    activation_msg.dtype = "tokens"
+                                    activation_msg.shape = shp
+
+                            else:
+                                with self.tracer.frame("network.ex", "default") as fr:
+                                    fr.set("node", self._instance_name)
+                                    fr.set("req_id", request.nonce) 
+                                    # Safety: byte length must match shape*dtype
+                                    try:
+                                        expected = (
+                                            int(np.prod(activation.shape))
+                                            * np.dtype(dtype_map[activation.dtype]).itemsize
+                                        )
+                                        actual = len(request.activation.data)
+                                    except Exception:
+                                        pass
+
+                                    pool_id = self.input_pool.allocate_for_layer(
+                                        layer_id=activation.layer_id,
+                                        dtype=mlx_dtype_map[activation.dtype],
+                                        shape=cast(tuple[int, ...], activation.shape))
+
+                                    if pool_id is None:
+                                        logger.warning("Failed to allocate input pool buffer for nonce %s", request.nonce)
+                                        return
+
+                                    buffer = self.input_pool.get_buffer(pool_id)
+                                    if buffer is not None:
+                                        data = request.activation.data
+                                        input_data = np.frombuffer(data, dtype=dtype_map[activation.dtype])
+                                        buffer[: len(input_data)] = input_data
+
+                                    activation_msg = ActivationMessage.from_proto(request, pool_id)
+                                    activation_msg.dtype = new_dtype_str
+                                    activation_msg.shape = tuple(deq.shape)
+
+                        # Queue for processing — non-blocking back-off loop (cancellable)
+                        while self.running:
+                            try:
+                                logger.error(f"NETWORK RX: {activation_msg.callback_url}")
+                                self.activation_recv_queue.put_nowait(activation_msg)
+                                activatino_msg.ex_enq_t = time.perf_counter()
+                                logger.debug("Queued activation for processing: nonce %s", activation_msg.nonce)
+                                break
+                            except Full:
+                                await asyncio.sleep(0)
+                        else:
+                            logger.error("Failed to queue activation %s (node stopping)", activation_msg.nonce)
+                            self.input_pool.release(pool_id)
+
+                else: # Forward to next node (not our layer)
+                    logger.debug("Forwarding activation (layer %s) to next node, nonce: %s", target_layer, request.nonce)
+                    await self._forward_activation(request)
+
+            except Exception as e:
+                logger.exception("Error receiving activation: %s", e)
+
 
     async def admit_frame(self, request: dnet_ring_pb2.ActivationRequest) -> None:
-        """
-        Lightweight admission for streaming:
-        enqueue protobuf frame to ingress queue, then return.
-        """
+        """enqueue protobuf frame to ingress queue"""
         while self.running:
             try:
+                rx_t = time.perf_counter()
+                request.rx_enq_t = rx_t
+                request.rx_inflight_t = 0.0 if request.tx_enq_prev_t == 0.0 else rx_t - request.tx_enq_prev_t
+
+                logger.error(f"ADMIT_FRAME: {request.callback_url}")
                 self.ingress_q.put_nowait(request)
+                logger.debug(f"[ENQUE] Enqueued activation request")
                 return
             except asyncio.QueueFull:
                 await asyncio.sleep(0)
-        # If we reached here, node is stopping; drop admission silently
         return
+
 
     async def _ingress_worker(self):
         """Drains ingress queue and processes frames with heavy work offloaded.
 
         Admission (servicer) is lightweight; this worker performs per-frame
         processing, offloading alloc/copy/decompress to the threadpool, and
-        finally enqueues for compute or forwards to the next shard.
-        """
-        while self.running:
-            try:
-                req = await self.ingress_q.get()
-            except asyncio.CancelledError:
-                break
-            try:
-                t_recv = time.perf_counter()
-                await self._connect_next_node()
+        finally enqueues for compute or forwards to the next shard.  """
 
-                activation = req.activation
-                target_layer = activation.layer_id + 1
+        while self.running:
+            with self.tracer.frame("network.rx", "wait"): # NOTE: bad counter 
+                try:
+                    req = await self.ingress_q.get()
+                    logger.debug(f"[DEQUE]Dequeued activation for processing")
+                except asyncio.CancelledError:
+                    logger.error("Error while waiting ingress worker.")
+                    break
+
+            # Trace processing of request, in-flight and in-wait times
+            with self.tracer.frame("network", "rx") as f:
+                f.set("inwait", time.perf_counter() - req.rx_enq_t)
+                f.set("inflight", req.rx_inflight_t)
+                f.set("node", self._instance_name)
+                f.set("req_id", req.nonce)
 
                 try:
-                    payload_bytes = len(activation.data)
-                except Exception:
-                    payload_bytes = -1
-                transport_ms = float(utc_epoch_now() - req.timestamp)
-                logger.info(
-                    "[PROFILE][RX] node=%s nonce=%s target_layer=%s transport_ms=%.1f payload_kb=%.1f",
-                    self.node_id,
-                    req.nonce,
-                    target_layer,
-                    transport_ms,
-                    (payload_bytes / 1024.0),
-                )
+                    activation = req.activation
+                    target_layer = activation.layer_id + 1
 
-                # Detect new sequence per node: initialize per-nonce KV
-                if req.nonce != self._active_nonce:
-                    self._active_nonce = req.nonce
                     try:
-                        self._get_or_make_kv(req.nonce)
+                        payload_bytes = len(activation.data)
                     except Exception:
-                        pass
+                        payload_bytes = -1
 
-                if target_layer in self._assigned_set:
-                    # Heavy prep in executor (alloc/copy/decompress)
-                    loop = asyncio.get_running_loop()
-                    try:
-                        activation_msg = await loop.run_in_executor(
-                            self.executor,
-                            self._prepare_activation_message_blocking,
-                            req,
-                        )
-                    except Exception as e:
-                        logger.error(
-                            "Activation prepare failed for nonce %s: %s", req.nonce, e
-                        )
-                        continue
-                    if activation_msg is None:
-                        continue
-                    if self._profile:
-                        activation_msg.recv_perf_t = t_recv
-
-                    # Enqueue for compute (cancellable back-off)
-                    while self.running:
+                    # Detect new sequence per node: initialize per-nonce KV
+                    if req.nonce != self._active_nonce:
+                        self._active_nonce = req.nonce
                         try:
-                            self.activation_recv_queue.put_nowait(activation_msg)
-                            logger.debug(
-                                "Queued activation for processing: nonce %s",
-                                activation_msg.nonce,
-                            )
-                            break
-                        except Full:
-                            await asyncio.sleep(0)
-                    else:
-                        logger.error(
-                            "Failed to queue activation %s (node stopping)",
-                            activation_msg.nonce,
-                        )
-                        try:
-                            if self.input_pool:
-                                # FIXME: !!!
-                                self.input_pool.release(activation_msg.pool_id)
+                            self._get_or_make_kv(req.nonce)
                         except Exception:
-                            pass
-                else:
-                    # Forward to next node (not our layer)
-                    logger.debug(
-                        "Forwarding activation (layer %s) to next node, nonce: %s",
-                        target_layer,
-                        req.nonce,
-                    )
-                    await self._forward_activation(req)
+                          pass
 
-            except Exception as e:
-                logger.error("Ingress worker error: %s", e)
+                    if target_layer in self._assigned_set:
+                        # Heavy prep in executor (alloc/copy/decompress)
+                        with self.tracer.frame("network.ingress", "prepare") as fr:
+                            #fr.set("node", self._instance_name)
+                            #fr.set("nonce", req.nonce) 
+                            loop = asyncio.get_running_loop()
+                            try:
+                                activation_msg = await loop.run_in_executor(
+                                    self.executor,
+                                    self._prepare_activation_message_blocking,
+                                    req,
+                                )
+                            except Exception as e:
+                                logger.error("Activation prepare failed for nonce %s: %s", req.nonce, e)
+                                continue
+                            if activation_msg is None:
+                                continue
+                            #if self._profile:
+                            #    activation_msg.recv_perf_t = t_recv
+
+                        # Enqueue for compute (cancellable back-off)
+                        with self.tracer.frame("network.rx", "enque") as fr:
+                            fr.set("req_id", req.nonce) 
+                            fr.set("node", self._instance_name)
+                            while self.running:
+                                try:
+                                    logger.error(f"NETWORK RX: {activation_msg.callback_url}")
+                                    self.activation_recv_queue.put_nowait(activation_msg)
+                                    logger.debug(
+                                        "Queued activation for processing: nonce %s",
+                                        activation_msg.nonce,
+                                    )
+                                    break
+                                except Full:
+                                    await asyncio.sleep(0)
+                            else:
+                                logger.error("Failed to queue activation %s (node stopping)", activation_msg.nonce,)
+                                try:
+                                    if self.input_pool:
+                                        # FIXME: !!!
+                                        self.input_pool.release(activation_msg.pool_id)
+                                except Exception:
+                                    logger.error("Unable to release from input pool")
+
+                    else: # Forward to next node (not our layer)
+                      logger.debug(
+                          "Forwarding activation (layer %s) to next node, nonce: %s",
+                          target_layer,
+                          req.nonce,
+                      )
+                      await self._forward_activation(req)
+
+                except Exceptio as e:
+                    logger.error("Ingress worker error: %s", e)
+
+
 
     def _get_or_make_kv(self, nonce: str) -> list:
         """Return a per-nonce KV cache list for this shard's local layers."""
@@ -949,13 +965,14 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         except Exception:
             pass
 
+
     def _prepare_activation_message_blocking(
         self, request: dnet_ring_pb2.ActivationRequest
     ) -> Optional[ActivationMessage]:
-        """Blocking heavy prep: allocate pool buffer, copy/decompress payload, build ActivationMessage.
 
-        Returns None on failure.
-        """
+        """Blocking heavy prep: allocate pool buffer, copy/decompress payload, build ActivationMessage.
+           Returns None on failure.  """
+
         if self.input_pool is None:
             logger.error(
                 "Node %s: Cannot prepare activation - input pool not initialized",
@@ -965,112 +982,122 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
 
         try:
             activation = request.activation
-            if "|" in activation.dtype:
-                # Compressed path: decompress to MLX array and copy to pool
-                try:
-                    deq = decompress_tensor_from_protobuf_data(
-                        tensor_data=activation.data,
-                        shape=list(activation.shape),
-                        dtype_with_metadata=activation.dtype,
-                    )
-                except Exception as e:
-                    logger.error(
-                        "Decompression failed for nonce %s: %s", request.nonce, e
-                    )
-                    return None
+            if "|" in activation.dtype: # Compressed path: decompress to MLX array and copy to pool
 
-                pool_id = self.input_pool.allocate_for_layer(
-                    layer_id=activation.layer_id,
-                    dtype=deq.dtype,
-                    shape=cast(tuple[int, ...], tuple(deq.shape)),
-                )
-                if pool_id is None:
-                    logger.warning(
-                        "Failed to allocate input pool buffer for nonce %s",
-                        request.nonce,
-                    )
-                    return None
-                buffer = self.input_pool.get_buffer(pool_id)
-                if buffer is not None:
-                    flat = deq.reshape(-1)
-                    buffer[: flat.size] = flat
-                # Update activation message with true dtype/shape
-                new_dtype_str = str(deq.dtype)
-                activation_msg = ActivationMessage.from_proto(request, pool_id)
-                activation_msg.dtype = new_dtype_str
-                activation_msg.shape = tuple(deq.shape)
-                return activation_msg
-            elif activation.dtype == "tokens":
-                # Tokens path: parse int32 token IDs and stage them
-                try:
-                    tokens = np.frombuffer(activation.data, dtype=np.int32)
-                    shp = (int(len(tokens)),)
-                except Exception as e:
-                    logger.error(
-                        "Failed to parse tokens for nonce %s: %s", request.nonce, e
-                    )
-                    return None
-                pool_id = self.input_pool.allocate_for_layer(
-                    layer_id=activation.layer_id,
-                    dtype=mx.int32,
-                    shape=cast(tuple[int, ...], shp),
-                )
-                if pool_id is None:
-                    logger.warning(
-                        "Failed to allocate input pool buffer for nonce %s",
-                        request.nonce,
-                    )
-                    return None
-                buffer = self.input_pool.get_buffer(pool_id)
-                if buffer is not None:
-                    buffer[: len(tokens)] = tokens
-                activation_msg = ActivationMessage.from_proto(request, pool_id)
-                activation_msg.dtype = "tokens"
-                activation_msg.shape = shp
-                return activation_msg
-            else:
-                # Dense path: validate size and copy raw bytes view into pool buffer
-                try:
-                    expected = (
-                        int(np.prod(activation.shape))
-                        * np.dtype(dtype_map[activation.dtype]).itemsize
-                    )
-                    actual = len(activation.data)
-                except Exception:
-                    expected = -1
-                    actual = -1
-                if expected != actual:
-                    logger.error(
-                        "Payload size mismatch for nonce=%s: expected=%d actual=%d dtype=%s shape=%s",
-                        request.nonce,
-                        expected,
-                        actual,
-                        activation.dtype,
-                        activation.shape,
-                    )
-                    return None
+                with self.tracer.frame("network.rx.prepare_activation", "decompress") as f:
+                    f.set("req_id", request.nonce) 
+                    f.set("node", self._instance_name)
+                    try:
+                        deq = decompress_tensor_from_protobuf_data(
+                            tensor_data=activation.data,
+                            shape=list(activation.shape),
+                            dtype_with_metadata=activation.dtype,
+                        )
+                    except Exception as e:
+                        logger.error(
+                            "Decompression failed for nonce %s: %s", request.nonce, e
+                        )
+                        return None
 
-                pool_id = self.input_pool.allocate_for_layer(
-                    layer_id=activation.layer_id,
-                    dtype=mlx_dtype_map[activation.dtype],
-                    shape=cast(tuple[int, ...], activation.shape),
-                )
-                if pool_id is None:
-                    logger.warning(
-                        "Failed to allocate input pool buffer for nonce %s",
-                        request.nonce,
+                    pool_id = self.input_pool.allocate_for_layer(
+                        layer_id=activation.layer_id,
+                        dtype=deq.dtype,
+                        shape=cast(tuple[int, ...], tuple(deq.shape)),
                     )
-                    return None
-                buffer = self.input_pool.get_buffer(pool_id)
-                if buffer is not None:
-                    data = request.activation.data
-                    input_data = np.frombuffer(data, dtype=dtype_map[activation.dtype])
-                    buffer[: len(input_data)] = input_data
-                activation_msg = ActivationMessage.from_proto(request, pool_id)
-                return activation_msg
+                    if pool_id is None:
+                        logger.warning(
+                            "Failed to allocate input pool buffer for nonce %s",
+                            request.nonce,
+                        )
+                        return None
+                    buffer = self.input_pool.get_buffer(pool_id)
+                    if buffer is not None:
+                        flat = deq.reshape(-1)
+                        buffer[: flat.size] = flat
+                    # Update activation message with true dtype/shape
+                    new_dtype_str = str(deq.dtype)
+                    activation_msg = ActivationMessage.from_proto(request, pool_id)
+                    activation_msg.dtype = new_dtype_str
+                    activation_msg.shape = tuple(deq.shape)
+                    return activation_msg
+
+            elif activation.dtype == "tokens": # Tokens path: parse int32 token IDs and stage them
+                with self.tracer.frame("network.rx.prepare_activation", "tokens") as f:
+                    f.set("req_id", request.nonce) 
+                    f.set("node", self._instance_name)
+                    try:
+                        tokens = np.frombuffer(activation.data, dtype=np.int32)
+                        shp = (int(len(tokens)),)
+                    except Exception as e:
+                        logger.error(
+                            "Failed to parse tokens for nonce %s: %s", request.nonce, e
+                        )
+                        return None
+                    pool_id = self.input_pool.allocate_for_layer(
+                        layer_id=activation.layer_id,
+                        dtype=mx.int32,
+                        shape=cast(tuple[int, ...], shp),
+                    )
+                    if pool_id is None:
+                        logger.warning(
+                            "Failed to allocate input pool buffer for nonce %s",
+                            request.nonce,
+                        )
+                        return None
+                    buffer = self.input_pool.get_buffer(pool_id)
+                    if buffer is not None:
+                        buffer[: len(tokens)] = tokens
+                    activation_msg = ActivationMessage.from_proto(request, pool_id)
+                    activation_msg.dtype = "tokens"
+                    activation_msg.shape = shp
+                    return activation_msg
+
+            else: # Dense path: validate size and copy raw bytes view into pool buffer
+                with self.tracer.frame("network.rx.prepare_activation", "default") as f:
+                    f.set("req_id", request.nonce) 
+                    f.set("node", self._instance_name)
+                    try:
+                        expected = (
+                            int(np.prod(activation.shape))
+                            * np.dtype(dtype_map[activation.dtype]).itemsize
+                        )
+                        actual = len(activation.data)
+                    except Exception:
+                        expected = -1
+                        actual = -1
+                    if expected != actual:
+                        logger.error(
+                            "Payload size mismatch for nonce=%s: expected=%d actual=%d dtype=%s shape=%s",
+                            request.nonce,
+                            expected,
+                            actual,
+                            activation.dtype,
+                            activation.shape,
+                        )
+                        return None
+
+                    pool_id = self.input_pool.allocate_for_layer(
+                        layer_id=activation.layer_id,
+                        dtype=mlx_dtype_map[activation.dtype],
+                        shape=cast(tuple[int, ...], activation.shape),
+                    )
+                    if pool_id is None:
+                        logger.warning(
+                            "Failed to allocate input pool buffer for nonce %s",
+                            request.nonce,
+                        )
+                        return None
+                    buffer = self.input_pool.get_buffer(pool_id)
+                    if buffer is not None:
+                        data = request.activation.data
+                        input_data = np.frombuffer(data, dtype=dtype_map[activation.dtype])
+                        buffer[: len(input_data)] = input_data
+                    activation_msg = ActivationMessage.from_proto(request, pool_id)
+                    return activation_msg
         except Exception as e:
             logger.error("Activation prep error: %s", e)
             return None
+
 
     def _next_local_layers(self, after_layer: int, count: int) -> List[int]:
         """Get next local layers after specified layer.
@@ -1088,6 +1115,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         i = _bisect_left(s, after_layer + 1)
         return s[i : i + count]
 
+
     def _compute_worker(self) -> None:
         """Compute thread worker."""
         while self.running:
@@ -1096,12 +1124,25 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 activation_msg = self.activation_recv_queue.get(timeout=1.0)
 
                 # Process the activation
-                self._process_activation(activation_msg)
+                with self.tracer.frame("compute", "forward") as f: # NOTE: Symbol hardcoded for runtime stats
+                    f.set("req_id", activation_msg.nonce) 
+                    f.set("node", self._instance_name)
+                    if activation_msg.ex_enq_t == 0.0: # FIXME float comparison
+                      f.set("inwait", 0.0) 
+                    else:
+                      f.set("inwait", time.perf_counter() - activation_msg.ex_enq_t)
+
+                    if (self.model_metadata.num_layers - 1) in self.assigned_layers:
+                      f.set("lm_head", True)
+
+                    self._process_activation(activation_msg)
+                    f.set("t0", time.perf_counter())
 
             except Empty:
                 continue
             except Exception as e:
                 logger.error("Compute worker error: %s", e)
+
 
     async def shutdown(self) -> None:
         """Shutdown the node."""
@@ -1193,6 +1234,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         hostname = gethostname()
         # TODO: optionally take shard name from CLI
         instance = f"shard-{token_hex(4)}-{hostname}"
+        self._instance_name = instance
         self.discovery.create_instance(
             instance,
             self.http_port,
@@ -1237,9 +1279,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             pass
 
     def _warmup_shard(self):
-        logger.info(
-            "[WARMUP] Starting shard warmup with window size %s", self.window_size
-        )
+        logger.info("[WARMUP] Starting shard warmup with window size %s", self.window_size)
         if not self.model or not self.model_metadata or not self.weight_cache:
             logger.warning("[WARMUP] No model loaded; skipping warmup")
             return
@@ -1261,10 +1301,9 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         max_windows = max(1, self.config.warmup_windows)
         windows: list[list[int]] = []
         for window_start in range(0, len(self._assigned_sorted), self.window_size):
-            window_end = min(
-                window_start + self.window_size, len(self._assigned_sorted)
-            )
+            window_end = min(window_start + self.window_size, len(self._assigned_sorted))
             windows.append(self._assigned_sorted[window_start:window_end])
+
         for wi, window_layers in enumerate(windows[:max_windows]):
             weights_to_bind = {}
             for layer_id in window_layers:
@@ -1272,6 +1311,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 if weights:
                     for k, v in weights.items():
                         weights_to_bind[k] = v
+
             if weights_to_bind:
                 # Serialize MLX parameter binding
                 with self._mlx_lock:
@@ -1285,6 +1325,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                         mx.eval(_s)
             except Exception:
                 pass
+
             try:
                 for lid in window_layers:
                     self.weight_cache.decrease_reference(lid)
@@ -1444,6 +1485,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 device_profile = await self._profile_device(
                     req.repo_id, req.max_batch_exp
                 )
+                logger.debug(device_profile)
 
                 return ShardProfileResponse(profile=device_profile)
             except Exception as e:
@@ -1466,6 +1508,33 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 logger.error(f"Error in /measure_latency endpoint: {e}")
                 raise
 
+        @self.app.post("/trace")
+        async def setup_trace(req: TraceConfigRequest) -> TraceConfigResponse:
+          logger.debug("Updating trace config")
+          try:
+            cfg = TraceConfig(
+              file=req.file,
+              streaming=req.streaming,
+              include_prefixes=req.include_prefixes,
+              include_c_calls=req.include_c_calls,
+              budget=req.budget,
+              enabled=req.enabled,
+              node_id=req.node_id,
+              record_pid_tid=req.record_pid_tid,
+              aggregate=req.aggregate,
+              aggregate_url=req.aggregate_url,
+              agg_max_events=req.agg_max_events,
+            )
+            self.tracer.config = cfg
+            logger.info("Updated tracer config.")
+            self.api_address = cfg.aggregate_url
+            self.tracer.start_aggregator()
+            return TraceConfigResponse(ok=True)
+          except Exception as e:
+            logger.error(f"Unable to setup tracing on shard: {e}")
+            return TraceConfigResponse(ok=False)
+
+
         @self.app.post("/load_model")
         async def load_model_endpoint(
             req: ShardLoadModelRequest,
@@ -1478,7 +1547,10 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                     f"total_layers={req.total_layers}, kv_bits={req.kv_bits or 'default'}, "
                     f"api_callback={req.api_callback_address or 'none'}"
                 )
-                result = await self.load_model(req)
+                self.tracer.mark("model", {"model": req.model_path, "ts": time.perf_counter()}) # Record model name
+                with self.tracer.frame("memory", "model.load") as f: # NOTE: Symbol hardcoded for runtime stats
+                    f.set("node", self._instance_name)
+                    result = await self.load_model(req)
                 return result
 
             except Exception as e:
@@ -1495,7 +1567,9 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             """Unload current model."""
             try:
                 logger.info("HTTP /unload_model")
-                result = await self.unload_model()
+                with self.tracer.frame("memory", "model.unload") as f: # NOTE: Symbol hardcoded for runtime stats
+                    f.set("node", self._instance_name)
+                    result = await self.unload_model()
                 return result
 
             except Exception as e:
@@ -1509,29 +1583,33 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         # FIXME: add pydantic type here
         async def warm(request: Request) -> JSONResponse:
             try:
-                body = await request.json()
-                start = int(body.get("start", -1))
-                window = int(body.get("window", self.window_size))
-                if start < 0:
-                    return JSONResponse(
-                        status_code=400, content={"error": "missing/invalid start"}
-                    )
-                start_idx = 0
-                for i, lyr in enumerate(self._assigned_sorted):
-                    if lyr >= start:
-                        start_idx = i
-                        break
-                else:
-                    return JSONResponse(content={"prefetched": []})
-                window_layers = self._assigned_sorted[
-                    start_idx : start_idx + max(1, window)
-                ]
-                for wl in window_layers:
-                    # Prefetch disabled in fit mode; allow only when non-fit and enabled
-                    if self._mode != "fit" and self.config.prefetch_mode != "off":
-                        self._prefetch_to_ram(wl)
-                        self._enqueue_weight_prefetch(wl)
-                return JSONResponse(content={"prefetched": window_layers})
+                # FIXME: Append warmup config? Or something to distinguish
+                with self.tracer.frame("memory", "model.warm") as f: # NOTE: Symbol hardcoded for runtime stats
+                    f.set("req_id", request.nonce) 
+                    f.set("node", self._instance_name)
+                    body = await request.json()
+                    start = int(body.get("start", -1))
+                    window = int(body.get("window", self.window_size))
+                    if start < 0:
+                        return JSONResponse(
+                            status_code=400, content={"error": "missing/invalid start"}
+                        )
+                    start_idx = 0
+                    for i, lyr in enumerate(self._assigned_sorted):
+                        if lyr >= start:
+                            start_idx = i
+                            break
+                    else:
+                        return JSONResponse(content={"prefetched": []})
+                    window_layers = self._assigned_sorted[
+                        start_idx : start_idx + max(1, window)
+                    ]
+                    for wl in window_layers:
+                        # Prefetch disabled in fit mode; allow only when non-fit and enabled
+                        if self._mode != "fit" and self.config.prefetch_mode != "off":
+                            self._prefetch_to_ram(wl)
+                            self._enqueue_weight_prefetch(wl)
+                    return JSONResponse(content={"prefetched": window_layers})
             except Exception as e:
                 logger.error("/warm failed: %s", e)
                 return JSONResponse(status_code=500, content={"error": str(e)})
@@ -1573,9 +1651,11 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         Returns:
             Device profile information as a plain dict
         """
-        profile_dict = profile_device_via_subprocess(
-            repo_id, max_batch_exp=max_batch_exp, debug=0
-        )
+        with self.tracer.frame("startup", "profile.device") as f: # NOTE: Symbol hardcoded for runtime stats
+            f.set("node", self._instance_name)
+            profile_dict = profile_device_via_subprocess(
+                repo_id, max_batch_exp=max_batch_exp, debug=0
+            )
         logger.info("Device profiling completed for node %s", self.node_id)
         return profile_dict
 

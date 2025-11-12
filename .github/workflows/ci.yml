@@ -1,8 +1,8 @@
 name: CI
 
-# NOTE: This workflow requires a Personal Access Token (PAT) to access private submodules.
-# Create a PAT with 'repo' scope and add it as a secret named 'GH_PAT' in the repository settings.
-# See: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/creating-a-personal-access-token
+# NOTE: This workflow requires an SSH key to access private submodules.
+# Generate an SSH key and add it as a deploy key to each submodule repository,
+# then add the private key as a secret named 'SUBMODULE_SSH_KEY'.
 
 on:
   push:
@@ -18,24 +18,23 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
 
-      - name: Configure git to use HTTPS for submodules
+      - name: Setup SSH for submodules
         run: |
-          git config --global url."https://github.com/".insteadOf git@github.com:
-          git config --global url."https://".insteadOf ssh://
-          git config --global credential.helper store
-          echo "https://x-access-token:${GH_TOKEN}@github.com" > ~/.git-credentials
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          mkdir -p ~/.ssh
+          echo "${{ secrets.CI_SSH_KEY }}" > ~/.ssh/dnet_id_ed25519
+          chmod 600 ~/.ssh/dnet_id_ed25519
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
 
       - name: Checkout submodules
         run: |
           git submodule sync --recursive
           git submodule update --init --recursive
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Cleanup SSH key
+        if: always()
+        run: |
+          rm -f ~/.ssh/dnet_id_ed25519
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5

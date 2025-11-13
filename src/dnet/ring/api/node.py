@@ -147,10 +147,7 @@ class RingApiNode:
         self.pending_requests: Dict[str, asyncio.Future] = {}
 
         # Print ASCII art banner if available
-        try:
-            print_startup_banner()
-        except Exception:
-            pass
+        #print_startup_banner()
 
         cfg = TraceConfig(
             file="./trace.json",
@@ -447,7 +444,7 @@ class RingApiNode:
 
     async def _forward_trace_config(self, cfg: Any) -> bool:
         logger.debug("Forwarding Trace config")
-        shards = self._get_shards_from_discovery()
+        shards = await self._get_shards_from_discovery()
         this = self.discovery.get_own_properties()
         api_endpoint = f"http://{this.local_ip}:{this.server_port}/trace/ingest"
         payload = TraceConfigRequest(
@@ -579,9 +576,7 @@ class RingApiNode:
                 )
         except Exception:
             pass
-        print(
-            f"Topology solution: k {solution.k}, w {solution.w}, n {solution.n}, objective: {solution.obj_value}"
-        )
+        #print( f"Topology solution: k {solution.k}, w {solution.w}, n {solution.n}, objective: {solution.obj_value}")
 
         logger.info(
             "Topology prepared: %d devices, %d layers",
@@ -1633,6 +1628,16 @@ class RingApiNode:
             prompt_text = await self._convert_chat(req.messages)
             prompt = mx.array(self.tokenizer.encode(prompt_text))  # type: ignore
             prompt_tokens = int(len(prompt))  # 1D token count
+
+            self.tracer.mark("request.start", {
+              "tokenizer": "",
+              "model": req.model,
+              "temperature": req.temperature,
+              "prompt_tokens": prompt.size,
+              "req_id": nonce,
+              "t0": time.perf_counter(),
+            })
+
             t_start = time.perf_counter()
             t_first_token: Optional[float] = None
             detok = self.tokenizer.detokenizer  # type: ignore
@@ -1660,6 +1665,7 @@ class RingApiNode:
                 ),  # type: ignore
                 arange(req.max_tokens or 0),
             ):
+                self.tracer.mark("request.round", {"req_id": nonce,"t0": time.time_ns()})
                 if t_first_token is None:
                     t_first_token = time.perf_counter()
                 tokens.append(token)
@@ -1719,6 +1725,15 @@ class RingApiNode:
                 }
                 done["metrics"] = metrics
             yield f"data: {json.dumps(done)}\n\n"
+            self.tracer.mark("request.end", { 
+              "generated_tokens": len(tokens), 
+              "req_id": nonce,
+              "t0": time.perf_counter(),
+            })
+            # Send last events
+            _t_batch = { "run_id": "NONE", "node_id": "API", "events": list(self.tracer._events) }
+            self._trace_ingest_cb(_t_batch) 
+            self.tracer._events.clear()
             yield "data: [DONE]\n\n"
 
         return gen()

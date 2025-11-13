@@ -6,6 +6,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 _CONFIGURED_FLAG = "_dnet_api_logger_configured"
+logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 def get_api_logger() -> logging.Logger:
     log = logging.getLogger("dnet.api")

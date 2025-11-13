@@ -286,6 +286,7 @@ class StatsAggregator:
           # Update in-flight events or register new ones
           for i, e in enumerate(events):
               symbol = e["name"].split(".")
+              #print(f"{node_id}, {symbol}")
 
               if e["type"] == 'B':
                 req_id = data.get("req_id")

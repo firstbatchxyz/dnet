@@ -5,16 +5,31 @@ Similar usage can be seen on [Ollama](https://github.com/ollama/ollama/blob/main
 """
 
 from openai import OpenAI
+import pytest
+import requests
 
 
 MODEL = "Qwen/Qwen3-4B-MLX-4bit"
-client = OpenAI(
-    base_url="http://localhost:8080/v1/",  # dnet API url, with `v1`
-    api_key="dria",  # ignored
-)
+BASE_URL = "http://localhost:8080"
 
 
-def test_openai_completions():
+@pytest.fixture(scope="module")
+def client():
+    """Create OpenAI client and check server health."""
+    # Check if server is responding
+    try:
+        response = requests.get(f"{BASE_URL}/health", timeout=2)
+        response.raise_for_status()
+    except (requests.RequestException, requests.ConnectionError):
+        pytest.skip("Server is not responding at /health endpoint")
+
+    return OpenAI(
+        base_url=f"{BASE_URL}/v1/",  # dnet API url, with `v1`
+        api_key="dria",  # ignored
+    )
+
+
+def test_openai_completions(client):
     """https://platform.openai.com/docs/api-reference/completions/create"""
     completion = client.completions.create(
         model=MODEL,
@@ -25,7 +40,7 @@ def test_openai_completions():
     print(completion)
 
 
-def test_openai_chat_completions():
+def test_openai_chat_completions(client):
     """https://platform.openai.com/docs/api-reference/chat/create"""
     chat_completion = client.chat.completions.create(
         messages=[
@@ -40,7 +55,7 @@ def test_openai_chat_completions():
     print(chat_completion)
 
 
-def test_openai_chat_completions_streaming():
+def test_openai_chat_completions_streaming(client):
     """https://platform.openai.com/docs/api-reference/chat/create (with streaming: true)"""
     chat_completion = client.chat.completions.create(
         messages=[
@@ -56,7 +71,8 @@ def test_openai_chat_completions_streaming():
     print(chat_completion)
 
 
-def test_openai_models():
+@pytest.mark.skip(reason="models endpoint not yet added")
+def test_openai_models(client):
     """https://platform.openai.com/docs/api-reference/models/list"""
     list_completion = client.models.list()
 
@@ -64,7 +80,8 @@ def test_openai_models():
     print(list_completion)
 
 
-def test_openai_embeddings():
+@pytest.mark.skip(reason="embeddings endpoint not yet added")
+def test_openai_embeddings(client):
     """https://platform.openai.com/docs/api-reference/embeddings/create"""
     response = client.embeddings.create(
         model="text-embedding-ada-002",

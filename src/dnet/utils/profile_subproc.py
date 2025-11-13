@@ -1,16 +1,17 @@
 import json
 import multiprocessing as mp
-from dataclasses import asdict
-from typing import Any, Dict
+from distilp.common import DeviceProfile
 
 
 def _child_profile_device(repo_id: str, max_batch_exp: int, debug: int, conn) -> None:
     try:
-        # Import inside child to avoid pre-initializing Metal/MLX in parent
-        from dperf import profile_device as _profile_device  # type: ignore
+        # import inside child to avoid pre-initializing Metal/MLX in parent
+        from distilp.profiler import profile_device as _profile_device
 
-        di = _profile_device(repo_id, max_batch_exp=max_batch_exp, debug=debug)
-        conn.send(json.dumps(asdict(di)))
+        device_profile = _profile_device(
+            repo_id, max_batch_exp=max_batch_exp, debug=debug
+        )
+        conn.send(device_profile.model_dump_json())
     except ChildProcessError as e:
         try:
             conn.send(json.dumps({"_error": str(e)}))
@@ -25,8 +26,8 @@ def _child_profile_device(repo_id: str, max_batch_exp: int, debug: int, conn) ->
 
 def profile_device_via_subprocess(
     repo_id: str, *, max_batch_exp: int = 6, debug: int = 0, timeout_s: float = 300.0
-) -> Dict[str, Any]:
-    """Run dperf.profile_device in a fresh subprocess and return a dict.
+) -> DeviceProfile:
+    """Run distilp.profiler.profile_device in a fresh subprocess and return a dict.
 
     This isolates Metal/IOAccelerator allocations to the child so that they are
     reclaimed on exit, avoiding persistent memory bloat.
@@ -58,4 +59,5 @@ def profile_device_via_subprocess(
     obj = json.loads(data)
     if isinstance(obj, dict) and obj.get("_error"):
         raise RuntimeError(f"device profiler failed: {obj['_error']}")
-    return obj
+    else:
+        return DeviceProfile.model_validate_json(data)

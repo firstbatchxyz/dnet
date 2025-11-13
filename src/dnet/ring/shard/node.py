@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from grpc import aio as aio_grpc
 
 from dnet_p2p import AsyncDnetP2P, DnetDeviceProperties
-
+from distilp.common import DeviceProfile
 from dnet.utils.serialization import tensor_to_bytes
 
 from .servicer import ShardServicer
@@ -1440,7 +1440,6 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         async def profile(req: ShardProfileRequest) -> ShardProfileResponse:
             logger.info("Received /profile request")
             try:
-                # Profile device using dperf
                 device_profile = await self._profile_device(
                     req.repo_id, req.max_batch_exp
                 )
@@ -1563,8 +1562,8 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 logger.error("/cleanup_repacked failed: %s", e)
                 return JSONResponse(status_code=500, content={"error": str(e)})
 
-    async def _profile_device(self, repo_id: str, max_batch_exp: int) -> dict:
-        """Profile device using dperf in a subprocess and return a dict.
+    async def _profile_device(self, repo_id: str, max_batch_exp: int) -> DeviceProfile:
+        """Profile device using a profiler in a subprocess and return the object.
 
         Args:
             repo_id: Hugging Face repository ID

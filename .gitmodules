@@ -3,11 +3,6 @@
 	url = git@github.com:firstbatchxyz/dnet-p2p.git
 	branch = master
 
-[submodule "lib/dperf"]
-	path = lib/dperf
-	url = git@github.com:firstbatchxyz/py-dperf.git
-	branch = master
-
 [submodule "lib/distilp"]
 	path = lib/distilp
 	url = git@github.com:firstbatchxyz/distilp.git

@@ -87,7 +87,7 @@ class Tracer:
     # Aggregator worker thread
     def start_aggregator(self) -> None:
         self._agg_enabled = True
-        self._agg_max_events = max(10, int(self.config.agg_max_events or 1000)) # 10 min, 1000 default
+        self._agg_max_events = max(10, int(self.config.agg_max_events or 5000)) # 10 min, 1000 default
         if not self._agg_thread or not self._agg_thread.is_alive():
             self._agg_thread = threading.Thread(target=self._agg_exec, name="trace-agg", daemon=True)
             self._agg_thread.start()

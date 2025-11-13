@@ -1,4 +1,3 @@
-
 import io
 import os
 import sys
@@ -146,6 +145,7 @@ class REPL(cmd.Cmd):
         case s if s in ["topo", "topology", "t"]: self.do_topo(cmd)
         case s if s in ["model", "m"]:            self.do_model(cmd)
         case "chat": self.do_chat(cmd)
+        case "cat": self.do_cat()
 
   def do_api(self, cmd: List[str]) -> None:
     if len(cmd) < 2:
@@ -247,6 +247,7 @@ class REPL(cmd.Cmd):
     _print_hf("trace add [probe] ", "Activate [probe].")
     _print_hf("trace stream [on|off] ", "Stream the trace events to the current terminal.")
     _print_hf("trace [budget|b] [limit]", "Set the maximum budget for recoded events. Default is 1000.")
+    _print_hf("trace annotate ", "Annotate each recorded frame with it's runtime information.")
     _print_hf("trace stat ", "See status of the trace, eg. number of frames captured")
     sys.stdout.write("\033[1m\n    System control:\n\033[0m")
     _print_hf("limit [RESOURCE] [VALUE]", "Set a higher limit for a system resource. e.g:",
@@ -606,13 +607,13 @@ class REPL(cmd.Cmd):
 
   # Performance trackers 
   def do_perf(self, cmd):
-    if len(cmd) < 2 or cmd[1] == "stat":
+    if len(cmd) < 2:
       dprint("Runtime performance metrics are ON by default.\n") 
       dprint("Turn tracking off with 'perf off'. Do 'perf stat' for statistics on previous requests or 'help' for more commands.\n\n")
       return
 
     match cmd[1]:
-      case s if s in "stats":
+      case s if s in "stat":
         self._stats_agg.stats()
         pass
       case _:
@@ -846,13 +847,12 @@ class REPL(cmd.Cmd):
       dprint(f"Unable to create topology: {e}\n\n")
       return False
     self.state.topo = topo
-    #self.print_topo(topo)
     return True
 
   def load_model(self, model):
     req = APILoadModelRequest(model=model)
     try:
-      res = self.api_call("_handle_load_model", req, timeout=30)
+      res = self.api_call("_handle_load_model", req, timeout=60)
       return True 
     except Exception as e:
       dprint(f"Failed to load model: {e}\n\n")
@@ -863,42 +863,48 @@ class REPL(cmd.Cmd):
   def _p_msg(self, msg: str, role: str):
     match role:
       case "user": 
-        ps = f"\n@\033[97;1m{role}\033[0m".rjust(10)
+        ps = f"@\033[97;1m{role}\033[0m"
         sys.stdout.write(f"{ps} > ")
         sys.stdout.flush()
         return
       case "llm" | "think":
-        ps = f"@\033[97;1m{role}\033[0m".rjust(10)
-        sys.stdout.write(f"{ps} > ")
+        ps = f"@\033[97;1m{role}\033[0m"
+        sys.stdout.write(f"{ps}  > ")
         sys.stdout.flush()
         return
       case _: 
         ps = f"@\033[1m{role}\033[0m".rjust(10)
     sys.stdout.write(f"{ps} > {msg}\n")
+    sys.stdout.flush()
 
   def _chat_loop(self, ci: ChatInterface):
     while True:
       self._p_msg(" ", "user")
       prompt = sys.stdin.readline().strip()
 
-      match prompt: # Match meta commands, else prompt
-        case s if s in [".quit", ".q"]:
-          break
-        case _:
-          msg = ChatMessage(role="user", content=prompt)
-          ci.messages.append(msg)
+      if prompt.startswith("."): # Match meta commands, else prompt
+        match prompt:
+          case ".quit" | ".q":
+            dprint("[end chat] o7\n")
+            break
+          case _:
+            sys.stdout.write("[unknown command] Do .help for a list of commands.")
+            continue 
+      else:
+        msg = ChatMessage(role="user", content=prompt)
+        ci.messages.append(msg)
 
       req = ChatRequestModel(
         messages=ci.messages,
         model=self.state.model,
         max_tokens=5000,
+        profile=True,
       )
-      # eval async generator in api thread
-      agen = self.api_call("_stream_chat", req)
+
       msg = []
-      #self._p_msg("", "think")
       self._p_msg("", "llm")
-      while True:
+      agen = self.api_call("_stream_chat", req)
+      while True: # eval async generator in api thread
         fut = asyncio.run_coroutine_threadsafe(agen.__anext__(), self._api_loop)
         line = fut.result()
         if not line.startswith("data: "):
@@ -906,7 +912,6 @@ class REPL(cmd.Cmd):
           break
         payload = line[6:].strip()
         if payload == "[DONE]":
-          dprint("\n")
           break
         obj = json.loads(payload)
         choices = obj.get("choices", [])
@@ -922,31 +927,51 @@ class REPL(cmd.Cmd):
               pass
             case _:
               sys.stdout.write(text)
-              sys.stdout.flush()
-              msg.append(text)
+          sys.stdout.flush()
+          msg.append(text)
+
+          metrics = obj.get("metrics", None)
+          if metrics:
+            dprint("\n")
+            self._p_msg(f"tps: {metrics.get("tps_overall"):.2f}, "
+                        f"ttfb: {metrics.get("ttfb_ms"):.2f}ms, "+
+                        f"ms: {metrics.get("total_ms"):.2f}ms, "+
+                        f"tokens: {metrics.get("tokens_generated")}", "system")
               
         # TODO: Capture usage and metrics
  
   def do_chat(self, cmd):
+    import time
     if len(cmd) < 2:
       if not self.state.model or self.state.model == "":
         self.prompt_model()
-      sys.stdout.write(""+"-"*80+"\n\n")
-      if not hasattr(self.state, "topology"):
-        self._p_msg("Initializing topology", "system")
-        if not self.prepare_topo(self.state.model):
-          raise RuntimeError("Unable to create topology.")
-      self._p_msg("Loading weights into memory", "system")
-      if not self.load_model(self.state.model):
-        raise RuntimeError("Unable to load model.")
+    else:
+      self.state.model = cmd[1]
+    if not self._api_running.set():
+      self.start_api(self.state.api_http_port, self.state.api_grpc_port)
+      self.api_call("set_trace_ingest_callback", self.__trace_cb, timeout=2.0)
+    time.sleep(1.5) # FIXME: Node discovery fails topology
+    sys.stdout.write(""+"-"*80+"\n\n")
+    if not hasattr(self.state, "topo") or self.state.topo is None:
+      self._p_msg("Initializing topology", "system")
+      self.prepare_topo(self.state.model)
+    self._p_msg("Loading weights into memory", "system")
+    if not self.load_model(self.state.model):
+      raise RuntimeError("Unable to load model.")
 
-      self._p_msg("New session initialized. Welcome :3", "system")
-      ci = ChatInterface(messages=[])
-      self._chat_loop(ci)
+    self._p_msg("New session initialized. Welcome :3", "system")
+    ci = ChatInterface(messages=[])
+    self._chat_loop(ci)
 
-      # Start default chat with selected model
-      pass
+    # Start default chat with selected model
     pass
+    pass
+
+  def do_cat(self):
+    sys.stdout.write("\n  ／|、    miau?\n")
+    sys.stdout.write(" （ﾟ､ ｡７        \n") 
+    sys.stdout.write("  |  ~ヽ         \n") 
+    sys.stdout.write("  じしf_,)ノ     \n\n")
 
   # ===== Handle shutdown 
 

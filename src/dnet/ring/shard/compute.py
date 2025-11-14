@@ -110,21 +110,17 @@ class ComputeMixin(RingShardNodeAttributes):
 
             # Compute windows until boundary (stay local as long as possible)
             current_layer = activation_msg.layer_id + 1
-            last_layer = current_layer - 1
             while True:
                 start_time = time.perf_counter()
-                processed = 0
                 did_early_swap = False
 
                 # Determine contiguous local window starting at current_layer
                 window_layers: List[int] = []
-                _tmp_layer = current_layer
-                while processed < self.window_size and (
-                    _tmp_layer in self._assigned_set
-                ):
-                    window_layers.append(_tmp_layer)
-                    _tmp_layer += 1
-                    processed += 1
+                for i in range(self.window_size):
+                    layer = current_layer + i
+                    if layer not in self._assigned_set:
+                        break
+                    window_layers.append(layer)
 
                 if self._mode == "offload" and window_layers:
                     prep = self._prepared_by_nonce.get(activation_msg.nonce)
@@ -263,7 +259,7 @@ class ComputeMixin(RingShardNodeAttributes):
                                 # Early delta-swap already trimmed resident set for this window
                                 pass
                             elif not self._recent_windows:
-                                # First window in token: seed resident set
+                                # Firswhy wt window in token: seed resident set
                                 self._recent_windows.append(list(window_layers))
                             else:
                                 prev = self._recent_windows.pop(0)

@@ -4,7 +4,6 @@ No ring, no gRPC, no discovery. Just: submit(ActivationIn) -> ActivationOut.
  Only knows: ingress queue in, egress queue out￼
 """
 import queue
-from asyncio import QueueEmpty
 from queue import Queue
 from typing import Optional, List, Any, Dict
 from concurrent.futures import ThreadPoolExecutor
@@ -15,12 +14,12 @@ from ..models import ShardLoadModelRequest
 from ...data_types import ActivationMessage
 from ....utils.logger import logger
 from ....utils.model import ModelMetadata, get_model_metadata
-from ....utils.serialization import dtype_map, mlx_dtype_map
+from ....utils.serialization import mlx_dtype_map
 from ...model.base import BaseRingModel as BaseShardModel
 import asyncio
 from config import ComputeConfig, TransportConfig
 from ...memory_pool import LayerAwareMemoryPool
-from .policies import ComputePolicy
+from .policies import ComputePolicy, make_policy
 from ....utils.repack import ensure_repacked_for_layers
 from ...model import get_ring_model
 from ....utils.model import (
@@ -137,9 +136,10 @@ class ShardRuntime:
             )
             window_size = eff_window_size
 
-        self.policy.window_size = window_size
-        self.policy._mode = mode
-        self.policy._resident_windows = resident_windows
+        #self.policy.window_size = window_size
+        #self.policy._mode = mode
+        #self.policy._resident_windows = resident_windows
+
         logger.info(
             "Runtime %s: mode=%s m=%s requested_w=%s n_residency=%s -> window_size=%s resident_windows=%s",
             self.shard_id,
@@ -254,13 +254,8 @@ class ShardRuntime:
             logger.warning("Runtime %s: failed to load API‑layer weights: %s", self.shard_id, e)
 
         # 8) Create policy + weight cache
-        if mode == "fit":
-            self.policy = FitInMemoryPolicy(self, resident_windows)
-        else:
-            self.policy = OffloadingPolicy(self, resident_windows)  # to be implemented
-
+        self.policy = make_policy(mode, self, resident_windows)
         self.policy.window_size = window_size
-        self.policy._mode = mode
         self.policy.configure_policy_for_model(req)
 
     def reset_cache(self):

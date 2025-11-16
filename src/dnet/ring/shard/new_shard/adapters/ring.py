@@ -10,7 +10,6 @@ from dnet_p2p import (
     AsyncDnetP2P,
     DnetDeviceProperties,
     discover_thunderbolt_connection,
-    ThunderboltConnection,
 )
 from grpc import aio as aio_grpc
 from .base import TopologyAdapter

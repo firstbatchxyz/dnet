@@ -17,7 +17,7 @@ from ....utils.model import ModelMetadata, get_model_metadata
 from ....utils.serialization import mlx_dtype_map
 from ...model.base import BaseRingModel as BaseShardModel
 import asyncio
-from config import ComputeConfig, TransportConfig
+from .config import ComputeConfig, TransportConfig
 from ...memory_pool import LayerAwareMemoryPool
 from .policies import ComputePolicy, make_policy
 from ....utils.repack import ensure_repacked_for_layers

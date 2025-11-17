@@ -51,3 +51,8 @@ class TopologyAdapter(ABC):
         Egress = runtime -> adapter -> network.
         """
         pass
+
+    @abstractmethod
+    async def configure_for_model(self, req):
+        """Configure the adapter for a new model load."""
+        pass

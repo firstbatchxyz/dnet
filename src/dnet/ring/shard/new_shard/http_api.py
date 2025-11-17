@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Mapping
 from hypercorn import Config
 import hypercorn.asyncio as aio_hypercorn
 import asyncio
@@ -6,6 +6,12 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from ....utils.logger import logger
 from .shard import Shard
+from dnet.utils.latency import DeviceLatencyResult, LatencyMeasurement, LatencyResults
+from dnet_p2p import (
+    DnetDeviceProperties,
+    ThunderboltConnection,
+)
+import time
 from ..models import (
     HealthResponse,
     MeasureLatencyRequest,
@@ -16,16 +22,21 @@ from ..models import (
     ShardProfileResponse,
     ShardUnloadModelResponse,
 )
+from dnet_p2p import AsyncDnetP2P
+from ....protos import dnet_ring_pb2
+from ....protos.dnet_ring_pb2_grpc import DnetRingServiceStub
+from grpc import aio as aio_grpc
 
 class HTTPServer:
     """
     HTTP API server for shard node.
     """
-    def __init__(self, http_port: int, shard: Shard) -> None:
+    def __init__(self, http_port: int, shard: Shard, discovery: AsyncDnetP2P) -> None:
         self.shard = shard
         self.http_port: int = http_port
         self.app = FastAPI()
         self.http_server: Optional[asyncio.Task] = None
+        self.discovery = discovery
 
     async def _start_http_server(self, shutdown_trigger: asyncio.Event) -> None:
         await self._setup_routes()
@@ -43,22 +54,143 @@ class HTTPServer:
             aio_hypercorn.serve(self.app, config, shutdown_trigger=shutdown_trigger)  # type: ignore
         )
 
+    async def _measure_latency_to_devices(
+        self,
+        devices: Mapping[str, DnetDeviceProperties],
+        thunderbolts: Mapping[str, ThunderboltConnection],
+        payload_sizes: list[int],
+    ) -> LatencyResults:
+        """Measure latency to all devices except self.
+
+        Args:
+            devices: Device information mapping
+            thunderbolts: Thunderbolt connection information
+            payload_sizes: List of payload sizes to test
+
+        Returns:
+            Latency measurement results
+        """
+        latency_results_dict: dict[str, DeviceLatencyResult] = {}
+
+        for instance, device_info in devices.items():
+            # Skip measuring latency to ourselves
+            if instance == self.discovery.instance_name():
+                logger.debug("Skipping latency measurement to self: %s", instance)
+                continue
+
+            # Skip measuring latency to API (manager) devices
+            if device_info.is_manager:
+                logger.debug(
+                    "Skipping latency measurement to manager/API: %s", instance
+                )
+                continue
+
+            try:
+                shard_port = device_info.shard_port
+
+                # Check for Thunderbolt connection
+                if instance in thunderbolts:
+                    tb_data = thunderbolts[instance]
+                    instance_tb_ip = tb_data.ip_addr
+                    logger.info(
+                        "Using Thunderbolt for %s at %s, connected to instance %s",
+                        instance,
+                        instance_tb_ip,
+                        tb_data.instance,
+                    )
+                else:
+                    # No Thunderbolt, use WiFi
+                    instance_tb_ip = device_info.local_ip
+
+                if not shard_port or not instance_tb_ip:
+                    logger.warning("No shard_port or local_ip for device %s", instance)
+                    continue
+
+                # Connect to target shard's gRPC server
+                target_address = f"{instance_tb_ip}:{shard_port}"
+                channel = aio_grpc.insecure_channel(target_address)
+
+                stub = DnetRingServiceStub(channel)
+
+                # Measure latency for each payload size
+                latency_measurements: list[LatencyMeasurement] = []
+                for payload_size in payload_sizes:
+                    # Create dummy payload
+                    dummy_data = b"x" * payload_size
+
+                    start_time = time.perf_counter()
+                    timestamp_ms = int(time.time() * 1000)
+
+                    request = dnet_ring_pb2.LatencyMeasureRequest(
+                        requester_id=str(self.shard.node_id),
+                        payload_size=payload_size,
+                        dummy_data=dummy_data,
+                        timestamp=timestamp_ms,
+                    )
+
+                    response = await stub.MeasureLatency(request)  # type: ignore
+                    end_time = time.perf_counter()
+
+                    if response.success:
+                        latency_ms = (end_time - start_time) * 1000
+                        latency_measurements.append(
+                            LatencyMeasurement(
+                                payload_size=payload_size,
+                                latency_ms=round(latency_ms, 2),
+                                success=True,
+                                error=None,
+                            )
+                        )
+                    else:
+                        latency_measurements.append(
+                            LatencyMeasurement(
+                                payload_size=payload_size,
+                                success=False,
+                                error=response.message,
+                                latency_ms=0,
+                            )
+                        )
+
+                # Store results
+                result = DeviceLatencyResult(
+                    target_node_id=response.node_id if response.success else None,
+                    measurements=latency_measurements,
+                    success=True,
+                    error=None,
+                )
+                latency_results_dict[instance] = result
+
+                # Close channel
+                await channel.close()
+
+            except Exception as e:
+                logger.error("Error measuring latency to %s: %s", instance, e)
+                result = DeviceLatencyResult(
+                    target_node_id=None,
+                    success=False,
+                    error=str(e),
+                    measurements=[],
+                )
+                latency_results_dict[instance] = result
+
+        return LatencyResults(results=latency_results_dict)
+
     async def _setup_routes(self) -> None:
         """Setup HTTP routes."""
 
         @self.app.get("/health")
         async def health() -> HealthResponse:
             try:
-                instance = self.shard.discovery.instance_name()
+                instance = self.discovery.instance_name()
             except Exception:
                 instance = None
             return HealthResponse(
                 status="ok",
                 node_id=self.shard.node_id,
-                running=self.shard.running,
+                running=self.shard.adapter.running,
                 model_loaded=self.shard.runtime.model is not None,
                 model_path=self.shard.runtime.model_path,
-                assigned_layers=self.assigned_layers,
+                assigned_layers=self.shard.runtime.assigned_layers,
                 queue_size=self.shard.runtime.queue_size(),
                 grpc_port=self.shard.grpc_server.grpc_port,
                 http_port=self.http_port,

@@ -35,12 +35,11 @@ class Shard:
         return
 
     async def reset_cache(self):
-        self.adapter.reset_cache()
+        self.runtime.reset_cache()
 
     async def load_model(self, req):
         self.runtime.load_model_core(req)
-        await self.adapter.configure_topology()
+        await self.adapter.configure_for_model(req)
 
     async def unload_model(self): ...
     def queue_size(self) -> int: return self.runtime.queue_size()
-

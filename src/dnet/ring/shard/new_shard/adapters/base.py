@@ -5,9 +5,11 @@ Defines “ingress” and “egress” hooks but no concrete protocol.
 
 from abc import ABC, abstractmethod
 import asyncio
-from .....protos.dnet_ring_pb2 import ActivationRequest
-from ....data_types import ActivationMessage
-
+from dnet.protos.dnet_ring_pb2 import ActivationRequest
+from dnet.ring.data_types import ActivationMessage
+from dnet.ring.shard.models import ShardUnloadModelResponse
+from dnet.utils.logger import logger
+import mlx.core as mx
 
 class TopologyAdapter(ABC):
     """
@@ -60,6 +62,6 @@ class TopologyAdapter(ABC):
         pass
 
     @abstractmethod
-    async def shutdown(self):
+    async def shutdown(self) -> None:
         """Shutdown the adapter and any background tasks."""
         pass

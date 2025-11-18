@@ -3,15 +3,16 @@ ShardRuntime: owns model, KV cache, pools, windowing, weight cache, _process_act
 No ring, no gRPC, no discovery. Just: submit(ActivationIn) -> ActivationOut.
  Only knows: ingress queue in, egress queue out￼
 """
-
+import gc
 import queue
 from queue import Queue
 from typing import Optional, List, Any, Dict
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
+import mlx.core as mx
 
-from ..models import ShardLoadModelRequest
+from ..models import ShardLoadModelRequest, ShardUnloadModelResponse
 from ...data_types import ActivationMessage
 from ....utils.logger import logger
 from ....utils.model import ModelMetadata, get_model_metadata
@@ -116,10 +117,6 @@ class ShardRuntime:
     def emit_result(self, msg: ActivationMessage) -> None:
         self.activation_send_queue.put_nowait(msg)
 
-    def start(self):
-        self.running = True
-        self.compute_thread = threading.Thread(target=self._compute_worker, daemon=True)
-        self.compute_thread.start()
 
     def shutdown(self) -> None:
         # stop compute loop
@@ -257,6 +254,65 @@ class ShardRuntime:
                 "Runtime %s: failed to load API‑layer weights: %s", self.shard_id, e
             )
 
+    def unload_model_core(self) -> ShardUnloadModelResponse:
+        """
+        unload model
+        """
+        try:
+            if self.model is None:
+                logger.info("Node %s: No model to unload", self.shard_id)
+                return ShardUnloadModelResponse(
+                    success=True,
+                    message="No model loaded",
+                )
+
+            logger.info("Node %s: Unloading model", self.shard_id)
+
+            # Clear model and cache
+            self.model = None
+            self.cache = None
+            self.model_metadata = None
+            self.assigned_layers = []
+            self.model_path = None
+            self._assigned_sorted = []
+            self._assigned_set = set()
+
+            if self.policy.weight_cache:
+                try:
+                    self.policy.weight_cache.cancel_all_prefetch()
+                except Exception:
+                    pass
+                for layer_id in list(self.policy._bound_versions.keys()):
+                    try:
+                        self.policy.weight_cache.evict_layer(layer_id)
+                    except Exception:
+                        pass
+                try:
+                    self.policy.weight_cache.layer_manager.close()
+                except Exception:
+                    pass
+                self.policy.weight_cache = None
+
+            self.input_pool = None
+            self.output_pool = None
+            self.policy._bound_versions = {}
+
+            # Run garbage collection to free memory
+            gc.collect()
+            mx.clear_cache()
+            logger.info("Node %s: Model unloaded successfully", self.shard_id)
+
+            return ShardUnloadModelResponse(
+                success=True,
+                message="Model unloaded successfully",
+            )
+        except Exception as e:
+            logger.exception("Node %s: Error unloading model: %s", self.shard_id, e)
+            return ShardUnloadModelResponse(
+                success=False,
+                message=f"Error unloading model: {str(e)}",
+            )
+
     def reset_cache(self):
         if not self.model:
             logger.warning(
@@ -314,3 +370,9 @@ class ShardRuntime:
             self._kv_by_nonce[nonce] = kv
         self._kv_last_seen[nonce] = time.perf_counter()
         return kv
+
+
+    def start(self):
+        self.running = True
+        self.compute_thread = threading.Thread(target=self._compute_worker, daemon=True)
+        self.compute_thread.start()

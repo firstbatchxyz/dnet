@@ -6,6 +6,7 @@ RingAdapter: ring transport + topology glue around a topology‑agnostic runtime
 - Streaming only: no unary fallback to keep logic simple and consistent
 """
 from __future__ import annotations
+import queue
 from typing import Optional, Any
 import asyncio
 import time
@@ -186,14 +187,19 @@ class RingAdapter(TopologyAdapter):
 
     async def _egress_worker(self):
         loop = asyncio.get_running_loop()
+        q = self.runtime.activation_send_queue
+
         while self.running:
             try:
                 msg = await loop.run_in_executor(
                     self.runtime.executor,
-                    self.runtime.activation_send_queue.get(timeout=0.5)
+                    lambda: q.get(timeout=0.5),
                 )
             except asyncio.CancelledError:
                 break
+            except queue.Empty:
+                continue
+
             target = self.token_tx_q if msg.is_final else self.ring_tx_q
             await target.put(msg)
 
@@ -408,7 +414,7 @@ class RingAdapter(TopologyAdapter):
                 token_id=token_id,
                 timestamp=utc_epoch_now(),
             )
-            resp = await self.api_stub.SendToken(req)  # type: ignore[arg-type]
+            resp = await self.api_stub.SendToken(req, timeout=3.0)  # type: ignore[arg-type]
             rpc_ms = (time.perf_counter() - t_rpc) * 1000.0
 
             if not resp.success:

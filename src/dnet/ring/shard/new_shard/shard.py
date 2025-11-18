@@ -14,7 +14,7 @@ from .runtime import ShardRuntime
 from .adapters.base import TopologyAdapter
 from ....protos.dnet_ring_pb2 import ActivationRequest
 from ....utils.banner import print_startup_banner
-from ..models import ShardLoadModelResponse
+from ..models import ShardLoadModelResponse, ShardUnloadModelResponse
 
 class Shard:
     def __init__(self, shard_id, adapter: TopologyAdapter):
@@ -54,7 +54,8 @@ class Shard:
             load_time_ms=100
         )
 
-    async def unload_model(self): ...
+    async def unload_model(self) -> ShardUnloadModelResponse:
+        return self.runtime.unload_model_core()
 
     def queue_size(self) -> int:
         return self.runtime.queue_size()

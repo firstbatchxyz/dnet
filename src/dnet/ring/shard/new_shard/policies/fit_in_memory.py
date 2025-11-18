@@ -80,14 +80,14 @@ class FitInMemoryPolicy(ComputePolicy):
                     window_layers.append(layer)
 
                 to_bind = self._bind_layer_weights(window_layers, msg)
+                if to_bind is None:
+                    return
                 if to_bind:
                     self.runtime._compute_busy.set()
                     with self.runtime._mlx_lock:
                         self.runtime.model.load_weights(
                             list(to_bind.items()), strict=False
                         )
-                else:
-                    return
 
                 # compute window
                 try:

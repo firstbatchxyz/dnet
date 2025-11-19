@@ -13,6 +13,7 @@ from dnet.ring.api.new_api.model_manager import ModelManager
 from dnet.ring.api.new_api.inference import InferenceManager
 from dnet.ring.api.new_api.http_api import HTTPServer as ApiHTTPServer
 from dnet.ring.api.new_api.grpc_servicer import GrpcServer as ApiGrpcServer
+from dnet.utils.banner import print_startup_banner
 
 
 async def serve(http_port: int, grpc_port: int) -> None:
@@ -26,6 +27,7 @@ async def serve(http_port: int, grpc_port: int) -> None:
     loop.add_signal_handler(signal.SIGINT, _signal_handler)
     loop.add_signal_handler(signal.SIGTERM, _signal_handler)
 
+    print_startup_banner(tag="api")
     # Discovery
     discovery = AsyncDnetP2P("lib/dnet-p2p/lib")
     node_id = f"api-{token_hex(4)}-{gethostname()}"

@@ -21,7 +21,7 @@ class Shard:
         self.node_id = shard_id
         self.adapter = adapter
         self.runtime: ShardRuntime = adapter.runtime
-        print_startup_banner()
+        print_startup_banner(tag="shard")
 
     async def start(self, loop: asyncio.AbstractEventLoop) -> None:
         self.runtime.attach_loop(loop)

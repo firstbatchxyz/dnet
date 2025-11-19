@@ -3,13 +3,12 @@ import asyncio
 from hypercorn import Config
 import hypercorn.asyncio as aio_hypercorn
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from ....utils.model import get_model_config_json
 from distilp.profiler import profile_model
 from ....utils.logger import logger
 from ..models import (
     ChatRequestModel,
-    ChatResponseModel,
     APILoadModelRequest,
     APILoadModelResponse,
     PrepareTopologyRequest,
@@ -95,8 +94,18 @@ class HTTPServer:
             instance=self.node_id
         )
         
-    async def chat_completions(self, req: ChatRequestModel) -> ChatResponseModel:
-        return await self.inference_manager.chat_completions(req)
+    async def chat_completions(self, req: ChatRequestModel):
+        if req.stream:
+            async def stream_generator():
+                async for chunk in self.inference_manager.generate_stream(req):
+                    # Use model_dump_json with exclude_none to omit empty fields like 'message' in chunks
+                    data = chunk.model_dump_json(exclude_none=True)
+                    yield f"data: {data}\n\n"
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(stream_generator(), media_type="text/event-stream")
+        else:
+            return await self.inference_manager.chat_completions(req)
         
     async def load_model(self, req: APILoadModelRequest) -> APILoadModelResponse:
         try:

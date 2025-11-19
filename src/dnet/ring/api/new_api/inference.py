@@ -3,7 +3,7 @@ import time
 import uuid
 import mlx.core as mx
 import numpy as np
-from typing import Optional, Any, List, Dict
+from typing import Optional, Any, List
 
 from ..models import (
     ChatRequestModel, 
@@ -52,9 +52,9 @@ class InferenceManager:
         await self.adapter.connect_first_shard(first_shard_ip, first_shard_port)
         self._api_callback_addr = f"{api_ip}:{self.grpc_port}"
 
-    async def chat_completions(self, req: ChatRequestModel) -> ChatResponseModel:
+    async def generate_stream(self, req: ChatRequestModel):
         """
-        Handles chat completion request.
+        Generator for chat completion chunks.
         """
         if not self.model_manager.tokenizer:
             raise RuntimeError("Inference manager not ready (ring not connected or tokenizer not loaded)")
@@ -86,15 +86,28 @@ class InferenceManager:
         t_start = time.perf_counter()
         t_first_token: Optional[float] = None
         tokens: List[int] = []
-        token_logprobs: List[float] = []
-        top_logprobs_list: List[Dict[int, float]] = []
         
         detokenizer = tokenizer.detokenizer
         detokenizer.reset()
+        last_text_len = 0
         
         completion_reason = ChatCompletionReason.LENGTH
 
         await self.adapter.reset_cache()
+
+        # Yield initial chunk with role
+        yield ChatResponseModel(
+            id=nonce,
+            choices=[
+                ChatChoice(
+                    index=0,
+                    delta=ChatMessage(role="assistant", content=""),
+                    finish_reason=None
+                )
+            ],
+            created=int(time.time()),
+            model=req.model,
+        )
 
         y = prompt_array
         for _ in range(req.max_tokens):
@@ -112,6 +125,8 @@ class InferenceManager:
             token = int(result.token_id)
             
             # Accumulate logprobs
+            token_logprobs = []
+            top_logprobs_list = []
             if req.logprobs:
                 token_logprobs.append(result.logprob)
                 top_logprobs_list.append(result.top_logprobs)
@@ -121,6 +136,32 @@ class InferenceManager:
 
             detokenizer.add_token(token)
             tokens.append(token)
+            
+            # Get delta text
+            # mlx_lm detokenizer usually updates .text property
+            # We can also use last_segment if available, but let's rely on diff
+            full_text = detokenizer.text
+            delta_text = full_text[last_text_len:]
+            last_text_len = len(full_text)
+
+            # Yield chunk
+            yield ChatResponseModel(
+                id=nonce,
+                choices=[
+                    ChatChoice(
+                        index=0,
+                        delta=ChatMessage(role="assistant", content=delta_text),
+                        logprobs=ChatLogProbs(
+                            token_logprobs=token_logprobs,
+                            top_logprobs=top_logprobs_list,
+                            tokens=[token]
+                        ) if req.logprobs else None,
+                        finish_reason=None
+                    )
+                ],
+                created=int(time.time()),
+                model=req.model,
+            )
 
             # stopping criteria
             if token == tokenizer.eos_token_id:
@@ -129,10 +170,9 @@ class InferenceManager:
             y = mx.array([token], dtype=mx.int32)
                 
         detokenizer.finalize()
-        text = detokenizer.text
-        t_end = time.perf_counter()
-
+        
         metrics_dict = None
+        t_end = time.perf_counter()
         if getattr(req, "profile", False):
             total_s = max(t_end - t_start, 1e-9)
             gen_s = max((t_end - (t_first_token or t_start)), 1e-9)
@@ -146,25 +186,77 @@ class InferenceManager:
                 "tps_decoding": round((tokens_generated / gen_s) if tokens_generated else 0.0, 4),
             }
 
+        # Final chunk with finish reason
+        yield ChatResponseModel(
+            id=nonce,
+            choices=[
+                ChatChoice(
+                    index=0,
+                    delta=ChatMessage(role="assistant", content=""),
+                    finish_reason=completion_reason
+                )
+            ],
+            created=int(time.time()),
+            model=req.model,
+            metrics=metrics_dict,
+            usage=ChatUsage(
+                prompt_tokens=len(prompt_tokens),
+                completion_tokens=len(tokens),
+                total_tokens=len(prompt_tokens) + len(tokens),
+            ),
+        )
+
+    async def chat_completions(self, req: ChatRequestModel) -> ChatResponseModel:
+        """
+        Handles chat completion request (non-streaming).
+        """
+        full_content = ""
+        tokens = []
+        token_logprobs = []
+        top_logprobs_list = []
+        completion_reason = ChatCompletionReason.LENGTH
+        nonce = ""
+        metrics_dict = None
+        usage = None
+
+        async for chunk in self.generate_stream(req):
+            nonce = chunk.id
+            choice = chunk.choices[0]
+            if choice.delta and choice.delta.content:
+                full_content += choice.delta.content
+            
+            if choice.logprobs:
+                if choice.logprobs.token_logprobs:
+                    token_logprobs.extend(choice.logprobs.token_logprobs)
+                if choice.logprobs.top_logprobs:
+                    top_logprobs_list.extend(choice.logprobs.top_logprobs)
+                if choice.logprobs.tokens:
+                    tokens.extend(choice.logprobs.tokens)
+            
+            if choice.finish_reason:
+                completion_reason = choice.finish_reason
+            
+            if chunk.metrics:
+                metrics_dict = chunk.metrics
+            
+            if chunk.usage:
+                usage = chunk.usage
+
         return ChatResponseModel(
             id=nonce,
             choices=[
                 ChatChoice(
                     index=0,
                     finish_reason=completion_reason,
-                    message=ChatMessage(role="assistant", content=text),
+                    message=ChatMessage(role="assistant", content=full_content),
                     logprobs=ChatLogProbs(
                         token_logprobs=token_logprobs,
                         top_logprobs=top_logprobs_list,
                         tokens=tokens,
-                    ),
+                    ) if req.logprobs else None,
                 )
             ],
-            usage=ChatUsage(
-                prompt_tokens=len(prompt_tokens),
-                completion_tokens=len(tokens),
-                total_tokens=len(prompt_tokens) + len(tokens),
-            ),
+            usage=usage,
             created=int(time.time()),
             model=req.model,
             metrics=metrics_dict,

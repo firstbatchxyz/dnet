@@ -1,5 +1,5 @@
 """Startup banner utilities."""
-
+from typing import Optional
 from pathlib import Path
 from .logger import logger
 
@@ -29,7 +29,7 @@ def _find_art_file() -> Path | None:
     return None
 
 
-def print_startup_banner() -> None:
+def print_startup_banner(tag: Optional[str] = None) -> None:
     """Print the ASCII art banner at startup if available."""
     art_path = _find_art_file()
     if art_path is None:
@@ -40,4 +40,6 @@ def print_startup_banner() -> None:
         return
     if art.strip():
         # Prepend a newline so the art starts on a fresh line in logs
+        if tag:
+            art += f"\n[=== {tag.upper()} ===]\n"
         logger.info("\n%s", art)

@@ -140,8 +140,9 @@ class ChatChoice(BaseModel):
     """A single choice in chat completion response."""
 
     index: int
-    message: ChatMessage
-    logprobs: ChatLogProbs
+    message: Optional[ChatMessage] = None
+    delta: Optional[ChatMessage] = None
+    logprobs: Optional[ChatLogProbs] = None
     finish_reason: Optional[ChatCompletionReason] = None
 
 

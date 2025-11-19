@@ -38,8 +38,9 @@ dependencies = [
 ]
 
 [project.scripts]
-dnet-api = "cli.api:main"
+dnet-api = "cli.cli_new.api:main"
 dnet-shard = "cli.cli_new.shard:main"
+dnet-api-old = "cli.api:main"
 dnet-shard-old = "cli.shard:main"
 
 [dependency-groups]

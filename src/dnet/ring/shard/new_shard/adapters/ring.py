@@ -28,7 +28,7 @@ from .....protos.dnet_ring_pb2 import ActivationRequest
 from .....protos.dnet_ring_pb2_grpc import DnetRingServiceStub
 from ....data_types import ActivationMessage
 from .....utils.logger import logger
-from ..stream_manager import StreamManager
+from dnet.core.stream_manager import StreamManager
 from ..config import TransportConfig
 from .....protos import dnet_ring_pb2 as pb2
 from ..codec import ActivationCodec
@@ -228,7 +228,7 @@ class RingAdapter(TopologyAdapter):
             logger.error("Streaming disabled or next node not connected; cannot send")
             return
         try:
-            data, _ = self.codec.serialize(msg, self.transport_config)
+            data = self.codec.serialize(msg, self.transport_config)
         except Exception as e:
             logger.error("Serialization failed for nonce %s: %s", msg.nonce, e)
             return
@@ -262,7 +262,7 @@ class RingAdapter(TopologyAdapter):
         Prefetch / offload logic lives in the compute policy; this is
         purely transport: pick an address and SendToken over gRPC.
         """
-        # 1) Pick the callback address
+        # Pick the callback address
         cb = msg.callback_url or ""
         addr: Optional[str]
 
@@ -288,7 +288,6 @@ class RingAdapter(TopologyAdapter):
             )
             return
 
-        # 2) Ensure API gRPC channel + stub
         try:
             if (self.api_channel is None) or (addr != self.api_address):
                 # Close old channel if any
@@ -314,7 +313,7 @@ class RingAdapter(TopologyAdapter):
             )
             return
 
-        # 3) Send TokenRequest
+        # send token
         t_rpc = time.perf_counter()
         try:
             token_id = int(getattr(msg, "token_id", -1))

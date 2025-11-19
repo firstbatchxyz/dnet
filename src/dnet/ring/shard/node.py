@@ -36,8 +36,7 @@ from .models import (
     ShardUnloadModelResponse,
 )
 
-from ..model.base import BaseRingModel
-
+from dnet.core.models import BaseRingModel, get_ring_model
 from ...compression import decompress_tensor_from_protobuf_data
 from ...protos import dnet_ring_pb2
 from ...protos.shard_api_comm_pb2_grpc import ShardApiServiceStub
@@ -58,7 +57,6 @@ from ...utils.serialization import dtype_map, mlx_dtype_map
 from dnet.core.observability import load_settings, make_profiler
 from dnet.core.types.messages import ActivationMessage
 from dnet.core.memory.memory_pool import LayerAwareMemoryPool
-from ..model import get_ring_model
 from .compute import ComputeMixin
 from .prefetch import PrefetchMixin
 from .comms import CommsMixin

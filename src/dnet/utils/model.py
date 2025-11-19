@@ -20,7 +20,7 @@ from mlx_lm.models import cache
 from mlx_lm.models.cache import RotatingKVCache
 
 from .serialization import safetensor_dtype_map
-from ..ring.model.base import BaseRingModel
+from dnet.core.models.base import BaseRingModel
 from .logger import logger
 
 # REGEX associated with LLM

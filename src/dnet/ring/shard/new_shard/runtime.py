@@ -17,12 +17,11 @@ from dnet.core.types.messages import ActivationMessage
 from ....utils.logger import logger
 from ....utils.model import ModelMetadata, get_model_metadata
 from ....utils.serialization import mlx_dtype_map
-from ...model.base import BaseRingModel as BaseShardModel
+from dnet.core.models import BaseRingModel as BaseShardModel, get_ring_model
 import asyncio
 from .config import ComputeConfig, TransportConfig, TopologyConfig
 from dnet.core.memory.memory_pool import LayerAwareMemoryPool
 from .policies import ComputePolicy, make_policy, plan_policy, PolicyPlan
-from ...model import get_ring_model
 from ....utils.model import (
     make_cache,
     load_embeddings,

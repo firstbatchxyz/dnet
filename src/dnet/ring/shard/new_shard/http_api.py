@@ -13,7 +13,7 @@ from dnet_p2p import (
     ThunderboltConnection,
 )
 import time
-from ..models import (
+from .models import (
     HealthResponse,
     MeasureLatencyRequest,
     MeasureLatencyResponse,

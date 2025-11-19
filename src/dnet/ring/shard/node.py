@@ -55,14 +55,14 @@ from .config import ShardConfig
 from ...utils.model import ModelMetadata, get_model_metadata
 from ...utils.time import utc_epoch_now
 from ...utils.serialization import dtype_map, mlx_dtype_map
-from ..observability import load_settings, make_profiler
-from ..data_types import ActivationMessage
-from ..memory_pool import LayerAwareMemoryPool
+from dnet.core.observability import load_settings, make_profiler
+from dnet.core.types.messages import ActivationMessage
+from dnet.core.memory.memory_pool import LayerAwareMemoryPool
 from ..model import get_ring_model
 from .compute import ComputeMixin
 from .prefetch import PrefetchMixin
 from .comms import CommsMixin
-from ..weight_cache import WeightCache
+from dnet.core.memory.weight_cache import WeightCache
 
 
 class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):

@@ -12,15 +12,15 @@ import threading
 import time
 import mlx.core as mx
 
-from ..models import ShardLoadModelRequest, ShardUnloadModelResponse
-from ...data_types import ActivationMessage
+from .models import ShardLoadModelRequest, ShardUnloadModelResponse
+from dnet.core.types.messages import ActivationMessage
 from ....utils.logger import logger
 from ....utils.model import ModelMetadata, get_model_metadata
 from ....utils.serialization import mlx_dtype_map
 from ...model.base import BaseRingModel as BaseShardModel
 import asyncio
 from .config import ComputeConfig, TransportConfig, TopologyConfig
-from ...memory_pool import LayerAwareMemoryPool
+from dnet.core.memory.memory_pool import LayerAwareMemoryPool
 from .policies import ComputePolicy, make_policy, plan_policy, PolicyPlan
 from ...model import get_ring_model
 from ....utils.model import (

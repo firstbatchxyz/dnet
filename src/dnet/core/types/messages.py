@@ -1,10 +1,15 @@
+"""Core message DTOs.
+"""
+
+from __future__ import annotations
+
 from dataclasses import dataclass
 from enum import Enum
 from typing import NamedTuple, Tuple, Optional
 
 import mlx.core as mx
 
-from ..protos.dnet_ring_pb2 import Activation, ActivationRequest
+from dnet.protos.dnet_ring_pb2 import Activation, ActivationRequest
 
 
 # Internal dataclass for easier handling
@@ -78,3 +83,7 @@ class PoolStatus(str, Enum):
 class StopCondition(NamedTuple):
     stop_met: bool
     trim_length: int
+
+
+__all__ = ["ActivationMessage", "WeightRequest", "PoolStatus", "StopCondition"]
+

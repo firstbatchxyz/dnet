@@ -6,10 +6,7 @@ Defines “ingress” and “egress” hooks but no concrete protocol.
 from abc import ABC, abstractmethod
 import asyncio
 from dnet.protos.dnet_ring_pb2 import ActivationRequest
-from dnet.ring.data_types import ActivationMessage
-from dnet.ring.shard.models import ShardUnloadModelResponse
-from dnet.utils.logger import logger
-import mlx.core as mx
+from dnet.core.types.messages import ActivationMessage
 
 class TopologyAdapter(ABC):
     """

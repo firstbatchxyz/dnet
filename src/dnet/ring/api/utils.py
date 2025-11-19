@@ -12,7 +12,7 @@ from dnet.protos import dnet_ring_pb2
 from dnet.protos.dnet_ring_pb2_grpc import DnetRingServiceStub
 from dnet.utils.logger import logger
 from dnet.utils.time import utc_epoch_now
-from dnet.ring.common import LayerAssignment
+from dnet.core.types.topology import LayerAssignment
 
 
 from .models import ChatParams

@@ -5,9 +5,8 @@ from mlx_lm.tokenizer_utils import load_tokenizer
 from dnet_p2p import DnetDeviceProperties
 from ....utils.logger import logger
 from ....utils.model import resolve_tokenizer_dir
-from ...common import TopologyInfo
-from ..models import (
-    APILoadModelRequest, 
+from dnet.core.types.topology import TopologyInfo
+from .models import (
     APILoadModelResponse, 
     ShardLoadStatus,
     UnloadModelResponse,

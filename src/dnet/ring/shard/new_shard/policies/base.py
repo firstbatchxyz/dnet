@@ -1,8 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import List, Optional, Any, Dict
-from dnet.ring.weight_cache import WeightCache
+from dnet.core.memory.weight_cache import WeightCache
 from dnet.ring.shard.models import ShardLoadModelRequest
-from dnet.ring.data_types import ActivationMessage
+from dnet.core.types.messages import ActivationMessage
 from dnet.utils.logger import logger
 import mlx.core as mx
 

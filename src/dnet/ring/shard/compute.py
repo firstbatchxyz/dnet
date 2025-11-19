@@ -10,7 +10,7 @@ import numpy as np
 from ...utils.logger import logger
 from ...utils.serialization import mlx_dtype_map
 from ...utils.time import utc_epoch_now
-from ..data_types import ActivationMessage
+from dnet.core.types.messages import ActivationMessage
 from .attrib import RingShardNodeAttributes
 
 

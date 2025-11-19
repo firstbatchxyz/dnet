@@ -33,9 +33,17 @@ async def serve(http_port: int, grpc_port: int) -> None:
     await discovery.async_start()
 
     # Components
-    cluster_manager = ClusterManager(discovery)
+    from dnet.ring.api.new_api.strategies.ring import RingStrategy
+    strategy = RingStrategy()
+    
+    cluster_manager = ClusterManager(discovery, solver=strategy.solver)
     model_manager = ModelManager()
-    inference_manager = InferenceManager(cluster_manager, model_manager, grpc_port)
+    inference_manager = InferenceManager(
+        cluster_manager, 
+        model_manager, 
+        grpc_port, 
+        adapter=strategy.adapter
+    )
 
     # Servers
     grpc_server = ApiGrpcServer(grpc_port=grpc_port, inference_manager=inference_manager)

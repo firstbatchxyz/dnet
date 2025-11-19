@@ -10,7 +10,7 @@ import queue
 from typing import Optional, Any
 import asyncio
 import time
-from dnet.ring.shard.models import ShardLoadModelRequest
+from ..models import ShardLoadModelRequest
 from dnet_p2p import (
     AsyncDnetP2P,
     DnetDeviceProperties,
@@ -26,7 +26,7 @@ from .base import TopologyAdapter
 from ..runtime import ShardRuntime
 from .....protos.dnet_ring_pb2 import ActivationRequest
 from .....protos.dnet_ring_pb2_grpc import DnetRingServiceStub
-from ....data_types import ActivationMessage
+from dnet.core.types.messages import ActivationMessage
 from .....utils.logger import logger
 from dnet.core.stream_manager import StreamManager
 from ..config import TransportConfig

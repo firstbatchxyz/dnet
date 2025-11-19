@@ -8,13 +8,13 @@ from queue import Queue
 from concurrent.futures import ThreadPoolExecutor
 from dnet_p2p import DnetDeviceProperties, AsyncDnetP2P
 
-from dnet.ring.data_types import ActivationMessage
-from dnet.ring.memory_pool import LayerAwareMemoryPool
+from dnet.core.types.messages import ActivationMessage
+from dnet.core.memory.memory_pool import LayerAwareMemoryPool
 from dnet.ring.model.base import BaseRingModel
 from dnet.ring.shard.config import ShardConfig
 from dnet.utils.model import ModelMetadata
-from dnet.ring.weight_cache import WeightCache
-from dnet.ring.observability import Profiler
+from dnet.core.memory.weight_cache import WeightCache
+from dnet.core.observability import Profiler
 
 
 class RingShardNodeAttributes:

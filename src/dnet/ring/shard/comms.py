@@ -22,7 +22,7 @@ from ...utils.logger import logger
 from ...utils.time import utc_epoch_now
 from ...utils.serialization import dtype_map, tensor_to_bytes
 from ...protos import shard_api_comm_pb2, shard_api_comm_pb2_grpc, dnet_ring_pb2
-from ..data_types import ActivationMessage
+from dnet.core.types.messages import ActivationMessage
 
 from .attrib import RingShardNodeAttributes
 

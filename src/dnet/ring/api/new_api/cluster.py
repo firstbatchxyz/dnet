@@ -3,13 +3,8 @@ import asyncio
 from typing import Dict, Optional, List, Any, Tuple
 from dnet_p2p import AsyncDnetP2P, DnetDeviceProperties, ThunderboltConnection, discover_all_thunderbolt_connections
 from distilp.common import DeviceProfile
-from distilp.solver import halda_solve, HALDAResult
-from ..utils import (
-    optimize_device_ordering,
-    compute_layer_assignments,
-    postprocess_single_round,
-)
-from ...common import TopologyInfo
+from .strategies.base import TopologySolver
+from dnet.core.types.topology import TopologyInfo
 from ....utils.logger import logger
 from ....utils.latency import LatencyResults, calculate_median_latency_seconds
 from ...shard.models import (
@@ -20,8 +15,13 @@ from ...shard.models import (
 )
 
 class ClusterManager:
-    def __init__(self, discovery: AsyncDnetP2P):
+    def __init__(
+        self, 
+        discovery: AsyncDnetP2P,
+        solver: TopologySolver
+    ):
         self.discovery = discovery
+        self.solver = solver
         self.current_topology: Optional[TopologyInfo] = None
         self.device_profiles: Dict[str, DeviceProfile] = {}
         self.shards: Dict[str, DnetDeviceProperties] = {}
@@ -243,63 +243,17 @@ class ClusterManager:
         num_layers: int,
         kv_bits: str,
     ) -> TopologyInfo:
-        """Runs HALDA solver and computes layer assignments."""
+        """Delegates to the configured solver."""
         
-        # 1. Optimize ordering
-        ordered_instances = optimize_device_ordering(profiles, self.thunderbolts)
-        
-        # 2. Prepare profiles for solver
-        sorted_shard_profiles = [
-            profiles[name] for name in ordered_instances if name in profiles
-        ]
-        if not sorted_shard_profiles:
-            raise ValueError("No valid shard profiles found")
-
-        # mark the first device as head, others as non-head
-        for i, profile in enumerate(sorted_shard_profiles):
-            profile.is_head = i == 0
-
-        logger.info("Running solver with %d shard profiles", len(sorted_shard_profiles))
-
-        # 3. Run solver
-        solution: HALDAResult = halda_solve(
-            devs=sorted_shard_profiles,
-            model=model_profile,
-            mip_gap=1e-4,
-            plot=False,
-            kv_bits=kv_bits,
-        )
-        
-        logger.info(
-            "Solver completed: k=%d, objective=%d", solution.k, solution.obj_value
-        )
-
-        # 4. Post-process solution
-        ordered_instances, solution = postprocess_single_round(
-            ordered_instances, solution
-        )
-
-        # 5. Compute assignments
-        layer_assignments = compute_layer_assignments(
-            ordered_instances,
-            self.shards,
-            solution.w,
-            solution.n,
-            solution.k,
-        )
-
-        shards_list = [self.shards[name] for name in ordered_instances]
-        
-        # 6. Create TopologyInfo
-        self.current_topology = TopologyInfo(
-            model=model_name,
-            kv_bits=kv_bits,
+        self.current_topology = await self.solver.solve(
+            profiles=profiles,
+            model_profile=model_profile,
+            model_name=model_name,
             num_layers=num_layers,
-            devices=shards_list,
-            assignments=layer_assignments,
-            solution=solution,
+            kv_bits=kv_bits,
+            shards=self.shards,
+            thunderbolts=self.thunderbolts
         )
-        
         return self.current_topology
 
     def get_head_node(self) -> Optional[DnetDeviceProperties]:

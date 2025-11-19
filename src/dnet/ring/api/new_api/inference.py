@@ -16,7 +16,7 @@ from ..models import (
 )
 from .cluster import ClusterManager
 from .model_manager import ModelManager
-from .adapters.ring import ApiRingAdapter
+from .strategies.base import ApiAdapterBase
 
 async def arange(count: int):
     """Async range generator."""
@@ -34,11 +34,19 @@ async def azip(*async_iterables):
             break
 
 class InferenceManager:
-    def __init__(self, cluster_manager: ClusterManager, model_manager: ModelManager, grpc_port: int):
+    def __init__(
+        self, 
+        cluster_manager: ClusterManager, 
+        model_manager: ModelManager,
+        grpc_port: int,
+        adapter: ApiAdapterBase
+    ):
         self.cluster_manager = cluster_manager
         self.model_manager = model_manager
         self.grpc_port = grpc_port
-        self.adapter = ApiRingAdapter()
+        self.adapter = adapter
+        
+        self._api_callback_addr: str = ""
 
     async def connect_to_ring(self, first_shard_ip: str, first_shard_port: int, api_ip: str):
         await self.adapter.connect_first_shard(first_shard_ip, first_shard_port)

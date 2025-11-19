@@ -9,8 +9,8 @@ from typing import Dict, List, Optional, Tuple
 
 import mlx.core as mx
 
-from ..utils.logger import logger
-from .data_types import PoolStatus
+from dnet.utils.logger import logger
+from dnet.core.types.messages import PoolStatus
 
 
 @dataclass

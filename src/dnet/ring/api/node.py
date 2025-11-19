@@ -25,7 +25,7 @@ from distilp.solver import halda_solve, HALDAResult
 from distilp.profiler import profile_model
 from distilp.common import DeviceProfile, ModelProfile
 
-from ..observability import load_settings
+from dnet.core.observability import load_settings
 
 from ...protos.dnet_ring_pb2_grpc import DnetRingServiceStub
 from ...protos.shard_api_comm_pb2_grpc import (
@@ -73,9 +73,9 @@ from ..shard.models import (
     ShardLoadModelResponse,
     ShardProfileResponse,
 )
-from ..data_types import StopCondition
+from dnet.core.types.messages import StopCondition
+from dnet.core.types.topology import TopologyInfo, LayerAssignment
 from .servicer import ShardApiServicer
-from ..common import TopologyInfo, LayerAssignment
 
 
 async def arange(count: int):

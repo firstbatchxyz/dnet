@@ -7,9 +7,9 @@ from concurrent.futures import Future
 
 import mlx.core as mx
 
-from ..utils.layer_manager import LayerManager
-from ..utils.model import ModelMetadata
-from ..utils.logger import logger
+from dnet.utils.layer_manager import LayerManager
+from dnet.utils.model import ModelMetadata
+from dnet.utils.logger import logger
 
 
 class WeightCache:

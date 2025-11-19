@@ -16,7 +16,7 @@ from ..models import (
     PrepareTopologyManualRequest,
     UnloadModelResponse
 )
-from ...common import TopologyInfo, LayerAssignment
+from dnet.core.types.topology import TopologyInfo, LayerAssignment
 from ...shard.models import HealthResponse
 from .cluster import ClusterManager
 from .inference import InferenceManager
@@ -160,6 +160,7 @@ class HTTPServer:
             )
 
     async def unload_model(self) -> UnloadModelResponse:
+        await self.cluster_manager.scan_devices()
         shards = self.cluster_manager.shards
         return await self.model_manager.unload_model(shards)
 

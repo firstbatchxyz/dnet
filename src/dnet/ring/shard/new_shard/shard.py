@@ -14,7 +14,7 @@ from .runtime import ShardRuntime
 from .adapters.base import TopologyAdapter
 from ....protos.dnet_ring_pb2 import ActivationRequest
 from ....utils.banner import print_startup_banner
-from ..models import ShardLoadModelResponse, ShardUnloadModelResponse
+from .models import ShardLoadModelResponse, ShardUnloadModelResponse
 
 class Shard:
     def __init__(self, shard_id, adapter: TopologyAdapter):

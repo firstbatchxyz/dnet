@@ -1,5 +1,5 @@
-from dnet.ring.weight_cache import WeightCache
-from dnet.ring.shard.models import ShardLoadModelRequest
+from dnet.core.memory.weight_cache import WeightCache
+from ..models import ShardLoadModelRequest
 from dnet.utils.logger import logger
 from .base import register_policy, ComputePolicy
 from dnet.utils.repack import ensure_repacked_for_layers

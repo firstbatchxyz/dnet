@@ -1,19 +1,98 @@
 from __future__ import annotations
-
 import asyncio
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, List
 from grpc import aio as aio_grpc
-
 import numpy as np
+
+from dnet_p2p import DnetDeviceProperties, ThunderboltConnection
+from distilp.common import DeviceProfile
+from distilp.solver import halda_solve, HALDAResult
 
 from .....utils.logger import logger
 from .....core.stream_manager import StreamManager
 from dnet.protos import dnet_ring_pb2 as pb2
 from dnet.protos.dnet_ring_pb2_grpc import DnetRingServiceStub
-from .base import ApiAdapterBase
+from dnet.core.types.topology import TopologyInfo
+from ...utils import (
+    optimize_device_ordering,
+    compute_layer_assignments,
+    postprocess_single_round,
+)
+from .base import Strategy, TopologySolver, ApiAdapterBase
 
 
-class ApiRingAdapter(ApiAdapterBase):
+class RingTopologySolver(TopologySolver):
+    """
+    Topology solver using the HALDA MILP algorithm for ring topology.
+    """
+
+    async def solve(
+        self,
+        profiles: Dict[str, DeviceProfile],
+        model_profile: Any,
+        model_name: str,
+        num_layers: int,
+        kv_bits: str,
+        shards: Dict[str, DnetDeviceProperties],
+        thunderbolts: Dict[str, Dict[str, ThunderboltConnection]],
+    ) -> TopologyInfo:
+        # 1. Optimize ordering (specific to ring topology)
+        ordered_instances = optimize_device_ordering(profiles, thunderbolts)
+        
+        # 2. Prepare profiles for solver
+        sorted_shard_profiles = [
+            profiles[name] for name in ordered_instances if name in profiles
+        ]
+        if not sorted_shard_profiles:
+            raise ValueError("No valid shard profiles found")
+
+        # mark the first device as head, others as non-head
+        for i, profile in enumerate(sorted_shard_profiles):
+            profile.is_head = i == 0
+
+        logger.info("Running solver with %d shard profiles", len(sorted_shard_profiles))
+
+        # 3. Run solver
+        solution: HALDAResult = halda_solve(
+            devs=sorted_shard_profiles,
+            model=model_profile,
+            mip_gap=1e-4,
+            plot=False,
+            kv_bits=kv_bits,
+        )
+        
+        logger.info(
+            "Solver completed: k=%d, objective=%d", solution.k, solution.obj_value
+        )
+
+        # 4. Post-process solution
+        ordered_instances, solution = postprocess_single_round(
+            ordered_instances, solution
+        )
+
+        # 5. Compute assignments
+        layer_assignments = compute_layer_assignments(
+            ordered_instances,
+            shards,
+            solution.w,
+            solution.n,
+            solution.k,
+        )
+
+        shards_list = [shards[name] for name in ordered_instances]
+        
+        # 6. Create TopologyInfo
+        return TopologyInfo(
+            model=model_name,
+            kv_bits=kv_bits,
+            num_layers=num_layers,
+            devices=shards_list,
+            assignments=layer_assignments,
+            solution=solution,
+        )
+
+
+class RingApiAdapter(ApiAdapterBase):
     def __init__(self) -> None:
         super().__init__()
         self.channel: Optional[aio_grpc.Channel] = None
@@ -107,3 +186,16 @@ class ApiRingAdapter(ApiAdapterBase):
         if fut and not fut.done():
             fut.set_result(int(token_id))
 
+
+class RingStrategy(Strategy):
+    def __init__(self):
+        self._solver = RingTopologySolver()
+        self._adapter = RingApiAdapter()
+
+    @property
+    def solver(self) -> TopologySolver:
+        return self._solver
+
+    @property
+    def adapter(self) -> ApiAdapterBase:
+        return self._adapter

@@ -1,3 +1,10 @@
+"""Core topology DTOs.
+
+Re-export existing ring topology models to provide a strategy-agnostic path.
+"""
+
+from __future__ import annotations
+
 from typing import List, Optional, Literal
 from dnet_p2p import DnetDeviceProperties
 from pydantic import BaseModel, Field
@@ -39,3 +46,7 @@ class TopologyInfo(BaseModel):
     solution: Optional[HALDAResult] = Field(
         default=None, description="Solver result details (None for manual topology)"
     )
+
+
+__all__ = ["TopologyInfo", "LayerAssignment"]
+

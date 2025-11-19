@@ -1,11 +1,10 @@
-# dnet/core/codec.py (New file or suitable location)
 import numpy as np
 import mlx.core as mx
 import time
 from typing import Optional, Tuple
 from dnet.utils.serialization import dtype_map, mlx_dtype_map, tensor_to_bytes
 from dnet.compression import decompress_tensor_from_protobuf_data
-from dnet.ring.data_types import ActivationMessage
+from dnet.core.types.messages import ActivationMessage
 from dnet.protos.dnet_ring_pb2 import ActivationRequest
 from dnet.utils.logger import logger
 

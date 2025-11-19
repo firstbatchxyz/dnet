@@ -34,7 +34,7 @@ async def serve(http_port: int, grpc_port: int) -> None:
 
     # Components
     from dnet.ring.api.new_api.strategies.ring import RingStrategy
-    strategy = RingStrategy()
+    strategy = RingStrategy() # ContextParallelStrategy()
     
     cluster_manager = ClusterManager(discovery, solver=strategy.solver)
     model_manager = ModelManager()

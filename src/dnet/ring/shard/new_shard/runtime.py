@@ -225,7 +225,7 @@ class ShardRuntime:
             kv_group=self.compute_config.kv_cache.group_size,
         )
 
-        # Load API‑side weights (embed/norm/head) if needed
+        # Load (embed/norm/head) if needed
         try:
             has_start = 0 in self.assigned_layers
             has_end = (self.model_metadata.num_layers - 1) in self.assigned_layers

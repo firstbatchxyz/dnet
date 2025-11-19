@@ -1,7 +1,7 @@
 from .base import make_policy, ComputePolicy
-from . import fit_in_memory, offload_memory
+from . import fit_in_memory, offload
 from .fit_in_memory import FitInMemoryPolicy
-from .offload_memory import OffloadingPolicy
+from .offload import OffloadPolicy
 from ..config import TopologyConfig
 from dataclasses import dataclass
 from typing import Type
@@ -46,7 +46,7 @@ def plan_policy(
     if mode == "fit":
         policy_cls = FitInMemoryPolicy
     else:
-        policy_cls = OffloadingPolicy
+        policy_cls = OffloadPolicy
 
     return PolicyPlan(
         mode=mode,

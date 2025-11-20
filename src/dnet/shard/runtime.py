@@ -229,9 +229,7 @@ class ShardRuntime:
         try:
             has_start = 0 in self.assigned_layers
             has_end = (self.model_metadata.num_layers - 1) in self.assigned_layers
-            tied = bool(
-                getattr(self.model.config, "tie_word_embeddings", False)
-            )
+            tied = bool(getattr(self.model.config, "tie_word_embeddings", False))
             loaded_cnt = 0
             if has_start or (has_end and tied):
                 loaded_cnt += load_embeddings(self.model_metadata, self.model)

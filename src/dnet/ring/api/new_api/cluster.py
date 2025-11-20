@@ -8,7 +8,7 @@ from dnet_p2p import (
     discover_all_thunderbolt_connections,
 )
 from distilp.common import DeviceProfile
-from .strategies.base import TopologySolver
+from dnet.core.interfaces.topology import TopologySolver
 from dnet.core.types.topology import TopologyInfo
 from ....utils.logger import logger
 from ....utils.latency import LatencyResults, calculate_median_latency_seconds

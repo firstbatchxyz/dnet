@@ -17,6 +17,7 @@ from ..models import (
 from .cluster import ClusterManager
 from .model_manager import ModelManager
 from .strategies.base import ApiAdapterBase
+from dnet.core.codec.tensor import to_bytes
 
 
 async def arange(count: int):
@@ -128,11 +129,15 @@ class InferenceManager:
         y = prompt_array
         for _ in range(req.max_tokens):
             tok_np = (
-                y.astype(mx.int32).tolist()
-                if hasattr(y, "tolist")
-                else list(map(int, y))
+                y.astype(mx.int32)
+                if hasattr(y, "astype")
+                else np.array(list(map(int, y)), dtype=np.int32)
             )
-            tok_bytes = np.array(tok_np, dtype=np.int32).tobytes(order="C")
+            tok_bytes = to_bytes(
+                tok_np,
+                wire_dtype_str="int32",
+                wire_mx_dtype=mx.int32,
+            )
 
             await self.adapter.send_tokens(
                 nonce,

@@ -1,16 +1,6 @@
-from typing import Dict, Any
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from dnet_p2p import DnetDeviceProperties, ThunderboltConnection
-from distilp.common import DeviceProfile
-from dnet.core.types.topology import TopologyInfo
-
-
-@dataclass
-class TokenResult:
-    token_id: int
-    logprob: float = 0.0
-    top_logprobs: Dict[int, float] = field(default_factory=dict)
+from dnet.core.types.messages import TokenResult
+from dnet.core.interfaces.topology import TopologySolver
 
 
 class ApiAdapterBase(ABC):
@@ -46,26 +36,6 @@ class ApiAdapterBase(ABC):
 
     @abstractmethod
     def resolve_token(self, nonce: str, result: TokenResult) -> None: ...
-
-
-class TopologySolver(ABC):
-    """Abstract base class for topology solvers."""
-
-    @abstractmethod
-    async def solve(
-        self,
-        profiles: Dict[str, DeviceProfile],
-        model_profile: Any,  # ModelProfile
-        model_name: str,
-        num_layers: int,
-        kv_bits: str,
-        shards: Dict[str, DnetDeviceProperties],
-        thunderbolts: Dict[str, Dict[str, ThunderboltConnection]],
-    ) -> TopologyInfo:
-        """
-        Computes the topology (layer assignments) for the given cluster and model.
-        """
-        pass
 
 
 class Strategy(ABC):

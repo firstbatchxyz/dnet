@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import NamedTuple, Tuple, Optional
 
@@ -94,4 +94,17 @@ class StopCondition(NamedTuple):
     trim_length: int
 
 
-__all__ = ["ActivationMessage", "WeightRequest", "PoolStatus", "StopCondition"]
+@dataclass
+class TokenResult:
+    token_id: int
+    logprob: float = 0.0
+    top_logprobs: dict[int, float] = field(default_factory=dict)
+
+
+__all__ = [
+    "ActivationMessage",
+    "WeightRequest",
+    "PoolStatus",
+    "StopCondition",
+    "TokenResult",
+]

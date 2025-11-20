@@ -19,7 +19,9 @@ from ...utils import (
     compute_layer_assignments,
     postprocess_single_round,
 )
-from .base import Strategy, TopologySolver, ApiAdapterBase, TokenResult
+from .base import Strategy, ApiAdapterBase
+from dnet.core.types.messages import TokenResult
+from dnet.core.interfaces.topology import TopologySolver
 
 
 class RingTopologySolver(TopologySolver):

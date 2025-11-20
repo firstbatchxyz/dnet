@@ -84,6 +84,19 @@ class OffloadPolicy(ComputePolicy):
             self._mode, self.window_size, self._resident_windows
         )
 
+    def _prepare_window_blocking(self, window_layers: list[int]) -> None:
+        """Synchronously materialize the given window's weights to device memory.
+
+        This runs in the thread pool to avoid blocking the event loop.
+        """
+        try:
+            if not self.weight_cache:
+                return
+            for lid in window_layers:
+                _ = self.weight_cache.get_weight(lid, inc_ref=False)
+        finally:
+            pass
+
     def process(self, msg: ActivationMessage) -> None:
         if (
             not self.runtime.model
@@ -128,7 +141,6 @@ class OffloadPolicy(ComputePolicy):
             current_layer = msg.layer_id + 1
             
             while True:
-                start_time = time.perf_counter()
                 did_early_swap = False
 
                 # build contiguous window inside our shard
@@ -160,7 +172,6 @@ class OffloadPolicy(ComputePolicy):
                     and window_layers
                 ):
                     try:
-                        resident = []
                         try:
                             resident = self.weight_cache.get_resident_layers()
                         except Exception:
@@ -176,30 +187,31 @@ class OffloadPolicy(ComputePolicy):
                 # Bind weights
                 to_bind = self._bind_layer_weights(window_layers, msg)
                 if to_bind is None:
-                    return
-                
+                    return                
                 if to_bind:
                     self.runtime._compute_busy.set()
-                    with self.runtime._mlx_lock:
-                        self.runtime.model.load_weights(
-                            list(to_bind.items()), strict=False
-                        )
+                    try:
+                        with self.runtime._mlx_lock:
+                            self.runtime.model.load_weights(
+                                list(to_bind.items()), strict=False
+                            )
+                    finally:
+                        self.runtime._compute_busy.clear()
 
                 # compute window
                 try:
                     self.runtime._compute_busy.set()
-                except Exception:
-                    pass
+                    for lyr in window_layers:
+                        with self.runtime._mlx_lock:
+                            x = self.runtime.model.apply_single_layer(lyr, x, cache=kv)
+                            try:
+                                if str(x.dtype) != str(self.runtime._wire_mx_dtype):
+                                    x = x.astype(self.runtime._wire_mx_dtype)
+                            except Exception:
+                                pass
+                finally:
+                    self.runtime._compute_busy.clear()
                 
-                for lyr in window_layers:
-                    with self.runtime._mlx_lock:
-                        x = self.runtime.model.apply_single_layer(lyr, x, cache=kv)
-                        try:
-                            if str(x.dtype) != str(self.runtime._wire_mx_dtype):
-                                x = x.astype(self.runtime._wire_mx_dtype)
-                        except Exception:
-                            pass
-
                 last_layer = window_layers[-1]
                 try:
                     mx.eval(x)
@@ -216,7 +228,7 @@ class OffloadPolicy(ComputePolicy):
                             if did_early_swap:
                                 pass
                             elif not self._recent_windows:
-                                self._recent_windows.append(list(window_layers))
+                                 self._recent_windows.append(list(window_layers))
                             else:
                                 prev = self._recent_windows.pop(0)
                                 self._delta_swap_eviction(window_layers, prev)
@@ -358,6 +370,19 @@ class OffloadPolicy(ComputePolicy):
 
                 self.runtime.emit_result(output_msg)
                 self.runtime.input_pool.release(msg.pool_id)
+                
+                # Schedule prefetch for next local window if in offload mode
+                if self._mode == "offload":
+                    next_window = self._next_local_layers(
+                        self.runtime._assigned_sorted, last_layer, self.window_size
+                    )
+                    if next_window:
+                        loop = asyncio.get_running_loop()
+                        fut = loop.run_in_executor(
+                            self.runtime.executor, self._prepare_window_blocking, next_window
+                        )
+                        self._prepared_by_nonce[msg.nonce] = (next_window, fut)
+                
                 return
 
         except Exception as e:

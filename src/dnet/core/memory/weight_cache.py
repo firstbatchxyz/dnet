@@ -41,7 +41,7 @@ class WeightCache:
             )
         else:
             self.max_weights = len(self.assigned_layers)
-        self.cache = {}  # layer_id -> (data, access_time)
+        self.cache = {}  # TODO: find the exact type
         self.reference_counts: Dict[int, int] = {}  # layer_id -> count
         self.layer_manager = LayerManager(
             model_metadata,
@@ -81,7 +81,7 @@ class WeightCache:
                     # Evict under lock, then proceed to load
                     self._evict_lru()
                 # Install a new future marker so others wait
-                fut = Future()
+                fut: Future = Future()
                 self.loading_futures[layer_id] = fut
                 inflight = fut
                 creator = True
@@ -146,7 +146,7 @@ class WeightCache:
             logger.info("[PROFILE][WAIT-WEIGHT] layer=%s ms=%.2f", layer_id, wait_ms)
             # Return from cache (now populated) and update ref/LRU
             with self.lock:
-                data, _ = self.cache.get(layer_id, (None, 0.0))  # type: ignore[assignment]
+                data, _ = self.cache.get(layer_id, (None, 0.0))
                 if data is None:
                     return None
                 self.cache[layer_id] = (data, time.time())

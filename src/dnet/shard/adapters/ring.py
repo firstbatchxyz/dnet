@@ -33,6 +33,7 @@ from dnet.core.stream_manager import StreamManager
 from ..config import TransportConfig
 from dnet.protos import dnet_ring_pb2 as pb2
 from ..codec import ActivationCodec
+from dnet.protos.shard_api_comm_pb2_grpc import ShardApiServiceStub
 
 
 class RingAdapter(TopologyAdapter):
@@ -61,7 +62,7 @@ class RingAdapter(TopologyAdapter):
         # Topology
         self.next_node: Optional[DnetDeviceProperties] = None
         self.next_node_channel: Optional[aio_grpc.Channel] = None
-        self.next_node_stub: Optional[Any] = None
+        self.next_node_stub: Optional[DnetRingServiceStub] = None
 
         # Implement the required queues
         self.queue_size = runtime.max_queue_size
@@ -77,7 +78,7 @@ class RingAdapter(TopologyAdapter):
 
         # API callback gRPC
         self.api_channel: Optional[aio_grpc.Channel] = None
-        self.api_stub: Optional[Any] = None
+        self.api_stub: Optional[ShardApiServiceStub] = None
         self.api_address: Optional[str] = None
 
         self.total_layers: int = 0
@@ -242,9 +243,14 @@ class RingAdapter(TopologyAdapter):
                 "Streaming disabled or next node not connected; cannot forward"
             )
             return
+
+        if self.next_node_stub is None:
+            raise ValueError("next_node_stub is None")
+        stub = self.next_node_stub
+
         ctx = await self._streams.get_or_create_stream(
             request.nonce,
-            lambda it: self.next_node_stub.StreamActivations(it),  # type: ignore[attr-defined]
+            lambda it: stub.StreamActivations(it),
         )
         if not ctx or not ctx.open or ctx.disabled:
             logger.error("Stream not available for nonce %s", request.nonce)
@@ -268,9 +274,13 @@ class RingAdapter(TopologyAdapter):
         request = msg.to_proto(data)
         request.timestamp = int(time.time() * 1000)
 
+        if self.next_node_stub is None:
+            raise ValueError("next_node_stub is None")
+        stub = self.next_node_stub
+
         ctx = await self._streams.get_or_create_stream(
             msg.nonce,
-            lambda it: self.next_node_stub.StreamActivations(it),  # type: ignore[attr-defined]
+            lambda it: stub.StreamActivations(it),
         )
         if not ctx or not ctx.open or ctx.disabled:
             logger.error("Stream not available for nonce %s", msg.nonce)
@@ -311,7 +321,7 @@ class RingAdapter(TopologyAdapter):
                 return
         elif self.api_callback_address:
             # Fallback to load_model-provided address: host:port
-            addr = self.api_callback_address  # type: ignore[attr-defined]
+            addr = self.api_callback_address
         else:
             logger.error(
                 "Shard %s: no callback URL for final token; nonce=%s",
@@ -359,10 +369,20 @@ class RingAdapter(TopologyAdapter):
                 logprob=logprob,
                 top_logprobs=top_logprobs,
             )
-            resp = await self.api_stub.SendToken(req, timeout=3.0)  # type: ignore[arg-type]
+
+            if self.api_stub is None:
+                logger.error(
+                    "Shard %s: API stub not available for nonce=%s token=%s",
+                    self.runtime.shard_id,
+                    msg.nonce,
+                    token_id,
+                )
+                return
+
+            resp = await self.api_stub.SendToken(req, timeout=3.0)
             rpc_ms = (time.perf_counter() - t_rpc) * 1000.0
 
-            if not resp.success:
+            if resp is None or not resp.success:
                 logger.error(
                     "Shard %s: API SendToken failed for nonce=%s token=%s: %s",
                     self.runtime.shard_id,

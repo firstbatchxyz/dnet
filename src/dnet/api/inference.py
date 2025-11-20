@@ -78,7 +78,7 @@ class InferenceManager:
                 message_dicts = [
                     {"role": m.role, "content": m.content} for m in req.messages
                 ]
-                prompt_text = tokenizer.apply_chat_template(  # type: ignore[attr-defined]
+                prompt_text = tokenizer.apply_chat_template(
                     message_dicts,
                     add_generation_prompt=True,
                     tokenize=False,
@@ -155,7 +155,7 @@ class InferenceManager:
                 tokens=tok_bytes,
                 nonce=nonce,
                 callback_addr=self._api_callback_addr,
-                logprobs=req.logprobs,
+                logprobs=req.logprobs if req.logprobs else False,
                 top_logprobs=req.top_logprobs if req.top_logprobs else 0,
                 decoding_config=decoding_config,
             )

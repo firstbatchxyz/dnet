@@ -90,7 +90,7 @@ class HTTPServer:
     async def health(self) -> HealthResponse:
         return HealthResponse(
             status="ok",
-            node_id=self.node_id,
+            node_id=0,  # TODO: Doublecheck, Deprecated field, use 'instance' instead
             running=True,
             model_loaded=self.model_manager.current_model_id is not None,
             model_path=self.model_manager.current_model_id,

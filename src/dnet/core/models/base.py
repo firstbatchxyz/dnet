@@ -124,28 +124,26 @@ class BaseRingModel(nn.Module, metaclass=ABCMeta):
                         if not isinstance(k, str)
                         else k
                     ): v
-                    for (k, v) in file_or_weights  # type: ignore[misc]
+                    for (k, v) in file_or_weights
                 }
             except UnicodeError:
-                wdict = dict(file_or_weights)  # type: ignore[arg-type]
+                wdict = dict(file_or_weights)
         elif isinstance(file_or_weights, str):
             try:
-                wdict = mx.load(file_or_weights)  # type: ignore[assignment]
+                wdict = mx.load(file_or_weights)
             except ValueError:
                 wdict = {}
         else:
             try:
-                wdict = dict(file_or_weights)  # type: ignore[arg-type]
+                wdict = dict(file_or_weights)
             except ValueError:
                 wdict = {}
 
         # Model-specific canonicalization: prefer tensor-level when available
         try:
             if hasattr(self, "sanitize_weights"):
-                # type: ignore[attr-defined]
                 wdict = getattr(self, "sanitize_weights")(wdict)
             elif hasattr(self, "sanitize"):
-                # type: ignore[attr-defined]
                 wdict = getattr(self, "sanitize")(wdict)
         except Exception:
             # Be permissive: proceed even if sanitize fails
@@ -254,7 +252,7 @@ class BaseRingModel(nn.Module, metaclass=ABCMeta):
             try:
                 if hasattr(self, "sanitize") and weight_names:
                     wdict = {k: True for k in weight_names}
-                    sanitized = self.sanitize(dict(wdict))  # type: ignore[attr-defined]
+                    sanitized = self.sanitize(dict(wdict))
                     if isinstance(sanitized, dict) and sanitized:
                         weight_names = set(sanitized.keys())
             except Exception:

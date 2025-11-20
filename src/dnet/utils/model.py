@@ -420,7 +420,7 @@ def get_safetensor_details(path) -> Dict[str, TensorInfo]:
 
 
 def get_model_metadata(model_path) -> ModelMetadata:
-    path = get_model_path(model_path)
+    path, repo_id = get_model_path(model_path)
 
     # Handle case where get_model_path returns a tuple (mlx-lm version compatibility)
     if isinstance(path, tuple):
@@ -481,7 +481,7 @@ def make_cache(
     # RotatingKVCache for sliding-attention layers). Fallback to mlx-lm default.
     try:
         if hasattr(model, "make_cache"):
-            caches = model.make_cache()  # type: ignore[attr-defined]
+            caches = model.make_cache()
         else:
             caches = cache.make_prompt_cache(model)
     except Exception:

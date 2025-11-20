@@ -47,17 +47,23 @@ def plan_policy(
             window_size = max(1, min(requested_w, local_count))
 
     if mode == "fit":
-        policy_cls = FitInMemoryPolicy
+        return PolicyPlan(
+            mode=mode,
+            window_size=window_size,
+            resident_windows=resident_windows,
+            policy_cls=FitInMemoryPolicy,
+            is_sliding=sliding,
+        )
     else:
-        policy_cls = OffloadPolicy
+        return PolicyPlan(
+            mode=mode,
+            window_size=window_size,
+            resident_windows=resident_windows,
+            policy_cls=OffloadPolicy,
+            is_sliding=sliding,
+        )
 
-    return PolicyPlan(
-        mode=mode,
-        window_size=window_size,
-        resident_windows=resident_windows,
-        policy_cls=policy_cls,
-        is_sliding=sliding,
-    )
+
 
 
 __all__ = [

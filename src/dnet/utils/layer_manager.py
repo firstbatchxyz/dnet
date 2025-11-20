@@ -251,6 +251,10 @@ class LayerManager:
                 collected = 0
                 for fname in fnames:
                     d = mx.load(fname)
+
+                    if not isinstance(d, dict):
+                        raise RuntimeError("mx.load did not return a dict")
+
                     p1 = f"model.layers.{layer_idx}."
                     p2 = f"layers.{layer_idx}."
                     for k, v in d.items():

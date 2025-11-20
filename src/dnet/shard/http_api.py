@@ -157,7 +157,7 @@ class HTTPServer:
                         timestamp=timestamp_ms,
                     )
 
-                    response = await stub.MeasureLatency(request)  # type: ignore
+                    response = await stub.MeasureLatency(request)
                     end_time = time.perf_counter()
 
                     if response.success:
@@ -311,7 +311,7 @@ class HTTPServer:
                 )
 
         @self.app.post("/cleanup_repacked")
-        async def cleanup_repacked(request: Request) -> JSONResponse:  # type: ignore
+        async def cleanup_repacked(request: Request) -> JSONResponse:
             """Delete repacked per-layer weights on this shard to free disk.
 
             Body JSON (all fields optional):

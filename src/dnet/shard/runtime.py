@@ -203,7 +203,7 @@ class ShardRuntime:
         )
         try:
             applied = bool(
-                self.model.apply_quantization_from_config(  # type: ignore[attr-defined]
+                self.model.apply_quantization_from_config(
                     self.model_metadata.model_config,
                     model_metadata=self.model_metadata,
                 )
@@ -230,7 +230,7 @@ class ShardRuntime:
             has_start = 0 in self.assigned_layers
             has_end = (self.model_metadata.num_layers - 1) in self.assigned_layers
             tied = bool(
-                getattr(self.model.config, "tie_word_embeddings", False)  # type: ignore[attr-defined]
+                getattr(self.model.config, "tie_word_embeddings", False)
             )
             loaded_cnt = 0
             if has_start or (has_end and tied):
@@ -320,7 +320,7 @@ class ShardRuntime:
             return
         try:
             self.cache = make_cache(
-                self.model,  # type: ignore[arg-type]
+                self.model,
                 kv_mode=self.compute_config.kv_cache.mode,
                 kv_bits=self.compute_config.kv_cache.bits,
                 kv_group=self.compute_config.kv_cache.group_size,

@@ -10,12 +10,15 @@ from dnet.core.types.messages import TokenResult
 class ShardApiServicer(pb2_grpc.ShardApiServiceServicer):
     """gRPC servicer for shard -> API callbacks."""
 
+    def SendFinalActivation(self, request, context):
+        pass
+
     def __init__(self, inference_manager: InferenceManager):
         self.inference_manager = inference_manager
 
     async def SendToken(
         self, request: pb2.TokenRequest, context: grpc.aio.ServicerContext
-    ):  # type: ignore[override]
+    ):
         try:
             nonce = request.nonce
             token_id = int(request.token_id)

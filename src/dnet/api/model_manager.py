@@ -30,7 +30,10 @@ class ModelManager:
         """
         Orchestrates model loading across the cluster based on topology.
         """
-        model_to_load = topology.model
+        if topology.model is None:
+            raise ValueError("Topology must specify a model to load")
+
+        model_to_load: str = topology.model
         logger.info(
             f"Loading model {model_to_load} across {len(topology.assignments)} shards"
         )

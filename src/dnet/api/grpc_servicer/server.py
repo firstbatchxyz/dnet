@@ -12,7 +12,7 @@ from dnet.protos.shard_api_comm_pb2_grpc import add_ShardApiServiceServicer_to_s
 class GrpcServer:
     def __init__(self, grpc_port: int, inference_manager: InferenceManager) -> None:
         self.grpc_port = grpc_port
-        self.inference_manager = inference_manager
+        self.inference_manager: InferenceManager = inference_manager
         self.server: Optional[aio_grpc.Server] = None
         self.servicer = ShardApiServicer(self.inference_manager)
 

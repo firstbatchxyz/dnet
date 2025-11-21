@@ -1,5 +1,4 @@
 from typing import Optional, Mapping, Any
-import os
 from hypercorn import Config
 import hypercorn.asyncio as aio_hypercorn
 import asyncio

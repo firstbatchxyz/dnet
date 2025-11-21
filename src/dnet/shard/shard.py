@@ -9,7 +9,6 @@ grpc_servicer = ShardServicer(shard)
 app = FastAPI(); attach_routes(app, shard)
 """
 
-import os
 import asyncio
 from .runtime import ShardRuntime
 from .adapters.base import TopologyAdapter

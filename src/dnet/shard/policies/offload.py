@@ -398,7 +398,9 @@ class OffloadPolicy(ComputePolicy):
                         if next_window is None or len(next_window) == 0:
                             # No next window
                             # prefetch first window for next round for overlap
-                            next_window = self.runtime._assigned_sorted[:self.window_size]
+                            next_window = self.runtime._assigned_sorted[
+                                : self.window_size
+                            ]
                         fut = loop.run_in_executor(
                             self.runtime.executor,
                             self._prepare_window_blocking,

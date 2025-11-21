@@ -108,7 +108,7 @@ def compute_layer_assignments(
     next_instances: Dict[str, str] = {}
     for i, instance in enumerate(shard_order):
         residency_sizes[instance] = solution_n[i]
-        window_sizes[instance] = max(1, solution_w[i] // solution_k)
+        window_sizes[instance] = solution_w[i]
 
         # `dev_1 -> dev_2 -> ... -> dev_n -> dev_1` (wraps around)
         if i < len(shard_order) - 1:
@@ -178,7 +178,7 @@ def optimize_device_ordering(
                 best_score = score
                 best_candidate = candidate
 
-        # Add best candidate (or any remaining if no TB connections exist)
+        # Add the best candidate (or any remaining if no TB connections exist)
         if best_candidate:
             ordered.append(best_candidate)
             remaining.remove(best_candidate)

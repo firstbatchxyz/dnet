@@ -9,12 +9,16 @@ grpc_servicer = ShardServicer(shard)
 app = FastAPI(); attach_routes(app, shard)
 """
 
+import os
 import asyncio
 from .runtime import ShardRuntime
 from .adapters.base import TopologyAdapter
 from dnet.protos.dnet_ring_pb2 import ActivationRequest
 from dnet.utils.banner import print_startup_banner
 from .models import ShardLoadModelResponse, ShardUnloadModelResponse
+
+
+from dnet.utils.repack import delete_repacked_layers
 
 
 class Shard:
@@ -57,7 +61,14 @@ class Shard:
 
     async def unload_model(self) -> ShardUnloadModelResponse:
         await self.adapter.reset_topology()
-        return self.runtime.unload_model_core()
+        model_path = self.runtime.model_path
+        response = self.runtime.unload_model_core()
+        if response.success and model_path:
+            delete_repacked_layers(
+                base_dir=os.getenv("DNET_REPACK_DIR", "repacked_models"),
+                current_model_path=model_path,
+            )
+        return response
 
     def queue_size(self) -> int:
         return self.runtime.queue_size()

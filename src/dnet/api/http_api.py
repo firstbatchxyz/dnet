@@ -1,6 +1,7 @@
 from typing import Optional, Any, List
 import asyncio
 from hypercorn import Config
+from hypercorn.utils import LifespanFailureError
 import hypercorn.asyncio as aio_hypercorn
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -56,7 +57,7 @@ class HTTPServer:
             self.http_server.cancel()
             try:
                 await self.http_server
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, LifespanFailureError):
                 pass
 
     async def wait_closed(self, timeout: float = 5.0) -> bool:

@@ -1,5 +1,6 @@
 import grpc
 import time
+import asyncio
 
 from dnet.protos.dnet_ring_pb2 import (
     ActivationRequest,
@@ -152,6 +153,9 @@ class GrpcServicer(DnetRingServiceServicer):
                 await self.shard.admit_frame(req)
                 yield pb2.StreamAck(nonce=req.nonce, seq=frame.seq, accepted=True)
 
+        except asyncio.CancelledError:
+            logger.debug("[STREAM][RX] cancelled")
+            return
         except Exception as e:
             logger.error("[STREAM][RX] error: %s", e)
             context.abort(grpc.StatusCode.INTERNAL, str(e))

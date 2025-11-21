@@ -1,6 +1,6 @@
 import httpx
 import asyncio
-from typing import Dict, Optional, List, Any, Tuple
+from typing import Dict, Optional, List, Any, Tuple, Literal
 from dnet_p2p import (
     AsyncDnetP2P,
     DnetDeviceProperties,
@@ -249,7 +249,7 @@ class ClusterManager:
         model_profile: Any,  # ModelProfile
         model_name: str,
         num_layers: int,
-        kv_bits: str,
+        kv_bits: Literal["4bit", "8bit", "fp16"],
     ) -> TopologyInfo:
         """Delegates to the configured solver."""
 

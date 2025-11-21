@@ -61,6 +61,13 @@ class ComputePolicy(ABC):
     def configure_policy_for_model(self, req: ShardLoadModelRequest):
         pass
 
+    @abstractmethod
+    def clear(self):
+        """
+        Clear any policy-specific state
+        """
+        pass
+
     @staticmethod
     def _next_local_layers(s: List[int], after_layer: int, count: int) -> List[int]:
         if count <= 0:

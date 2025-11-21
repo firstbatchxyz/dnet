@@ -22,7 +22,7 @@ from dnet.core.models import BaseRingModel as BaseShardModel, get_ring_model
 import asyncio
 from .config import ComputeConfig, TransportConfig, TopologyConfig
 from dnet.core.memory.memory_pool import LayerAwareMemoryPool
-from .policies import ComputePolicy, make_policy, plan_policy, PolicyPlan
+from .policies import ComputePolicy, NoopPolicy, make_policy, plan_policy, PolicyPlan
 from dnet.utils.model import (
     make_cache,
     load_embeddings,
@@ -58,9 +58,7 @@ class ShardRuntime:
             topology_config if topology_config else TopologyConfig()
         )
 
-        self.policy: Optional[ComputePolicy] = (
-            None  # ComputePolicy to be assigned later
-        )
+        self.policy: ComputePolicy = NoopPolicy(runtime=self, resident_windows=1)
 
         self._device_prefetch_workers = device_prefetch_workers
         self.prefetch_threads = prefetch_threads
@@ -274,25 +272,10 @@ class ShardRuntime:
             self._assigned_sorted = []
             self._assigned_set = set()
 
-            if self.policy.weight_cache:
-                try:
-                    self.policy.weight_cache.cancel_all_prefetch()
-                except Exception:
-                    pass
-                for layer_id in list(self.policy._bound_versions.keys()):
-                    try:
-                        self.policy.weight_cache.evict_layer(layer_id)
-                    except Exception:
-                        pass
-                try:
-                    self.policy.weight_cache.layer_manager.close()
-                except Exception:
-                    pass
-                self.policy.weight_cache = None
-
+            self.policy.clear()
+            self.policy = NoopPolicy(runtime=self, resident_windows=1)
             self.input_pool = None
             self.output_pool = None
-            self.policy._bound_versions = {}
 
             # Run garbage collection to free memory
             gc.collect()

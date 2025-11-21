@@ -202,3 +202,20 @@ class FitInMemoryPolicy(ComputePolicy):
                     self.runtime.input_pool.release(msg.pool_id)
             except Exception:
                 pass
+
+    def clear(self):
+        try:
+            if self.weight_cache:
+                self.weight_cache.cancel_all_prefetch()
+        except Exception:
+            pass
+
+        for layer_id in list(self._bound_versions.keys()):
+            try:
+                self.weight_cache.evict_layer(layer_id)
+            except Exception:
+                pass
+        try:
+            self._bound_versions.clear()
+        except Exception:
+            self._bound_versions = {}

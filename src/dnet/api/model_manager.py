@@ -16,7 +16,7 @@ from dnet.shard.models import ShardLoadModelRequest, ShardLoadModelResponse
 
 
 class ModelManager:
-    def __init__(self):
+    def __init__(self) -> None:
         self.current_model_id: Optional[str] = None
         self.model_config: Optional[Dict[str, Any]] = None
         self.tokenizer: Optional[Any] = None

@@ -78,7 +78,7 @@ def repack_per_layer(
     model_path: str,
     assigned_layers: List[int],
     out_root: Path,
-) -> Path:
+) -> None:
     """Repack only the assigned layers into per-layer safetensors under out_root.
 
     Returns the directory containing repacked files (out_root).

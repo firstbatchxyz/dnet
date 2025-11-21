@@ -45,7 +45,7 @@ class Qwen3RingModel(BaseRingModel):
 
         # Quantization is handled at bind-time in load_weights
         self._converted_to_quantized = False
-        self._cached_mask_state = None
+        self._cached_mask_state: Optional[int] = None
         self._cached_mask = None
 
     def embed(self, x: mx.array) -> mx.array:

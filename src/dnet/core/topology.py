@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Dict, Any
+from typing import Dict, Any, Literal
 from dnet_p2p import DnetDeviceProperties, ThunderboltConnection
 from distilp.common import DeviceProfile
 from dnet.core.types.topology import TopologyInfo
@@ -15,7 +15,7 @@ class TopologySolver(ABC):
         model_profile: Any,  # ModelProfile
         model_name: str,
         num_layers: int,
-        kv_bits: str,
+        kv_bits: Literal["4bit", "8bit", "fp16"],
         shards: Dict[str, DnetDeviceProperties],
         thunderbolts: Dict[str, Dict[str, ThunderboltConnection]],
     ) -> TopologyInfo:

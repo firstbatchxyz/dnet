@@ -48,7 +48,7 @@ class LlamaRingModel(BaseRingModel):
         # Quantization is handled at bind-time in load_weights
         self._converted_to_quantized = False
 
-        self._cached_mask_state = None
+        self._cached_mask_state: Optional[int] = None
         self._cached_mask = None
 
         # Init-time lazy param shrink removed to simplify startup behavior.

@@ -66,10 +66,17 @@ show_error_codes = true
 pretty = true
 color_output = true
 warn_unused_ignores = true
-exclude = ["^lib/", "^tests/"]
+exclude = ["^lib/", "^tests/",  "^src/dnet/compression(/|$)", "^src/dnet/proto"]
 explicit_package_bases = true
 mypy_path = ["src"]
 
 [[tool.mypy.overrides]]
-module = ["distilp", "distilp.*", "dnet_p2p", "dnet_p2p.*", "grpc", "grpc.*"]
+ module = [
+  "distilp", "distilp.*",
+  "dnet_p2p", "dnet_p2p.",
+  "grpc", "grpc.*",
+  "grpc_tools", "grpc_tools.",
+  "huggingface_hub", "huggingface_hub.*",
+  "requests",
+  ]
 ignore_missing_imports = true

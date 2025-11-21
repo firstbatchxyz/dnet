@@ -33,13 +33,13 @@ class OffloadPolicy(ComputePolicy):
             self._mode = "sliding_fit"
             self.window_size = max(1, min(n_residency, local_count))
             self._resident_windows = (
-                int(req.residency_size) if req.residency_size else 1
+                int(self._resident_windows) if self._resident_windows else 1
             )
         else:
             self._mode = "offload"
             self.window_size = max(1, min(requested_w, local_count))
             self._resident_windows = (
-                int(req.residency_size) if req.residency_size else 1
+                int(self._resident_windows) if self._resident_windows else 1
             )
 
         # Repack for offload/sliding_fit
@@ -389,3 +389,20 @@ class OffloadPolicy(ComputePolicy):
                     self.runtime.input_pool.release(msg.pool_id)
             except Exception:
                 pass
+
+    def clear(self):
+        try:
+            if self.weight_cache:
+                self.weight_cache.cancel_all_prefetch()
+        except Exception:
+            pass
+
+        for layer_id in list(self._bound_versions.keys()):
+            try:
+                self.weight_cache.evict_layer(layer_id)
+            except Exception:
+                pass
+        try:
+            self._bound_versions.clear()
+        except Exception:
+            self._bound_versions = {}

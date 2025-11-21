@@ -1,10 +1,11 @@
 """Tensor serialization utilities for dnet."""
 
+from typing import Optional, Dict
 import mlx.core as mx
 import numpy as np
 
 try:
-    NP_BF16 = np.dtype("bfloat16")
+    NP_BF16: Optional[np.typing.DTypeLike] = np.dtype("bfloat16")
 except Exception:
     NP_BF16 = None
 
@@ -25,7 +26,7 @@ ALIASES = {
     "bool": ("mlx.core.bool", "BOOL"),
 }
 
-NP_MAP_BASE = {
+NP_MAP_BASE: Dict[str, np.typing.DTypeLike] = {
     "bfloat16": (NP_BF16 or np.uint16),  # fallback keeps size=2
     "float16": np.float16,
     "float32": np.float32,
@@ -67,13 +68,13 @@ def _canon(s: str) -> str:
     return s
 
 
-dtype_map = {}
+dtype_map: Dict[str, np.typing.DTypeLike] = {}
 for k, npdt in NP_MAP_BASE.items():
     dtype_map[k] = npdt
     for a in ALIASES[k]:
         dtype_map[a] = npdt
 
-safetensor_dtype_map = {
+safetensor_dtype_map: Dict[str, np.typing.DTypeLike] = {
     "BOOL": np.bool_,
     "U8": np.uint8,
     "I8": np.int8,

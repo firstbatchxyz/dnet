@@ -1,5 +1,6 @@
 from .base import make_policy, ComputePolicy
 from . import fit_in_memory, offload
+from .noop import NoopPolicy
 from .fit_in_memory import FitInMemoryPolicy
 from .offload import OffloadPolicy
 from ..config import TopologyConfig
@@ -71,4 +72,5 @@ __all__ = [
     "PolicyPlan",
     "fit_in_memory",
     "offload",
+    "NoopPolicy",
 ]

@@ -1,6 +1,6 @@
 from __future__ import annotations
 import asyncio
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, Literal
 from grpc import aio as aio_grpc
 
 from dnet_p2p import DnetDeviceProperties, ThunderboltConnection
@@ -35,7 +35,7 @@ class RingTopologySolver(TopologySolver):
         model_profile: Any,
         model_name: str,
         num_layers: int,
-        kv_bits: str,
+        kv_bits: Literal["4bit", "8bit", "fp16"],
         shards: Dict[str, DnetDeviceProperties],
         thunderbolts: Dict[str, Dict[str, ThunderboltConnection]],
     ) -> TopologyInfo:
@@ -137,7 +137,7 @@ class RingApiAdapter(ApiAdapterBase):
         if not self.stub:
             raise RuntimeError("API adapter not connected to a shard")
         try:
-            await self.stub.ResetCache(pb2.ResetCacheRequest())  # type: ignore[arg-type]
+            await self.stub.ResetCache(pb2.ResetCacheRequest())
         except Exception as e:
             logger.warning("ResetCache RPC failed: %s", e)
 
@@ -178,14 +178,13 @@ class RingApiAdapter(ApiAdapterBase):
         )
         req = msg.to_proto(tokens)
 
-        # We use StreamActivations even for the first hop
-        # But here we just fire and forget via a stream or unary if we had one.
-        # The current implementation uses StreamActivations for everything.
-        # We need to get a stream context.
+        if self.stub is None:
+            raise RuntimeError("Ring adapter not connected to first shard")
+        stub = self.stub
 
         ctx = await self._streams.get_or_create_stream(
             nonce,
-            lambda it: self.stub.StreamActivations(it),  # type: ignore[attr-defined]
+            lambda it: stub.StreamActivations(it),
         )
         if not ctx or not ctx.open:
             raise RuntimeError(f"Failed to create stream for nonce {nonce}")

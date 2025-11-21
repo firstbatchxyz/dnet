@@ -10,7 +10,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Tuple, IO
 
 import mlx.core as mx
 import numpy as np
@@ -224,7 +224,7 @@ class MappedFile:
         # Prefer private copy-on-write mapping so the buffer is writable from
         # Python's perspective (needed for ctypes.from_buffer) without touching disk
         if access == mmap.ACCESS_COPY:
-            self.file = open(file_path, "rb")
+            self.file: IO[bytes] = open(file_path, "rb")
         else:
             # Fallback path
             self.file = open(file_path, "r+b")
@@ -233,10 +233,8 @@ class MappedFile:
         try:
             self.mmap = mmap.mmap(self.file.fileno(), 0, access=access)
         except Exception:
-            # Fallback to copy-on-write if requested access fails
             self.mmap = mmap.mmap(self.file.fileno(), 0, access=mmap.ACCESS_COPY)
 
-        # Get memory address for madvise
         # from_buffer requires a writable view; ACCESS_COPY satisfies this
         self.base_addr = ctypes.addressof(ctypes.c_char.from_buffer(self.mmap))
 

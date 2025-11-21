@@ -110,7 +110,7 @@ class StreamManager:
             # Close request iterator and underlying call
             await ctx.queue.put(None)
             if ctx.open and ctx.call is not None and hasattr(ctx.call, "aclose"):
-                await ctx.call.aclose()  # type: ignore[attr-defined]
+                await ctx.call.aclose()
         except Exception:
             pass
 

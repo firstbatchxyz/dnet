@@ -111,7 +111,7 @@ class BaseRingModel(nn.Module, metaclass=ABCMeta):
     def load_weights(self, file_or_weights, strict: bool = False):
         """Bind weights for this shard"""
 
-        wdict: Dict[str, Any]
+        wdict: Dict[str, mx.array]
         if isinstance(file_or_weights, dict):
             wdict = dict(file_or_weights)
         elif isinstance(file_or_weights, (list, tuple)):
@@ -130,7 +130,10 @@ class BaseRingModel(nn.Module, metaclass=ABCMeta):
                 wdict = dict(file_or_weights)
         elif isinstance(file_or_weights, str):
             try:
-                wdict = mx.load(file_or_weights)
+                val = mx.load(file_or_weights)
+                if not isinstance(val, dict):
+                    raise ValueError("Loaded weights is not a dict")
+                wdict = dict(val)
             except ValueError:
                 wdict = {}
         else:
@@ -140,14 +143,10 @@ class BaseRingModel(nn.Module, metaclass=ABCMeta):
                 wdict = {}
 
         # Model-specific canonicalization: prefer tensor-level when available
-        try:
-            if hasattr(self, "sanitize_weights"):
-                wdict = getattr(self, "sanitize_weights")(wdict)
-            elif hasattr(self, "sanitize"):
-                wdict = getattr(self, "sanitize")(wdict)
-        except Exception:
-            # Be permissive: proceed even if sanitize fails
-            pass
+        if hasattr(self, "sanitize_weights"):
+            wdict = self.sanitize_weights(wdict)
+        elif hasattr(self, "sanitize"):
+            wdict = self.sanitize(wdict)
 
         shard_w: Dict[str, mx.array] = {}
 
@@ -284,12 +283,12 @@ class BaseRingModel(nn.Module, metaclass=ABCMeta):
                         o: Dict[str, Any] = {}
                         if "bits" in v:
                             try:
-                                o["bits"] = int(v.get("bits"))
+                                o["bits"] = int(v["bits"])
                             except Exception:
                                 pass
                         if "group_size" in v:
                             try:
-                                o["group_size"] = int(v.get("group_size"))
+                                o["group_size"] = int(v["group_size"])
                             except Exception:
                                 pass
                         if "mode" in v:
@@ -373,7 +372,7 @@ class BaseRingModel(nn.Module, metaclass=ABCMeta):
                     return False
                 if not hasattr(module, "to_quantized"):
                     return False
-                abs_pref = _local_path_to_abs_prefix(path)
+                abs_pref = _local_path_to_abs_prefix(path) or path
                 if abs_pref is None:
                     return False
                 return f"{abs_pref}.scales" in weight_names
@@ -386,9 +385,9 @@ class BaseRingModel(nn.Module, metaclass=ABCMeta):
                         self,
                         group_size=int(g_group),
                         bits=int(g_bits),
-                        mode=str(g_mode),  # type: ignore[arg-type]
+                        mode=str(g_mode),
                         class_predicate=_predicate,
-                    )  # type: ignore[call-arg]
+                    )
                 else:
                     nn.quantize(
                         self,

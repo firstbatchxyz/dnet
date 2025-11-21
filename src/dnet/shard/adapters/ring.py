@@ -8,7 +8,7 @@ RingAdapter: ring transport + topology glue around a topology‑agnostic runtime
 
 from __future__ import annotations
 import queue
-from typing import Optional, Any
+from typing import Optional
 import asyncio
 import time
 from ..models import ShardLoadModelRequest

@@ -41,7 +41,9 @@ class WeightCache:
             )
         else:
             self.max_weights = len(self.assigned_layers)
-        self.cache = {}  # TODO: find the exact type
+        self.cache: Dict[
+            int, tuple[Dict[str, mx.array], float]
+        ] = {}  # TODO: find the exact type
         self.reference_counts: Dict[int, int] = {}  # layer_id -> count
         self.layer_manager = LayerManager(
             model_metadata,
@@ -94,13 +96,11 @@ class WeightCache:
                 t0 = time.perf_counter()
                 data = self.layer_manager.load_layer_to_gpu(layer_id)
                 dt_ms = (time.perf_counter() - t0) * 1000.0
-                # Estimate bytes by summing tensor sizes for the layer
                 try:
                     winfo = self.layer_manager.weight_info.get(layer_id, {})
                     total_bytes = sum(w.size_bytes for w in winfo.values())
                 except Exception:
                     total_bytes = 0
-                # Commit to cache under lock
                 with self.lock:
                     self.cache[layer_id] = (data, time.time())
                     if inc_ref:
@@ -111,7 +111,8 @@ class WeightCache:
                         self.reference_counts.setdefault(layer_id, 0)
                     # Resolve future and clear from tracking
                     try:
-                        fut = self.loading_futures.pop(layer_id, None)
+                        if layer_id in self.loading_futures:
+                            fut = self.loading_futures.pop(layer_id)
                         if fut is not None and not fut.done():
                             fut.set_result(True)
                     except Exception:
@@ -127,7 +128,8 @@ class WeightCache:
                 # Signal failure to any waiters
                 with self.lock:
                     try:
-                        fut = self.loading_futures.pop(layer_id, None)
+                        if layer_id in self.loading_futures:
+                            fut = self.loading_futures.pop(layer_id)
                         if fut is not None and not fut.done():
                             fut.set_exception(e)
                     except Exception:
@@ -135,7 +137,6 @@ class WeightCache:
                 logger.exception("Failed to load weight %s: %s", layer_id, e)
                 return None
         else:
-            # Not the creator: wait for the in-flight load to complete
             t0w = time.perf_counter()
             try:
                 inflight.result()  # block until the creator completes
@@ -143,10 +144,13 @@ class WeightCache:
                 logger.error("Wait for layer %s load failed: %s", layer_id, e)
                 return None
             wait_ms = (time.perf_counter() - t0w) * 1000.0
-            logger.info("[PROFILE][WAIT-WEIGHT] layer=%s ms=%.2f", layer_id, wait_ms)
+            logger.debug("[PROFILE][WAIT-WEIGHT] layer=%s ms=%.2f", layer_id, wait_ms)
             # Return from cache (now populated) and update ref/LRU
             with self.lock:
-                data, _ = self.cache.get(layer_id, (None, 0.0))
+                entry = self.cache.get(layer_id)
+                if entry is None:
+                    return None
+                data, _ = entry
                 if data is None:
                     return None
                 self.cache[layer_id] = (data, time.time())

@@ -283,10 +283,9 @@ class OffloadPolicy(ComputePolicy):
                                 except Exception:
                                     pass
                                 try:
-                                    if hasattr(self.runtime.model, "unload_layers"):
-                                        self.runtime.model.unload_layers(old)
-                                        for lid in old:
-                                            self._bound_versions.pop(lid, None)
+                                    self.runtime.model.unload_layers(old)
+                                    for lid in old:
+                                        self._bound_versions.pop(lid, None)
                                 except Exception:
                                     pass
                             else:
@@ -395,15 +394,17 @@ class OffloadPolicy(ComputePolicy):
                         next_window = self._next_local_layers(
                             self.runtime._assigned_sorted, last_layer, self.window_size
                         )
-                        if next_window:
-                            loop = asyncio.get_running_loop()
-                            fut = loop.run_in_executor(
-                                self.runtime.executor,
-                                self._prepare_window_blocking,
-                                next_window,
-                            )
-                            self._prepared_by_nonce[msg.nonce] = (next_window, fut)
-
+                        loop = asyncio.get_running_loop()
+                        if next_window is None or len(next_window) == 0:
+                            # No next window
+                            # prefetch first window for next round for overlap
+                            next_window = self.runtime._assigned_sorted[:self.window_size]
+                        fut = loop.run_in_executor(
+                            self.runtime.executor,
+                            self._prepare_window_blocking,
+                            next_window,
+                        )
+                        self._prepared_by_nonce[msg.nonce] = (next_window, fut)
                     return
 
         except Exception as e:

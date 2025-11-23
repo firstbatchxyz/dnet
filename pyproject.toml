@@ -52,9 +52,23 @@ requires = ["uv_build>=0.8.17,<0.9.0"]
 build-backend = "uv_build"
 
 [tool.pytest.ini_options]
-python_files = ["src/dnet/**/*_test.py", "tests/*.py"]
+# Discover standard test module basenames everywhere
+python_files = ["test_*.py", "*_test.py"]
+testpaths = ["tests"]
 python_functions = ["test_"]
 log_cli = true
+markers = [
+  "api: tests for API node components (HTTP, gRPC, managers)",
+  "shard: tests for Shard node components (HTTP, gRPC, runtime, policies, ring)",
+  "http: tests that exercise HTTP servers or endpoints",
+  "grpc: tests that exercise gRPC servers or stubs",
+  "ring: tests for the RingAdapter and ring transport",
+  "runtime: tests for ShardRuntime internals",
+  "policies: tests for policy planning/registry/implementations",
+  "codec: tests for activation codec serialize/deserialize",
+  "core: tests for core memory/cache/utils not tied to api/shard",
+  "e2e: integration tests requiring live servers or multiple components",
+]
 
 [tool.ruff]
 exclude = [".git", ".venv", "__pycache__", "build", "dist", "lib"]

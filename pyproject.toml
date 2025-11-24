@@ -18,7 +18,6 @@ keywords = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-  "mlx",
   "mlx-lm==0.28.2",
   "numpy>=1.24.0",
   "grpcio>=1.50.0",
@@ -36,6 +35,10 @@ dependencies = [
   "distilp[solver,profiler] @ file://${PROJECT_ROOT}/lib/distilp",
   "dnet-p2p @ file://${PROJECT_ROOT}/lib/dnet-p2p/bindings/py",
 ]
+[project.optional-dependencies]
+mac = ["mlx"]
+cpu = ["mlx[cpu]"]
+cuda = ["mlx[cuda]"]
 
 [project.scripts]
 dnet-api = "cli.api:main"

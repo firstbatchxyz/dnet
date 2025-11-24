@@ -285,6 +285,12 @@ class ModelObject(BaseModel):
     owned_by: Literal["local"] = "local"  # TODO: unless we can get the model owner name
 
 
+class ModelObjectExtended(ModelObject):
+    alias: str  # model alias
+    arch: str  # model architecture
+    quantization: str  # quantization format
+
+
 type ListModelsResponseModel = list[ModelObject]
 type RetrieveModelResponseModel = ModelObject
 

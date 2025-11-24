@@ -59,7 +59,7 @@ class HTTPServer:
         )
 
         self.http_server = asyncio.create_task(
-            aio_hypercorn.serve(self.app, config, shutdown_trigger=shutdown_trigger)  # type: ignore
+            aio_hypercorn.serve(self.app, config, shutdown_trigger=shutdown_trigger)  # type: ignore[arg-type]
         )
 
     async def shutdown(self) -> None:

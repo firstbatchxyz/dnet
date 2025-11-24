@@ -376,7 +376,12 @@ def test_prepare_topology_auto_success(monkeypatch):
     monkeypatch.setattr(cm, "solve_topology", _solve, raising=True)
 
     with TestClient(srv.app) as client:
-        req = {"model": "m", "kv_bits": "8bit", "seq_len": 32, "max_batch_exp": 1}
+        req = {
+            "model": "m",
+            "kv_bits": "8bit",
+            "seq_len": 32,
+            "max_batch_exp": 1,
+        }
         r = client.post("/v1/prepare_topology", json=req)
         assert r.status_code == 200
         topo = r.json()

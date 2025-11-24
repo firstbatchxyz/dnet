@@ -25,15 +25,21 @@ jobs:
 
       - name: Setup SSH agent for submodules
         run: |
-          eval "$(ssh-agent -s)"
-          echo "${{ secrets.CI_SSH_KEY }}" | ssh-add -
           mkdir -p ~/.ssh
+          echo "${{ secrets.CI_SSH_KEY }}" > ~/.ssh/dnet_id_ed25519
+          chmod 600 ~/.ssh/dnet_id_ed25519
           ssh-keyscan github.com >> ~/.ssh/known_hosts
+          git config --global core.sshCommand "ssh -i ~/.ssh/dnet_id_ed25519 -o IdentitiesOnly=yes"
 
       - name: Checkout submodules
         run: |
           git submodule sync --recursive
           git submodule update --init --recursive
+
+      - name: Cleanup SSH key
+        if: always()
+        run: |
+          rm -f ~/.ssh/dnet_id_ed25519
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5

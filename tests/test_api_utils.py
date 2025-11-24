@@ -12,9 +12,13 @@ pytestmark = pytest.mark.api
 
 
 def _make_solution(w, n, k):
-    return HALDAResult(w=w[:], n=n[:], k=k, obj_value=0.0, sets={"M1": [], "M2": [], "M3": []})
+    return HALDAResult(
+        w=w[:], n=n[:], k=k, obj_value=0.0, sets={"M1": [], "M2": [], "M3": []}
+    )
+
 
 # postprocess_single_round
+
 
 def _is_adjacent_ring(order, a, b):
     i = order.index(a)
@@ -76,6 +80,7 @@ def test_compute_assignments_basic():
 
 # compute_layer_assignments
 
+
 def test_compute_assignments_three_devices_two_rounds():
     shard_order = ["dev1", "dev2", "dev3"]
     w = [3, 5, 4]
@@ -128,13 +133,14 @@ def test_compute_assignments_mismatch_raises():
 
 # optimize_device_ordering
 
+
 def test_optimize_ordering_adjacent_tb():
     profiles = {"A": object(), "B": object(), "C": object(), "D": object()}
     tb = {
         "A": {"B": FakeTBConn("10.0.0.2", "B")},
         "B": {"A": FakeTBConn("10.0.0.1", "A"), "C": FakeTBConn("10.0.0.3", "C")},
         "C": {"B": FakeTBConn("10.0.0.2", "B")},
-        "D": {}, # D isolated
+        "D": {},  # D isolated
     }
 
     ordered = optimize_device_ordering(profiles, tb)
@@ -149,7 +155,9 @@ def test_optimize_ordering_adjacent_tb():
 
 
 def test_optimize_ordering_two_pairs():
-    profiles = {k: object() for k in ["dev1", "dev2", "dev3", "dev4", "dev5", "dev6", "dev7"]}
+    profiles = {
+        k: object() for k in ["dev1", "dev2", "dev3", "dev4", "dev5", "dev6", "dev7"]
+    }
     tb = {
         "dev3": {"dev1": FakeTBConn("10.0.0.2", "dev1")},
         "dev1": {"dev3": FakeTBConn("10.0.0.3", "dev3")},
@@ -158,7 +166,7 @@ def test_optimize_ordering_two_pairs():
     }
     ordered = optimize_device_ordering(profiles, tb)
 
-    def adj(order, a, b): # ensure both pairs are adjacent in the ring ordering
+    def adj(order, a, b):  # ensure both pairs are adjacent in the ring ordering
         return _is_adjacent_ring(order, a, b)
 
     assert adj(ordered, "dev1", "dev3")

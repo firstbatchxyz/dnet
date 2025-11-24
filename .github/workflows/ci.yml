@@ -47,9 +47,9 @@ jobs:
       - name: Sync dev dependencies
         run: |
           if [[ "$RUNNER_OS" == "macOS" ]]; then
-            uv sync --extra mac,dev
+            uv sync --extra mac --extra dev
           else
-            uv sync --extra cpu,dev
+            uv sync --extra cpu --extra dev
           fi
 
       - name: Ruff format check (style/format) via uvx

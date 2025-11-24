@@ -1,10 +1,18 @@
 .PHONY: lint #         | Run linter
 lint:
-	  uvx ruff check
+	   uv run ruff check
 
 .PHONY: format #       | Check formatting
 format:
-		uvx ruff format --diff
+		uv run ruff format --diff
+
+.PHONEY: format-fix #   | Fix formatting issues
+format-fix:
+		uv run ruff format .
+
+.PHONY: typecheck #   | Run type checker
+typecheck:
+		uv run mypy .
 
 .PHONY: protos #       | Generate protobuf files
 protos:

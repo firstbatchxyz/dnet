@@ -15,6 +15,8 @@ from .models import (
     PrepareTopologyRequest,
     PrepareTopologyManualRequest,
     UnloadModelResponse,
+    ListModelsResponseModel,
+    ModelObject,
 )
 from dnet.core.types.topology import TopologyInfo, LayerAssignment
 from dnet.shard.models import HealthResponse
@@ -76,6 +78,7 @@ class HTTPServer:
         )
         self.app.add_api_route("/v1/load_model", self.load_model, methods=["POST"])
         self.app.add_api_route("/v1/unload_model", self.unload_model, methods=["POST"])
+        self.app.add_api_route("/v1/models", self.get_models, methods=["GET"])
         # Topology endpoints
         self.app.add_api_route("/v1/topology", self.get_topology, methods=["GET"])
         self.app.add_api_route(
@@ -101,6 +104,11 @@ class HTTPServer:
             http_port=self.http_port,
             instance=self.node_id,
         )
+
+    async def get_models(self) -> ListModelsResponseModel:
+        return [
+            ModelObject(**m.model_dump()) for m in self.model_manager.available_models
+        ]
 
     async def chat_completions(self, req: ChatRequestModel):
         if not self.model_manager.current_model_id:
@@ -216,6 +224,13 @@ class HTTPServer:
 
     async def prepare_topology(self, req: PrepareTopologyRequest) -> TopologyInfo:
         try:
+            if not self.model_manager.is_model_available(req.model):
+                from fastapi import HTTPException, status
+
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Model '{req.model}' is not currently supported by dnet. Consider creating a PR to https://github.com/firstbatchxyz/dnet",
+                )
             model_config = get_model_config_json(req.model)
             embedding_size = int(model_config["hidden_size"])
             num_layers = int(model_config["num_hidden_layers"])

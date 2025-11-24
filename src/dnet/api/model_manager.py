@@ -1,3 +1,5 @@
+import time
+
 import httpx
 from typing import Optional, Dict, List, Any
 from mlx_lm.tokenizer_utils import load_tokenizer
@@ -6,11 +8,13 @@ from dnet_p2p import DnetDeviceProperties
 from dnet.utils.logger import logger
 from dnet.utils.model import resolve_tokenizer_dir
 from dnet.core.types.topology import TopologyInfo
+from .catalog import model_catalog
 from .models import (
     APILoadModelResponse,
     ShardLoadStatus,
     UnloadModelResponse,
     ShardUnloadStatus,
+    ModelObjectExtended,
 )
 from dnet.shard.models import ShardLoadModelRequest, ShardLoadModelResponse
 
@@ -20,6 +24,28 @@ class ModelManager:
         self.current_model_id: Optional[str] = None
         self.model_config: Optional[Dict[str, Any]] = None
         self.tokenizer: Optional[Any] = None
+
+        self.available_models: List[ModelObjectExtended] = []
+        for model in model_catalog["models"]:
+            extended_model = ModelObjectExtended(
+                id=model["id"],
+                arch=model["arch"],
+                quantization=model["quantization"],
+                alias=model["alias"],
+                created=int(model["created"])
+                if "created" in model
+                else int(time.time()),
+            )
+            self.available_models.append(extended_model)
+
+    def is_model_available(self, model_id: str) -> bool:
+        """
+        Checks if the given model ID is available in the catalog.
+        """
+        for model in self.available_models:
+            if model.id == model_id:
+                return True
+        return False
 
     async def load_model(
         self,

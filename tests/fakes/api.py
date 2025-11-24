@@ -220,6 +220,11 @@ class FakeModelManager:
         self.load_calls: list = []
         self.unload_calls: list = []
 
+    def is_model_available(self, model_id) -> bool:
+        if model_id == "m":
+            return True
+        return False
+
     async def load_model(self, topology, api_properties, grpc_port):
         from dnet.api.models import APILoadModelResponse
 

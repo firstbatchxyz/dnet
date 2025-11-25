@@ -437,7 +437,7 @@ class OffloadPolicy(ComputePolicy):
 
         try:
             if self.weight_cache:
-                self.weight_cache.cancel_all_prefetch()
+                self.weight_cache.shutdown()
         except Exception:
             pass
 

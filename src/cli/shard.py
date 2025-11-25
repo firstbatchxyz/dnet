@@ -40,7 +40,7 @@ async def serve(grpc_port: int, http_port: int, queue_size: int = 128) -> None:
 
     from dnet.tui import DnetTUI
 
-    tui = DnetTUI(title=f"DNET Shard {shard_id}")
+    tui = DnetTUI(title=f"DNET Shard ({hostname})")
     tui_task = asyncio.create_task(tui.run(stop_event))
 
     # Hook into Shard model loading for TUI updates

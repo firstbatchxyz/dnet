@@ -56,14 +56,26 @@ class WeightCache:
         # Track in-flight materializations so compute can wait on prefetch
         self.loading_futures: Dict[int, Future] = {}
         self.prefetch_futures: Dict[int, Future] = {}
+        self.closed = False
         logger.info("WeightCache resident budget: max_weights=%d", self.max_weights)
+
+    def shutdown(self):
+        """Shutdown the cache, preventing new loads and cancelling prefetches."""
+        with self.lock:
+            self.closed = True
+        self.cancel_all_prefetch()
 
     def get_weight(
         self, layer_id: int, *, inc_ref: bool = True
     ) -> Optional[Dict[str, mx.array]]:
         """Get weight from cache"""
+        if self.closed:
+            return None
+
         # First, fast path under lock for cache hit or in-flight load
         with self.lock:
+            if self.closed:
+                return None
             if layer_id in self.cache:
                 data, _ = self.cache[layer_id]
                 # refresh LRU timestamp
@@ -102,6 +114,9 @@ class WeightCache:
                 except Exception:
                     total_bytes = 0
                 with self.lock:
+                    if self.closed:
+                        # If closed while loading, don't cache, just return None
+                        return None
                     self.cache[layer_id] = (data, time.time())
                     if inc_ref:
                         self.reference_counts[layer_id] = (
@@ -125,6 +140,24 @@ class WeightCache:
                 )
                 return data
             except Exception as e:
+                # Handle FileNotFoundError specifically for unload race condition
+                if isinstance(e, FileNotFoundError) or isinstance(e, OSError):
+                    if self.closed:
+                        logger.warning(
+                            "Ignored load error for layer %s during shutdown: %s",
+                            layer_id,
+                            e,
+                        )
+                        with self.lock:
+                            self.loading_futures.pop(layer_id, None)
+                        return None
+                    else:
+                        logger.error(
+                            "WeightCache: FileNotFoundError but NOT closed. layer=%s error=%s",
+                            layer_id,
+                            e,
+                        )
+
                 # Signal failure to any waiters
                 with self.lock:
                     try:

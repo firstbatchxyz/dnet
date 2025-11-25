@@ -44,11 +44,26 @@ async def serve(http_port: int, grpc_port: int) -> None:
 
         # Components
         from dnet.api.strategies.ring import RingStrategy
+        from typing import Optional
 
         strategy = RingStrategy()  # ContextParallelStrategy()
 
+        def update_tui_model_info(
+            model_name: Optional[str], layers: int, loaded: bool
+        ) -> None:
+            if not model_name:
+                tui.update_model_info("", 0, 0, False, show_layers_visual=False)
+            else:
+                tui.update_model_info(
+                    model_name,
+                    layers,
+                    residency=0,
+                    loaded=loaded,
+                    show_layers_visual=False,
+                )
+
         cluster_manager = ClusterManager(discovery, solver=strategy.solver)
-        model_manager = ModelManager()
+        model_manager = ModelManager(on_model_change=update_tui_model_info)
         inference_manager = InferenceManager(
             cluster_manager, model_manager, grpc_port, adapter=strategy.adapter
         )

@@ -1,7 +1,7 @@
 import time
 
 import httpx
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Callable
 from mlx_lm.tokenizer_utils import load_tokenizer
 
 from dnet_p2p import DnetDeviceProperties
@@ -20,10 +20,14 @@ from dnet.shard.models import ShardLoadModelRequest, ShardLoadModelResponse
 
 
 class ModelManager:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        on_model_change: Optional[Callable[[Optional[str], int, bool], None]] = None,
+    ) -> None:
         self.current_model_id: Optional[str] = None
         self.model_config: Optional[Dict[str, Any]] = None
         self.tokenizer: Optional[Any] = None
+        self.on_model_change = on_model_change
 
         self.available_models: List[ModelObjectExtended] = []
         for model in model_catalog["models"]:
@@ -163,6 +167,8 @@ class ModelManager:
                 self.current_model_id = model_to_load
 
                 logger.info("API-side model loaded successfully for %s", model_to_load)
+                if self.on_model_change:
+                    self.on_model_change(model_to_load, topology.num_layers, True)
                 return APILoadModelResponse(
                     model=model_to_load,
                     success=True,
@@ -233,6 +239,8 @@ class ModelManager:
 
         self.current_model_id = None
         self.tokenizer = None
+        if self.on_model_change:
+            self.on_model_change(None, 0, False)
 
         return UnloadModelResponse(
             success=all(s.success for s in shard_statuses),

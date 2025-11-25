@@ -64,6 +64,7 @@ class DnetTUI:
         self.model_residency: int = 0
         self.model_loaded: bool = False
         self.show_model_info: bool = True  # Always visible
+        self.show_layers_visual: bool = True
 
         # Calculate header size based on banner lines, defaulting to 3 if no banner
         header_size = len(self.banner_text.splitlines()) + 2 if get_banner_text() else 3
@@ -158,7 +159,7 @@ class DnetTUI:
             f"[bold]{self.model_name}[/bold] ({self.model_layers} layers, {self.model_residency} resident)",
             f"[{status_style}]{status_text}[/]",
         )
-        if self.model_layers > 0:
+        if self.model_layers > 0 and self.show_layers_visual:
             grid.add_row(layers_visual, "")
 
         return Panel(
@@ -194,7 +195,12 @@ class DnetTUI:
         self.status_message = message
 
     def update_model_info(
-        self, name: str, layers: int, residency: int = 0, loaded: bool = False
+        self,
+        name: str,
+        layers: int,
+        residency: int = 0,
+        loaded: bool = False,
+        show_layers_visual: bool = True,
     ) -> None:
         """Update the model information panel."""
         self.model_name = name
@@ -202,8 +208,9 @@ class DnetTUI:
         self.model_residency = residency
         self.model_loaded = loaded
         self.show_model_info = True
+        self.show_layers_visual = show_layers_visual
         # Adjust size if needed, maybe 4 if we have layers visual
-        self.layout["model_info"].size = 4 if layers > 0 else 3
+        self.layout["model_info"].size = 4 if (layers > 0 and show_layers_visual) else 3
 
     def _on_log_record(self, record: logging.LogRecord):
         """Callback for new log records."""

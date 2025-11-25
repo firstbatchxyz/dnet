@@ -16,6 +16,8 @@ jobs:
       PROJECT_ROOT: ${{ github.workspace }}
       PYTHONPATH: src
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
       - name: Setup Environment
         uses: ./.github/actions/setup-env
         with:

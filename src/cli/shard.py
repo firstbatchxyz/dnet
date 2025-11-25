@@ -77,8 +77,8 @@ async def serve(grpc_port: int, http_port: int, queue_size: int = 128) -> None:
             tui.update_status(f"Model unload failed: {e}")
             raise
 
-    shard.load_model = load_model_wrapper
-    shard.unload_model = unload_model_wrapper
+    shard.load_model = load_model_wrapper  # type: ignore
+    shard.unload_model = unload_model_wrapper  # type: ignore
 
     try:
         tui.update_status("Starting servers...")

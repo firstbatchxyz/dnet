@@ -1,4 +1,5 @@
 """Terminal User Interface for dnet using Rich."""
+
 import psutil
 import asyncio
 import logging
@@ -193,6 +194,13 @@ class DnetTUI:
         # Adjust size if needed, maybe 4 if we have layers visual
         self.layout["model_info"].size = 4 if layers > 0 else 3
 
+    def _on_log_record(self, record: logging.LogRecord):
+        """Callback for new log records."""
+        if "Repacking model weights" in record.getMessage():
+            self.update_status("Repacking weights...")
+        elif "Model loaded successfully" in record.getMessage():
+            self.update_status("Running...")
+
     async def run(self, stop_event: asyncio.Event) -> None:
         """Run the TUI loop until stop_event is set."""
         self.is_running = True
@@ -201,10 +209,10 @@ class DnetTUI:
             while not stop_event.is_set():
                 self.layout["header"].update(self._generate_header())
                 self.layout["body"].update(self._generate_logs())
-                # Always update model info since it's always visible now
+                # Always update model info since it's always visible
                 self.layout["model_info"].update(self._generate_model_info())
                 self.layout["footer"].update(self._generate_footer())
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.25)
 
         self.is_running = False
         dnet_logger.removeHandler(self.log_handler)

@@ -145,6 +145,12 @@ model_catalog = {
             "alias": "llama-3.3-70b-instruct",
         },
         {
+            "id": "mlx-community/Meta-Llama-3.1-70B-Instruct-4bit",
+            "arch": "llama",
+            "quantization": "4bit",
+            "alias": "llama-3.1-70b-instruct",
+        },
+        {
             "id": "mlx-community/Hermes-4-70B-8bit",
             "arch": "llama",
             "quantization": "8bit",

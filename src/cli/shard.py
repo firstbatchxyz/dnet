@@ -38,24 +38,78 @@ async def serve(grpc_port: int, http_port: int, queue_size: int = 128) -> None:
     loop.add_signal_handler(signal.SIGINT, _signal_handler)
     loop.add_signal_handler(signal.SIGTERM, _signal_handler)
 
-    # Start servers first
-    await grpc_server.start()
-    await http_server.start(stop_event.wait)
+    from dnet.tui import DnetTUI
 
-    # Start discovery
-    # TODO: optionally take shard name from CLI
-    instance = f"shard-{token_hex(4)}-{hostname}"
-    discovery.create_instance(
-        instance,
-        http_port,
-        grpc_port,
-        is_manager=False,  # shard is never a manager
-    )
-    await discovery.async_start()
+    tui = DnetTUI(title=f"DNET Shard {shard_id}")
+    tui_task = asyncio.create_task(tui.run(stop_event))
 
-    # Finally start shard
-    await shard.start(loop)
-    await stop_event.wait()
+    # Hook into Shard model loading for TUI updates
+    original_load_model = shard.load_model
+    original_unload_model = shard.unload_model
+
+    async def load_model_wrapper(req):
+        tui.update_status(f"Loading model: {req.model_path}...")
+        # Initial update with 0 residency until loaded (or we could show target residency)
+        residency = int(req.residency_size) if req.residency_size else 0
+        tui.update_model_info(
+            req.model_path, len(req.layers), residency=residency, loaded=False
+        )
+        try:
+            res = await original_load_model(req)
+            tui.update_model_info(
+                req.model_path, len(req.layers), residency=residency, loaded=True
+            )
+            tui.update_status(f"Model loaded: {req.model_path}")
+            return res
+        except Exception as e:
+            tui.update_status(f"Model load failed: {e}")
+            raise
+
+    async def unload_model_wrapper():
+        tui.update_status("Unloading model...")
+        try:
+            res = await original_unload_model()
+            if res.success:
+                tui.update_model_info(None, 0, residency=0, loaded=False)
+                tui.update_status("Model unloaded")
+            return res
+        except Exception as e:
+            tui.update_status(f"Model unload failed: {e}")
+            raise
+
+    shard.load_model = load_model_wrapper  # type: ignore
+    shard.unload_model = unload_model_wrapper  # type: ignore
+
+    try:
+        tui.update_status("Starting servers...")
+        # Start servers first
+        await grpc_server.start()
+        await http_server.start(stop_event.wait)
+
+        # Start discovery
+        # TODO: optionally take shard name from CLI
+        instance = f"shard-{token_hex(4)}-{hostname}"
+        discovery.create_instance(
+            instance,
+            http_port,
+            grpc_port,
+            is_manager=False,  # shard is never a manager
+        )
+        await discovery.async_start()
+
+        # Finally start shard
+        tui.update_status("Starting shard runtime...")
+        await shard.start(loop)
+
+        tui.update_status(f"Shard Running (HTTP:{http_port} gRPC:{grpc_port})")
+        await stop_event.wait()
+    finally:
+        if not tui_task.done():
+            tui_task.cancel()
+            try:
+                await tui_task
+            except asyncio.CancelledError:
+                pass
     await shard.shutdown()
     if discovery.is_running():
         await discovery.async_stop()

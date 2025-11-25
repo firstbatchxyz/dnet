@@ -192,6 +192,8 @@ class FitInMemoryPolicy(ComputePolicy):
                             dtype=str(self.runtime._wire_mx_dtype),
                             callback_url=msg.callback_url,
                             tensor=x_cast,
+                            req_logprobs=msg.req_logprobs,
+                            req_top_logprobs=msg.req_top_logprobs,
                         )
 
                     self.runtime.emit_result(output_msg)

@@ -30,16 +30,21 @@ def _find_art_file() -> Path | None:
     return None
 
 
-def print_startup_banner(tag: Optional[str] = None) -> None:
-    """Print the ASCII art banner at startup if available."""
+def get_banner_text() -> str | None:
+    """Get the ASCII art banner text if available."""
     art_path = _find_art_file()
     if art_path is None:
-        return
+        return None
     try:
-        art = art_path.read_text(encoding="utf-8", errors="ignore")
+        return art_path.read_text(encoding="utf-8", errors="ignore")
     except Exception:
-        return
-    if art.strip():
+        return None
+
+
+def print_startup_banner(tag: Optional[str] = None) -> None:
+    """Print the ASCII art banner at startup if available."""
+    art = get_banner_text()
+    if art and art.strip():
         # Prepend a newline so the art starts on a fresh line in logs
         if tag:
             art += f"\n[=== {tag.upper()} ===]\n"

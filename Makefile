@@ -1,22 +1,28 @@
+UV_RUN = uv run --env-file .env
+
+.PHONY: run #         | Run
+run:
+	$(UV_RUN)
+
 .PHONY: lint #         | Run linter
 lint:
-	   uv run ruff check
+	$(UV_RUN) ruff check
 
 .PHONY: format #       | Check formatting
 format:
-		uv run ruff format --diff
+		$(UV_RUN) ruff format --diff
 
 .PHONEY: format-fix #   | Fix formatting issues
 format-fix:
-		uv run ruff format .
+		$(UV_RUN) ruff format .
 
 .PHONY: typecheck #   | Run type checker
 typecheck:
-		uv run mypy .
+		$(UV_RUN) mypy .
 
 .PHONY: protos #       | Generate protobuf files
 protos:
-		uv run ./scripts/generate_protos.py
+		$(UV_RUN) ./scripts/generate_protos.py
 
 .PHONY: update #       | Update git submodules
 update:
@@ -29,14 +35,14 @@ pull:
 
 .PHONY: test #         | Run tests
 test:
-		uv run pytest -v
+		$(UV_RUN) pytest -v
 
 .PHONY: reset-sync #   | Reset virtual environment and sync dependencies again
-reset-sync: 																																																
+reset-sync:
 		rm -rf .venv
 		rm uv.lock
 		uv sync
 
 .PHONY: help #         | List targets
-help:                                                                                                                    
+help:
 		@grep '^.PHONY: .* #' Makefile | sed 's/\.PHONY: \(.*\) # \(.*\)/\1 \2/' | expand -t20

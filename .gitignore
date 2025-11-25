@@ -42,3 +42,6 @@ layer_weights/*
 bench_*
 repacked_weights/*
 repacked_models/*
+
+# Env files
+.env

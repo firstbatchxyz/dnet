@@ -1,4 +1,4 @@
-UV_RUN = uv run -e .env
+UV_RUN = uv run --env-file .env
 
 .PHONY: run #         | Run
 run:

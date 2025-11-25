@@ -15,6 +15,8 @@ runs:
 
     - name: Setup SSH for Submodules
       uses: ./.github/actions/setup-ssh
+      with:
+        ci_ssh_key: ${{ inputs.ci_ssh_key }}
 
     - name: Install uv
       uses: astral-sh/setup-uv@v5

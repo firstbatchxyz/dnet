@@ -1,5 +1,5 @@
 """Terminal User Interface for dnet using Rich."""
-
+import psutil
 import asyncio
 import logging
 from collections import deque
@@ -12,8 +12,11 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.spinner import Spinner
 from rich.table import Table
+from rich.align import Align
 
+from dnet.utils.banner import get_banner_text
 from dnet.utils.logger import logger as dnet_logger
+
 
 class TUILogHandler(logging.Handler):
     """Custom logging handler that sends logs to the TUI."""
@@ -22,8 +25,7 @@ class TUILogHandler(logging.Handler):
         super().__init__()
         self.log_queue = log_queue
         self.formatter = logging.Formatter(
-            "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-            datefmt="%H:%M:%S"
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s", datefmt="%H:%M:%S"
         )
 
     def emit(self, record: logging.LogRecord) -> None:
@@ -38,15 +40,11 @@ class TUILogHandler(logging.Handler):
                 style = "[white]"
             else:
                 style = "[dim]"
-            
+
             self.log_queue.append(f"{style}{msg}[/]")
         except Exception:
             self.handleError(record)
 
-
-import psutil
-from rich.align import Align
-from dnet.utils.banner import get_banner_text
 
 class DnetTUI:
     """Manages the Rich TUI layout and updates."""
@@ -59,14 +57,14 @@ class DnetTUI:
         self.is_running = False
         self.title = title
         self.banner_text = get_banner_text() or title
-        
+
         # Model Info State
         self.model_name: Optional[str] = None
         self.model_layers: int = 0
         self.model_residency: int = 0
         self.model_loaded: bool = False
         self.show_model_info: bool = True  # Always visible
-        
+
         # Calculate header size based on banner lines, defaulting to 3 if no banner
         header_size = len(self.banner_text.splitlines()) + 2 if get_banner_text() else 3
 
@@ -74,10 +72,10 @@ class DnetTUI:
         self.layout.split(
             Layout(name="header", size=header_size),
             Layout(name="body", ratio=2),
-            Layout(name="model_info", size=3), # Always visible
+            Layout(name="model_info", size=3),  # Always visible
             Layout(name="footer", size=3),
         )
-        
+
         # Setup logging
         self.log_handler = TUILogHandler(self.log_queue)
         dnet_logger.addHandler(self.log_handler)
@@ -86,7 +84,7 @@ class DnetTUI:
         return Panel(
             Text(self.banner_text, justify="left", style="bold white"),
             style="cyan",
-            title=self.title
+            title=self.title,
         )
 
     def _generate_logs(self) -> Panel:
@@ -101,42 +99,48 @@ class DnetTUI:
 
     def _generate_model_info(self) -> Panel:
         if not self.model_name:
-            return Panel(Text("No model loaded", style="dim"), title="Model Info", border_style="cyan")
-            
+            return Panel(
+                Text("No model loaded", style="dim"),
+                title="Model Info",
+                border_style="cyan",
+            )
+
         status_style = "bold green" if self.model_loaded else "bold yellow"
         status_text = "LOADED" if self.model_loaded else "LOADING..."
-        
+
         # Visualize layers as boxes
         # Limit to avoid cluttering if too many layers
         max_boxes = 40
         layers_visual = Text()
-        
+
         if self.model_layers > 0:
             num_boxes = min(self.model_layers, max_boxes)
-            
+
             # Determine how many are resident
             # If loaded, we show residency. If loading, maybe just show empty?
             # Let's show residency if loaded.
-            
+
             for i in range(num_boxes):
                 is_resident = i < self.model_residency
                 # Filled box for resident, empty for non-resident
                 char = "■" if is_resident else "□"
                 # Green for resident, dim/blue for non-resident
                 style = "bold green" if is_resident else "blue"
-                
+
                 layers_visual.append(f"[{char} ", style=style)
-            
+
             if self.model_layers > max_boxes:
-                layers_visual.append(f"... (+{self.model_layers - max_boxes})", style="dim")
-        
+                layers_visual.append(
+                    f"... (+{self.model_layers - max_boxes})", style="dim"
+                )
+
         grid = Table.grid(expand=True)
         grid.add_column(justify="left")
         grid.add_column(justify="right")
-        
+
         grid.add_row(
             f"[bold]{self.model_name}[/bold] ({self.model_layers} layers, {self.model_residency} resident)",
-            f"[{status_style}]{status_text}[/]"
+            f"[{status_style}]{status_text}[/]",
         )
         if self.model_layers > 0:
             grid.add_row(layers_visual, "")
@@ -150,25 +154,24 @@ class DnetTUI:
     def _generate_footer(self) -> Panel:
         # Create a spinner with the current status message
         spinner = Spinner("aesthetic", text=f" {self.status_message}", style="cyan")
-        
+
         # System Stats
         mem = psutil.virtual_memory()
         used_gb = mem.used / (1024**3)
         avail_gb = mem.available / (1024**3)
         total_gb = mem.total / (1024**3)
         mem_text = f"[bold]RAM:[/bold] {used_gb:.1f}/{total_gb:.1f} GB (Avail: {avail_gb:.1f} GB)"
-        
+
         # Create a table for the footer to hold spinner and text
         grid = Table.grid(expand=True)
         grid.add_column(justify="left")
         grid.add_column(justify="right")
-        
+
         # Add the spinner object directly to the row so Rich animates it
         grid.add_row(
-             spinner,
-             Text.from_markup(f"{mem_text}  [dim]Ctrl+C to stop[/dim]")
+            spinner, Text.from_markup(f"{mem_text}  [dim]Ctrl+C to stop[/dim]")
         )
-        
+
         return Panel(
             grid,
             title="Current Work",
@@ -178,7 +181,9 @@ class DnetTUI:
     def update_status(self, message: str) -> None:
         self.status_message = message
 
-    def update_model_info(self, name: str, layers: int, residency: int = 0, loaded: bool = False) -> None:
+    def update_model_info(
+        self, name: str, layers: int, residency: int = 0, loaded: bool = False
+    ) -> None:
         """Update the model information panel."""
         self.model_name = name
         self.model_layers = layers
@@ -191,8 +196,8 @@ class DnetTUI:
     async def run(self, stop_event: asyncio.Event) -> None:
         """Run the TUI loop until stop_event is set."""
         self.is_running = True
-        
-        with Live(self.layout, refresh_per_second=4, screen=True) as live:
+
+        with Live(self.layout, refresh_per_second=4, screen=True):
             while not stop_event.is_set():
                 self.layout["header"].update(self._generate_header())
                 self.layout["body"].update(self._generate_logs())
@@ -200,7 +205,6 @@ class DnetTUI:
                 self.layout["model_info"].update(self._generate_model_info())
                 self.layout["footer"].update(self._generate_footer())
                 await asyncio.sleep(0.1)
-        
+
         self.is_running = False
         dnet_logger.removeHandler(self.log_handler)
-

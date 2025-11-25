@@ -13,7 +13,6 @@ from dnet.api.model_manager import ModelManager
 from dnet.api.inference import InferenceManager
 from dnet.api.http_api import HTTPServer as ApiHTTPServer
 from dnet.api.grpc_servicer import GrpcServer as ApiGrpcServer
-from dnet.utils.banner import print_startup_banner
 
 
 async def serve(http_port: int, grpc_port: int) -> None:
@@ -27,10 +26,11 @@ async def serve(http_port: int, grpc_port: int) -> None:
     loop.add_signal_handler(signal.SIGINT, _signal_handler)
     loop.add_signal_handler(signal.SIGTERM, _signal_handler)
 
-    #print_startup_banner(tag="api")
-    
+    # print_startup_banner(tag="api")
+
     # TUI Setup
     from dnet.tui import DnetTUI
+
     tui = DnetTUI(title="DNET API Server")
     tui_task = asyncio.create_task(tui.run(stop_event))
 

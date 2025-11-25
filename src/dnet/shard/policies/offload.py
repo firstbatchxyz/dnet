@@ -45,6 +45,7 @@ class OffloadPolicy(ComputePolicy):
         # Repack for offload/sliding_fit
         try:
             t0 = time.perf_counter()
+            logger.info("Repacking model weights (this may take a while)...")
             repacked_dir, did_repack = ensure_repacked_for_layers(
                 self.runtime.model_path, self.runtime._assigned_sorted
             )
@@ -399,7 +400,9 @@ class OffloadPolicy(ComputePolicy):
                             try:
                                 loop = asyncio.get_running_loop()
                             except RuntimeError:
-                                logger.error("No event loop attached to runtime and none running in thread")
+                                logger.error(
+                                    "No event loop attached to runtime and none running in thread"
+                                )
                                 return
 
                         if next_window is None or len(next_window) == 0:

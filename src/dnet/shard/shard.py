@@ -47,7 +47,8 @@ class Shard:
         self.runtime.reset_cache()
 
     async def load_model(self, req) -> ShardLoadModelResponse:
-        self.runtime.load_model_core(req)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self.runtime.load_model_core, req)
         await self.adapter.configure_topology(req)
         return ShardLoadModelResponse(
             success=True,

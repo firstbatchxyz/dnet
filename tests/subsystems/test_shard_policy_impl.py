@@ -200,6 +200,8 @@ def test_offload_process_schedules_prefetch(monkeypatch):
     )
 
     async def main():
+        # Attach the loop to the runtime so the policy can use it
+        rt.attach_loop(asyncio.get_running_loop())
         pol.process(msg)
         # Give the loop a tick to register the future
         await asyncio.sleep(0)

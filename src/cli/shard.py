@@ -39,6 +39,7 @@ async def serve(grpc_port: int, http_port: int, queue_size: int = 128) -> None:
     loop.add_signal_handler(signal.SIGTERM, _signal_handler)
 
     from dnet.tui import DnetTUI
+
     tui = DnetTUI(title=f"DNET Shard {shard_id}")
     tui_task = asyncio.create_task(tui.run(stop_event))
 
@@ -50,10 +51,14 @@ async def serve(grpc_port: int, http_port: int, queue_size: int = 128) -> None:
         tui.update_status(f"Loading model: {req.model_path}...")
         # Initial update with 0 residency until loaded (or we could show target residency)
         residency = int(req.residency_size) if req.residency_size else 0
-        tui.update_model_info(req.model_path, len(req.layers), residency=residency, loaded=False)
+        tui.update_model_info(
+            req.model_path, len(req.layers), residency=residency, loaded=False
+        )
         try:
             res = await original_load_model(req)
-            tui.update_model_info(req.model_path, len(req.layers), residency=residency, loaded=True)
+            tui.update_model_info(
+                req.model_path, len(req.layers), residency=residency, loaded=True
+            )
             tui.update_status(f"Model loaded: {req.model_path}")
             return res
         except Exception as e:
@@ -95,11 +100,11 @@ async def serve(grpc_port: int, http_port: int, queue_size: int = 128) -> None:
         # Finally start shard
         tui.update_status("Starting shard runtime...")
         await shard.start(loop)
-        
+
         tui.update_status(f"Shard Running (HTTP:{http_port} gRPC:{grpc_port})")
         await stop_event.wait()
     finally:
-         if not tui_task.done():
+        if not tui_task.done():
             tui_task.cancel()
             try:
                 await tui_task

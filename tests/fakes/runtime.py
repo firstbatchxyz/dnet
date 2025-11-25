@@ -110,6 +110,10 @@ class FakeRuntimeForPolicy:
         self.output_pool = LayerAwareMemoryPool(total_memory_mb=2)
         self._emitted: list = []
         self._compute_busy = threading.Event()
+        self._loop = None
+
+    def attach_loop(self, loop):
+        self._loop = loop
 
     def get_or_make_kv(self, nonce: str):
         return []

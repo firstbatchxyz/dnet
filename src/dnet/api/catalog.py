@@ -168,5 +168,41 @@ model_catalog = {
             "quantization": "4bit",
             "alias": "hermes-4-405b",
         },
+        {
+            "id": "mlx-community/olmo-3-7b-think-4bit",
+            "arch": "olmo3",
+            "quantization": "4bit",
+            "alias": "olmo3-7b",
+        },
+        {
+            "id": "mlx-community/Olmo-3-1125-32B-4bit",
+            "arch": "olmo3",
+            "quantization": "4bit",
+            "alias": "olmo3-32b",
+        },
+        {
+            "id": "mlx-community/GLM-4-9B-0414-4bit",
+            "arch": "glm4",
+            "quantization": "4bit",
+            "alias": "glm4-9b",
+        },
+        {
+            "id": "mlx-community/GLM-4-9B-0414-8bit",
+            "arch": "glm4",
+            "quantization": "8bit",
+            "alias": "glm4-9b",
+        },
+        {
+            "id": "mlx-community/GLM-4-32B-0414-4bit",
+            "arch": "glm4",
+            "quantization": "4bit",
+            "alias": "glm4-32b",
+        },
+        {
+            "id": "mlx-community/Qwen3-30B-A3B-4bit",
+            "arch": "qwen3_moe",
+            "quantization": "4bit",
+            "alias": "qwen3-moe-30b",
+        },
     ]
 }

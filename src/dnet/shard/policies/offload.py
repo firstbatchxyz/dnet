@@ -394,7 +394,14 @@ class OffloadPolicy(ComputePolicy):
                         next_window = self._next_local_layers(
                             self.runtime._assigned_sorted, last_layer, self.window_size
                         )
-                        loop = asyncio.get_running_loop()
+                        loop = self.runtime._loop
+                        if loop is None:
+                            try:
+                                loop = asyncio.get_running_loop()
+                            except RuntimeError:
+                                logger.error("No event loop attached to runtime and none running in thread")
+                                return
+
                         if next_window is None or len(next_window) == 0:
                             # No next window
                             # prefetch first window for next round for overlap

@@ -7,9 +7,9 @@ from mlx_lm.models.olmo3 import ModelArgs, Olmo3DecoderLayer
 
 from .base import BaseRingModel
 
+
 # NOTE: mlx_lm handles sliding window attention, check 'initialize_rope' for logic
 class Olmo3RingModel(BaseRingModel):
-
     model_type = "olmo3"
 
     def __init__(
@@ -107,9 +107,11 @@ class Olmo3RingModel(BaseRingModel):
 
     @property
     def head_dim(self) -> Tuple[int, int]:
-        head_dim = (self.config.head_dim or 
-                    self.config.hidden_size // self.config.num_attention_heads)
-        return(head_dim, head_dim)
+        head_dim = (
+            self.config.head_dim
+            or self.config.hidden_size // self.config.num_attention_heads
+        )
+        return (head_dim, head_dim)
 
     @property
     def n_kv_heads(self) -> int:

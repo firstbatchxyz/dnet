@@ -158,14 +158,14 @@ class Qwen3MoERingModel(BaseRingModel):
     # qwen stores expert weights in separate buffers
     def sanitize(self, weights):
         if "model.layers.0.mlp.experts.0.up_proj.weight" not in weights:
-            return weights  
-        for l in range(self.args.num_hidden_layers):
-            prefix = f"model.layers.{l}"
+            return weights
+        for layer in range(self.args.num_hidden_layers):
+            prefix = f"model.layers.{layer}"
             for n in ["up_proj", "down_proj", "gate_proj"]:
                 if f"{prefix}.mlp.experts.0.{n}.weight" in weights:
                     to_join = [
-                      weights.pop(f"{prefix}.mlx.experts.{e}.{n}.weight")
-                      for e in range(self.args.num_experts)
+                        weights.pop(f"{prefix}.mlx.experts.{e}.{n}.weight")
+                        for e in range(self.args.num_experts)
                     ]
                     weights[f"{prefix}.mlp.switch_mlx.{n}.weight"] = mx.stack(to_join)
         return weights

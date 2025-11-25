@@ -44,7 +44,7 @@ __all__ = [
     "LlamaRingModel",
     "GptOssRingModel",
     "Qwen3RingModel",
-    "Qwen3MoERingModel"
+    "Qwen3MoERingModel",
     "Glm4RingModel",
     "Olmo3RingModel",
     "get_ring_model",

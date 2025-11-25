@@ -1,5 +1,5 @@
 name: 'Setup Environment'
-description: 'Checks out code, sets up SSH, installs uv, and syncs dependencies for the correct platform.'
+description: 'Sets up SSH for submodules, installs uv, and syncs dependencies for the correct platform.'
 
 inputs:
   python_version:
@@ -13,9 +13,6 @@ inputs:
 runs:
   using: 'composite'
   steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-
     - name: Setup SSH for Submodules
       uses: ./.github/actions/setup-ssh
       with:

@@ -47,25 +47,7 @@ class TUILogHandler(logging.Handler):
             self.handleError(record)
 
 
-from rich.console import Console, ConsoleOptions, RenderResult
-from rich.segment import Segment
 
-class LogRenderer:
-    def __init__(self, log_queue: Deque[str]):
-        self.log_queue = log_queue
-
-    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
-        log_text = "\n".join(self.log_queue)
-        text = Text.from_markup(log_text)
-        lines = list(console.render_lines(text, options))
-        
-        height = options.height or options.max_height
-        if height and len(lines) > height:
-            lines = lines[-height:]
-            
-        for line in lines:
-            yield from line
-            yield Segment.line()
 
 class DnetTUI:
     """Manages the Rich TUI layout and updates."""
@@ -109,8 +91,25 @@ class DnetTUI:
         )
 
     def _generate_logs(self) -> Panel:
+
+        header_height = self.layout["header"].size or 3
+        model_info_height = self.layout["model_info"].size or 3
+        footer_height = self.layout["footer"].size or 3
+        
+        total_height = self.console.size.height
+        body_layout_height = total_height - (header_height + model_info_height + footer_height)
+        
+        available_lines = max(1, body_layout_height - 4)
+        
+        visible_logs = list(self.log_queue)[-available_lines:]
+        log_text = "\n".join(visible_logs)
+        
+        text = Text.from_markup(log_text)
+        text.no_wrap = True
+        text.overflow = "ellipsis"
+        
         return Panel(
-            LogRenderer(self.log_queue),
+            text,
             title="Logs",
             border_style="cyan",
             padding=(0, 1),
@@ -171,22 +170,18 @@ class DnetTUI:
         )
 
     def _generate_footer(self) -> Panel:
-        # Create a spinner with the current status message
         spinner = Spinner("aesthetic", text=f" {self.status_message}", style="cyan")
 
-        # System Stats
         mem = psutil.virtual_memory()
         used_gb = mem.used / (1024**3)
         avail_gb = mem.available / (1024**3)
         total_gb = mem.total / (1024**3)
         mem_text = f"[bold]RAM:[/bold] {used_gb:.1f}/{total_gb:.1f} GB (Avail: {avail_gb:.1f} GB)"
 
-        # Create a table for the footer to hold spinner and text
         grid = Table.grid(expand=True)
         grid.add_column(justify="left")
         grid.add_column(justify="right")
 
-        # Add the spinner object directly to the row so Rich animates it
         grid.add_row(
             spinner, Text.from_markup(f"{mem_text}  [dim]Ctrl+C to stop[/dim]")
         )
@@ -223,7 +218,7 @@ class DnetTUI:
         """Run the TUI loop until stop_event is set."""
         self.is_running = True
 
-        with Live(self.layout, refresh_per_second=4, screen=True):
+        with Live(self.layout, console=self.console, refresh_per_second=4, screen=True):
             while not stop_event.is_set():
                 self.layout["header"].update(self._generate_header())
                 self.layout["body"].update(self._generate_logs())

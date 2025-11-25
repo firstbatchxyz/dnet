@@ -6,6 +6,9 @@ inputs:
     description: 'Python version to use for uv.'
     required: false
     default: '3.12'
+  ci_ssh_key:
+    description: 'SSH private key for submodules'
+    required: true
 
 runs:
   using: 'composite'

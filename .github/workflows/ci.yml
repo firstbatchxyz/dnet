@@ -20,4 +20,3 @@ jobs:
     uses: ./.github/workflows/tests-macos.yml
     with:
       python_version: '3.12'
-      PYTHONPATH: src

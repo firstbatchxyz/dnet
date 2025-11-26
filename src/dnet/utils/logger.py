@@ -46,6 +46,36 @@ def get_logger() -> logging.Logger:
 
     logger = logging.getLogger("dnet")
     logger.addFilter(_ProfileLogFilter(profile_enabled))
+
+    # Add file handler for crash reports
+    try:
+        from pathlib import Path
+        import sys
+
+        log_dir = Path.home() / ".dria" / "dnet"
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        proc_name = os.path.basename(sys.argv[0])
+        if "dnet-api" in proc_name:
+            filename = "dnet-api.log"
+        elif "dnet-shard" in proc_name:
+            filename = f"dnet-shard-{os.getpid()}.log"
+        else:
+            filename = "dnet.log"
+
+        log_file = log_dir / filename
+
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(logLevel)
+        file_handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s"
+            )
+        )
+        logger.addHandler(file_handler)
+    except Exception:
+        pass
+
     return logger
 
 

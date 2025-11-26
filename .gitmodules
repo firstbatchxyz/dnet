@@ -1,9 +1,9 @@
 [submodule "lib/dnet-p2p"]
 	path = lib/dnet-p2p
-	url = git@github.com:firstbatchxyz/dnet-p2p.git
+	url = https://github.com/firstbatchxyz/dnet-p2p.git
 	branch = master
 
 [submodule "lib/distilp"]
 	path = lib/distilp
-	url = git@github.com:firstbatchxyz/distilp.git
+	url = https://github.com/firstbatchxyz/distilp.git
 	branch = master

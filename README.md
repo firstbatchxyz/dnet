@@ -57,16 +57,8 @@
 **dnet** requires several submodules, which can all be cloned with the following command:
 
 ```sh
-git clone --recurse-submodules git@github.com:firstbatchxyz/dnet.git
+git clone --recurse-submodules https://github.com/firstbatchxyz/dnet.git
 ```
-
-> [!NOTE]
->
-> If you are not using SSH for GitHub, you can add the following config to change SSH links into HTTPS, then you can clone with the command above.
->
-> ```sh
-> git config --global url."https://github.com/".insteadOf "git@github.com:"
-> ```
 
 **dnet** uses `uv`, so make sure it is installed. You can check for uv with the command below, and follow the [installation guide](https://docs.astral.sh/uv/getting-started/installation/) if you do not have it.
 

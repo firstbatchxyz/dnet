@@ -62,12 +62,10 @@ git clone --recurse-submodules git@github.com:firstbatchxyz/dnet.git
 
 > [!NOTE]
 >
-> If you are not using SSH for GitHub, you can do the following instead:
+> If you are not using SSH for GitHub, you can add the following config to change SSH links into HTTPS, then you can clone with the command above.
 >
 > ```sh
-> git clone https://github.com:firstbatchxyz/dnet.git && cd dnet
-> git config url."https://github.com/".insteadOf "git@github.com:"
-> git submodule update --init --recursive
+> git config --global url."https://github.com/".insteadOf "git@github.com:"
 > ```
 
 **dnet** uses `uv`, so make sure it is installed. You can check for uv with the command below, and follow the [installation guide](https://docs.astral.sh/uv/getting-started/installation/) if you do not have it.
@@ -111,7 +109,7 @@ dnet comes with a [TUI](https://github.com/firstbatchxyz/dnet-tui) built in Rust
 Install the TUI with:
 
 ```sh
-cargo install https://github.com/firstbatchxyz/dnet-tui.git
+cargo install --git https://github.com/firstbatchxyz/dnet-tui.git
 ```
 
 Then simply run with:

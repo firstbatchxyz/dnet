@@ -28,35 +28,47 @@
 
 **dnet** runs LLMs across Apple Silicon devices. Modular execution strategies, automatic device profiling, drop-in OpenAI API.
 
-
 ## Features
 
 - **Execution**
+
   - **No Memory Ceiling**: Run models that exceed total cluster memory—compute/I/O overlap keeps data flowing
   - **UMA specific**: Designed for Apple Silicon's unified memory for efficient layer swapping
   - **OpenAI-Compatible**: Drop-in `/v1/chat/completions` endpoint
 
 - **Cluster Management**
+
   - **Automatic Discovery**: Nodes find each other; no manual topology configuration
   - **Thunderbolt Detection**: Automatically utilizes Thunderbolt for high-bandwidth inter-device communication
 
 - **Workload Assignment**
+
   - **Device Profiling**: Measures FLOPs, memory, and inter-device latency per node
   - **Model Profiling**: Analyzes compute and memory requirements per layer
   - **Heterogeneity-Aware Solver**: Topology aware assignment that accounts for device capability, network speed, KV cache size, and disk speed
 
-- ✅ **[Pipelined-ring](https://arxiv.org/pdf/2504.08791)** – Run >32B 8-bit models across devices with insufficient total memory
-- 🚧 **Long context** – Make >128K context windows a reality for home clusters
-- 🚧 **High throughput** – Maximize throughput via tensor parallelism
-- 🚧 **Unified backend** – A single optimized backend for Apple Silicon, NVIDIA, and AMD (currently Apple Silicon only, via MLX)
+- ✅ **[Pipelined-ring](https://arxiv.org/pdf/2504.08791)** - Run >32B 8-bit models across devices with insufficient total memory
+- 🚧 **Long context** - Make >128K context windows a reality for home clusters
+- 🚧 **High throughput** - Maximize throughput via tensor parallelism
+- 🚧 **Unified backend** - A single optimized backend for Apple Silicon, NVIDIA, and AMD (currently Apple Silicon only, via MLX)
 
 ## Installation
 
 **dnet** requires several submodules, which can all be cloned with the following command:
 
 ```sh
-git clone --recurse-submodules https://github.com/firstbatchxyz/dnet.git
+git clone --recurse-submodules git@github.com:firstbatchxyz/dnet.git
 ```
+
+> [!NOTE]
+>
+> If you are not using SSH for GitHub, you can do the following instead:
+>
+> ```sh
+> git clone https://github.com:firstbatchxyz/dnet.git && cd dnet
+> git config url."https://github.com/".insteadOf "git@github.com:"
+> git submodule update --init --recursive
+> ```
 
 **dnet** uses `uv`, so make sure it is installed. You can check for uv with the command below, and follow the [installation guide](https://docs.astral.sh/uv/getting-started/installation/) if you do not have it.
 
@@ -75,6 +87,7 @@ After syncing dependencies, generate protos:
 ```sh
 uv run ./scripts/generate_protos.py
 ```
+
 **dnet** supports make commands, run `make protos` to generate protos.
 
 ## Usage
@@ -89,7 +102,7 @@ uv run ./scripts/generate_protos.py
 
 See [catalog](https://github.com/firstbatchxyz/dnet/blob/master/src/dnet/api/catalog.py) for supported models.
 
-![image](https://github.com/firstbatchxyz/dnet/blob/8a1457f907f0d38555500d3d060efbe3f5438453/dnet-tui-ss.png?raw=true)
+![image of dnet TUI](./misc/dnet-tui-ss.png)
 
 ### Viewing dnet TUI
 
@@ -108,8 +121,6 @@ dnet-tui
 ```
 
 For more details, check out the [repository](https://github.com/firstbatchxyz/dnet-tui).
-
-
 
 ### Running a Shard
 
@@ -179,8 +190,7 @@ curl -X POST http://localhost:8080/v1/load_model \
   -d $OUTPUT_FROM_PREPARE_TOPOLOGY
 ```
 
-![A shard with a loaded model](https://github.com/firstbatchxyz/dnet/blob/master/dnet-shard-ss.png?raw=true)
-
+![a shard with a loaded model](./misc/dnet-shard-ss.png)
 
 #### Chat Completions
 
@@ -210,6 +220,7 @@ curl http://localhost:8080/v1/devices \
 ## Testing
 
 Before testing make sure to install dev path
+
 ```
 uv sync --extra dev --extra mac
 ```
@@ -250,3 +261,7 @@ uv run mypy .
 ## License
 
 You can find the license [here](./LICENSE).
+
+## Cite
+
+If you have used this work please feel free to [cite](./CITATION.cff) us!

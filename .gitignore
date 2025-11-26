@@ -22,9 +22,10 @@ doc/build/
 *.gz
 *.txt
 *.lpk
-*.png
 *.log
 *.dat
+*.png
+!misc/*.png
 
 # output directory
 output/

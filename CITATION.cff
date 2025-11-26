@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "dnet: Distributed LLM Inference for Apple Silicon Clusters"
+# alpbaetical order w.r.t alias
+authors:
+  - alias: "andthattoo"
+    email: "omer@dria.co"
+
+  - alias: "erhant"
+    given_name: "Erhan"
+    family_name: "Tezcan"
+    email: "erhan@dria.co"
+
+  - alias: "jaisw7"
+    given_name: "Shashank"
+    family_name: "Jaiswal"
+    email: "shashank@dria.co"
+
+  - alias: "octavian"
+    email: "octavian@firstbatch.xyz"
+
+version: 0.0.1
+date-released: 2025-11-26
+url: "https://github.com/firstbatchxyz/dnet"
+license: Apache-2.0
+repository-code: "https://github.com/firstbatchxyz/dnet"

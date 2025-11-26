@@ -7,7 +7,7 @@
     dnet
   </h1>
   <p align="center">
-    <i>Distributed LLM inference on MLX using ring topology.</i>
+    <i>Distributed LLM Inference for Apple Silicon Clusters</i>
   </p>
 </p>
 
@@ -24,10 +24,15 @@
 
 </p>
 
+**RUN BIG MODELS | RUN LONG CONTEXT | MAXIMIZE UTILIZATION**
+
+**dnet** runs LLMs across Apple Silicon devices. Modular execution strategies, automatic device profiling, drop-in OpenAI API.
+
+
 ## Features
 
 - **Execution**
-  - **Pipelined-ring strategy**: Run models larger than total cluster memory through compute/I/O overlap
+  - **No Memory Ceiling**: Run models that exceed total cluster memory—compute/I/O overlap keeps data flowing
   - **UMA specific**: Designed for Apple Silicon's unified memory for efficient layer swapping
   - **OpenAI-Compatible**: Drop-in `/v1/chat/completions` endpoint
 
@@ -35,15 +40,15 @@
   - **Automatic Discovery**: Nodes find each other; no manual topology configuration
   - **Thunderbolt Detection**: Automatically utilizes Thunderbolt for high-bandwidth inter-device communication
 
-- **Intelligent Distribution**
+- **Workload Assignment**
   - **Device Profiling**: Measures FLOPs, memory, and inter-device latency per node
   - **Model Profiling**: Analyzes compute and memory requirements per layer
   - **Heterogeneity-Aware Solver**: Topology aware assignment that accounts for device capability, network speed, KV cache size, and disk speed
 
-- **Planned**
-  - 🚧 Context parallelism for long sequences
-  - 🚧 Tensor parallelism for throughput
-  - 🚧 Unified backend for NVIDIA, AMD and Apple Silicon
+- ✅ **[Pipelined-ring](https://arxiv.org/pdf/2504.08791)** – Run >32B 8-bit models across devices with insufficient total memory
+- 🚧 **Long context** – Make >128K context windows a reality for home clusters
+- 🚧 **High throughput** – Maximize throughput via tensor parallelism
+- 🚧 **Unified backend** – A single optimized backend for Apple Silicon, NVIDIA, and AMD (currently Apple Silicon only, via MLX)
 
 ## Installation
 

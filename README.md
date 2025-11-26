@@ -179,6 +179,9 @@ curl -X POST http://localhost:8080/v1/load_model \
   -d $OUTPUT_FROM_PREPARE_TOPOLOGY
 ```
 
+![A shard with a loaded model](https://github.com/firstbatchxyz/dnet/blob/master/dnet-shard-ss.png?raw=true)
+
+
 #### Chat Completions
 
 Generate text using the loaded model:
@@ -233,6 +236,16 @@ uv run mypy .
 > [!TIP]
 >
 > If you are using VsCode, we have prepared [tasks](./.vscode/tasks.json) that you can run easily from the <kbd> Command Palette > Tasks: Run Task </kbd>.
+
+## Acknowledgements
+
+**dnet** is built on top of [MLX](https://github.com/ml-explore/mlx) and inspired by pioneering work in distributed inference:
+
+**PRIMA.CPP**: [Prima.cpp: Fast 30-70B LLM Inference on Heterogeneous and Low-Resource Home Clusters](https://arxiv.org/abs/2504.08791)
+
+**Exo**: [Run your own AI cluster at home with everyday devices](https://github.com/exo-explore/exo)
+
+**Petals**: [Collaborative Inference for Large Language Models](https://github.com/bigscience-workshop/petals)
 
 ## License
 

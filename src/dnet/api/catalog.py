@@ -204,5 +204,17 @@ model_catalog = {
             "quantization": "4bit",
             "alias": "qwen3-moe-30b",
         },
+        {
+            "id": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            "arch": "qwen3_moe",
+            "quantization": "4bit",
+            "alias": "qwen3-moe-30b",
+        },
+        {
+            "id": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-8bit",
+            "arch": "qwen3_moe",
+            "quantization": "8bit",
+            "alias": "qwen3-moe-30b",
+        },
     ]
 }

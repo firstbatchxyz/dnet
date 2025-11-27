@@ -9,12 +9,12 @@ from .base import BaseRingModel
 
 
 class Qwen3MoEDenseBlock(nn.Module):
-    def __init__(self, args: ModelArgs):
+    def __init__(self, config: ModelArgs):
         super().__init__()
-        self.num_experts = args.num_experts
-        self.gate = nn.Linear(args.hidden_size, self.num_experts, bias=False)
+        self.num_experts = config.num_experts
+        self.gate = nn.Linear(config.hidden_size, self.num_experts, bias=False)
         self.switch_mlp = SwitchGLU(
-            args.hidden_size, args.intermediate_size, self.num_experts
+            config.hidden_size, config.moe_intermediate_size, self.num_experts
         )
 
     def __call__(self, x: mx.array):
@@ -31,21 +31,21 @@ class Qwen3MoEDenseBlock(nn.Module):
 
 # force dense execution
 class Qwen3MoEDecoderLayer(nn.Module):
-    def __init__(self, args: ModelArgs, layer_idx: int):
+    def __init__(self, config: ModelArgs, layer_idx: int):
         super().__init__()
-        self.args = args
-        self.self_attn = Attention(args, layer_idx)
-        self.input_layernorm = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
+        self.config = config
+        self.self_attn = Attention(config, layer_idx)
+        self.input_layernorm = nn.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = nn.RMSNorm(
-            args.hidden_size, eps=args.rms_norm_eps
+            config.hidden_size, eps=config.rms_norm_eps
         )
 
-        if (layer_idx not in args.mlp_only_layers) and (
-            args.num_experts > 0 and (layer_idx + 1) % args.decoder_sparse_step == 0
+        if (layer_idx not in config.mlp_only_layers) and (
+            config.num_experts > 0 and (layer_idx + 1) % config.decoder_sparse_step == 0
         ):
-            self.mlp = Qwen3MoEDenseBlock(args)
+            self.mlp = Qwen3MoEDenseBlock(config)
         else:
-            self.mlp = MLP(args.hidden_size, args.intermediate_size)
+            self.mlp = MLP(config.hidden_size, config.intermediate_size)
 
     def __call__(
         self,
@@ -159,15 +159,15 @@ class Qwen3MoERingModel(BaseRingModel):
     def sanitize(self, weights):
         if "model.layers.0.mlp.experts.0.up_proj.weight" not in weights:
             return weights
-        for layer in range(self.args.num_hidden_layers):
+        for layer in range(self.config.num_hidden_layers):
             prefix = f"model.layers.{layer}"
             for n in ["up_proj", "down_proj", "gate_proj"]:
                 if f"{prefix}.mlp.experts.0.{n}.weight" in weights:
                     to_join = [
-                        weights.pop(f"{prefix}.mlx.experts.{e}.{n}.weight")
-                        for e in range(self.args.num_experts)
+                        weights.pop(f"{prefix}.mlp.experts.{e}.{n}.weight")
+                        for e in range(self.config.num_experts)
                     ]
-                    weights[f"{prefix}.mlp.switch_mlx.{n}.weight"] = mx.stack(to_join)
+                    weights[f"{prefix}.mlp.switch_mlp.{n}.weight"] = mx.stack(to_join)
         return weights
 
     @property

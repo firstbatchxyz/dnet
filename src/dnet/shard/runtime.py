@@ -201,12 +201,14 @@ class ShardRuntime:
             is_api_layer=False,
         )
         try:
-            applied = bool(
-                self.model.apply_quantization_from_config(
-                    self.model_metadata.model_config,
-                    model_metadata=self.model_metadata,
-                )
+            is_quant, applied = self.model.apply_quantization_from_config(
+                self.model_metadata.model_config,
+                model_metadata=self.model_metadata,
             )
+            if is_quant and not applied:
+                logger.warning(
+                    "Failed to quantize what appears to be a quantized model."
+                )
             logger.info(
                 "[QUANT] runtime=%s applied=%s model=%s",
                 self.shard_id,

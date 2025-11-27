@@ -62,7 +62,7 @@ class FakeRingModel:
         self.loaded = {}
 
     def apply_quantization_from_config(self, cfg, model_metadata=None):
-        return self._quant_applies
+        return (self._quant_applies, True)
 
     def eval(self):
         self.eval_called = True

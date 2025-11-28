@@ -98,9 +98,9 @@ def compute_layer_assignments(
                 assigned_layers[device_name][round_idx].append(current_layer)
                 current_layer += 1
 
-    assert current_layer == num_layers, (
-        f"Assigned {current_layer} layers, expected {num_layers}"
-    )
+    assert (
+        current_layer == num_layers
+    ), f"Assigned {current_layer} layers, expected {num_layers}"
 
     # compute residency & windows sizes & neighbors for each shard
     residency_sizes: Dict[str, int] = {}

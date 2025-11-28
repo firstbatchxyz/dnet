@@ -6,9 +6,9 @@ from pydantic import ValidationError
 
 pytest.importorskip("mlx.core")
 
-from dnet.api.inference import InferenceManager
-from dnet.api.models import ChatRequestModel, ChatMessage
-from tests.fakes import (
+from dnet.api.inference import InferenceManager  # noqa: E402
+from dnet.api.models import ChatRequestModel, ChatMessage  # noqa: E402
+from tests.fakes import (  # noqa: E402
     FakeTokenizer,
     FakeTokenizerWithTemplate,
     FakeTokenResult,

@@ -23,7 +23,7 @@ repos:
     hooks:
       - id: mypy
         name: mypy
-        entry: uv run mypy .
+        entry: make typecheck
         language: system
         types: [python]
         pass_filenames: false

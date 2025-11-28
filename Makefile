@@ -2,6 +2,10 @@
 lint:
 	   uv run ruff check
 
+.PHONY: lint-fix #     | Fix linting issues
+lint-fix:
+	   uv run ruff check --fix
+
 .PHONY: format #       | Check formatting
 format:
 		uv run ruff format --diff

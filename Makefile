@@ -2,6 +2,10 @@
 lint:
 	   uv run ruff check
 
+.PHONY: lint-fix #     | Fix linting issues
+lint-fix:
+	   uv run ruff check --fix
+
 .PHONY: format #       | Check formatting
 format:
 		uv run ruff format --diff
@@ -10,7 +14,7 @@ format:
 format-fix:
 		uv run ruff format .
 
-.PHONY: typecheck #   | Run type checker
+.PHONY: typecheck #    | Run type checker
 typecheck:
 		uv run mypy .
 
@@ -32,11 +36,28 @@ test:
 		uv run pytest -v
 
 .PHONY: reset-sync #   | Reset virtual environment and sync dependencies again
-reset-sync: 																																																
+reset-sync:
 		rm -rf .venv
 		rm uv.lock
 		uv sync
 
+.PHONY: init #         | One-time setup: install hooks and generate protos
+init:
+		$(MAKE) hooks-install
+		$(MAKE) protos
+
+.PHONY: hooks-install # | Install pre-commit hooks
+hooks-install:
+		uv run pre-commit install
+
+.PHONY: hooks-run #    | Run all hooks on all files
+hooks-run:
+		uv run pre-commit run --all-files
+
+.PHONY: hooks-update # | Update hook versions
+hooks-update:
+		uv run pre-commit autoupdate
+
 .PHONY: help #         | List targets
-help:                                                                                                                    
+help:
 		@grep '^.PHONY: .* #' Makefile | sed 's/\.PHONY: \(.*\) # \(.*\)/\1 \2/' | expand -t20

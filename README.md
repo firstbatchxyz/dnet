@@ -72,13 +72,41 @@ uv --version
 uv sync --extra mac
 ```
 
-After syncing dependencies, generate protos:
+After syncing dependencies, run the one-time setup to install Git hooks and generate protos:
 
 ```sh
-uv run ./scripts/generate_protos.py
+make init
 ```
 
-**dnet** supports make commands, run `make protos` to generate protos.
+This will:
+
+- Install pre-commit hooks for automatic code quality checks
+- Generate protobuf files
+
+The pre-commit hooks will automatically run ruff formatting, ruff linting, and mypy type checking before each commit.
+
+## Development
+
+### Git Hooks
+
+This project uses [pre-commit](https://pre-commit.com/) to ensure code quality. Hooks are installed automatically when you run `make init`, but you can also manage them manually:
+
+```sh
+# Install hooks
+make hooks-install
+
+# Run all hooks on all files
+make hooks-run
+
+# Update hook versions
+make hooks-update
+```
+
+The hooks will run automatically on `git commit`, checking:
+
+- Code formatting (ruff format)
+- Linting (ruff check)
+- Type checking (mypy)
 
 ## Usage
 
@@ -221,18 +249,7 @@ You can run Pytest tests via:
 uv run pytest -v
 ```
 
-You can check linting and formatting via Ruff:
-
-```sh
-# lint
-uvx ruff check
-
-# format
-uvx ruff format --diff
-
-# typecheck
-uv run mypy .
-```
+For code quality checks (linting, formatting, type checking), see the [Development](#development) section above.
 
 > [!TIP]
 >

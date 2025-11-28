@@ -1,0 +1,30 @@
+# See https://pre-commit.com for more information
+# See https://pre-commit.com/hooks.html for more hooks
+repos:
+  - repo: local
+    hooks:
+      - id: format
+        name: format
+        entry: make format-fix
+        language: system
+        types: [python]
+        pass_filenames: false
+        require_serial: true
+
+      - id: lint
+        name: lint
+        entry: make lint-fix
+        language: system
+        types: [python]
+        pass_filenames: false
+        require_serial: true
+
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        entry: uv run mypy .
+        language: system
+        types: [python]
+        pass_filenames: false
+        require_serial: true

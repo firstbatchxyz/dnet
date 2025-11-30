@@ -12,14 +12,25 @@ from dnet.utils.logger import logger
 from argparse import ArgumentParser
 
 
-async def serve(grpc_port: int, http_port: int, queue_size: int = 128) -> None:
+async def serve(
+    grpc_port: int,
+    http_port: int,
+    queue_size: int = 128,
+    shard_name: str | None = None,
+) -> None:
     shard_id = 1  # In real usage, this would be set via CLI or config
     hostname = gethostname()
 
+    # Resolve instance name: use provided shard_name or fall back to auto-generated
+    if shard_name:
+        instance_name = shard_name
+    else:
+        instance_name = f"shard-{token_hex(4)}-{hostname}"
+
     loop = asyncio.get_running_loop()
     discovery = AsyncDnetP2P("lib/dnet-p2p/lib")
-    # Core
-    runtime = ShardRuntime(shard_id=hostname, queue_size=queue_size)
+    # Core - use instance_name for runtime to align logs/metrics with discovery name
+    runtime = ShardRuntime(shard_id=instance_name, queue_size=queue_size)
     adapter = RingAdapter(runtime=runtime, discovery=discovery)
     shard = Shard(shard_id=shard_id, adapter=adapter)
 
@@ -40,7 +51,7 @@ async def serve(grpc_port: int, http_port: int, queue_size: int = 128) -> None:
 
     from dnet.tui import DnetTUI
 
-    tui = DnetTUI(title=f"DNET Shard ({hostname})")
+    tui = DnetTUI(title=f"DNET Shard ({instance_name})")
     tui_task = asyncio.create_task(tui.run(stop_event))
 
     # Hook into Shard model loading for TUI updates
@@ -87,14 +98,13 @@ async def serve(grpc_port: int, http_port: int, queue_size: int = 128) -> None:
         await http_server.start(stop_event.wait)
 
         # Start discovery
-        # TODO: optionally take shard name from CLI
-        instance = f"shard-{token_hex(4)}-{hostname}"
         discovery.create_instance(
-            instance,
+            instance_name,
             http_port,
             grpc_port,
             is_manager=False,  # shard is never a manager
         )
+        logger.info("Registered shard with discovery as '%s'", instance_name)
         await discovery.async_start()
 
         # Finally start shard
@@ -148,7 +158,14 @@ def main() -> None:
         "--queue-size",
         type=int,
         default=256,
-        help="Activation queue size (default: 10)",
+        help="Activation queue size (default: 256)",
+    )
+    ap.add_argument(
+        "-n",
+        "--shard-name",
+        type=str,
+        default=None,
+        help="Custom shard name for discovery registration (default: auto-generated)",
     )
     args = ap.parse_args()
 
@@ -157,11 +174,14 @@ def main() -> None:
         args.grpc_port,
         args.http_port,
     )
+    if args.shard_name:
+        logger.info("Using custom shard name: %s", args.shard_name)
     asyncio.run(
         serve(
             args.grpc_port,
             args.http_port,
             args.queue_size,
+            shard_name=args.shard_name,
         )
     )
 

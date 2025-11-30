@@ -206,9 +206,7 @@ class ShardRuntime:
                 model_metadata=self.model_metadata,
             )
             if is_quant and not applied:
-                logger.warning(
-                    "Failed to quantize what appears to be a quantized model."
-                )
+                raise RuntimeError("apply_quantization_from_config failed.")
             logger.info(
                 "[QUANT] runtime=%s applied=%s model=%s",
                 self.shard_id,
@@ -216,7 +214,10 @@ class ShardRuntime:
                 self.model_metadata.model_type,
             )
         except RuntimeError as e:
-            logger.warning("[QUANT] apply failed: %s", e)
+            logger.error(
+                f"[QUANT] Failed to quantize what appears to be a quantized model: {e}"
+            )
+            raise
 
         self.model.eval()
         self.cache = make_cache(

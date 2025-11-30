@@ -154,6 +154,16 @@ Each shard should be started on a different device and with a different port (tr
 uv run dnet-shard --http-port 8082 --grpc-port 58082
 ```
 
+You can optionally specify a custom shard name for better identification in discovery, TUI, and logs:
+
+```sh
+uv run dnet-shard --http-port 8081 --grpc-port 58081 --shard-name my-shard-1
+```
+
+> [!WARNING]
+>
+> Each shard name must be unique within the same network. Using duplicate shard names will cause discovery conflicts and connectivity issues.
+
 ### Running an API
 
 Start the API node:

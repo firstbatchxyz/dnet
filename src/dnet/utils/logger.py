@@ -76,7 +76,7 @@ def get_logger() -> logging.Logger:
         log_file = log_dir / filename
 
         file_handler = logging.FileHandler(log_file)
-        file_handler.setLevel(logLevel)
+        file_handler.setLevel(log_level)
         file_handler.setFormatter(
             logging.Formatter(
                 "%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s"

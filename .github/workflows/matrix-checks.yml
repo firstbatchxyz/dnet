@@ -37,8 +37,8 @@ jobs:
         run: |
           uv pip install --upgrade "grpcio>=1.75.1" "protobuf>=6.31.1"
 
-      - name: Generate protobuf stubs
-        run: make protos
+      - name: Initialize repo files
+        run: make init
 
       - name: Ruff format check (style/format) via uvx
         run: make format

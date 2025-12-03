@@ -46,6 +46,7 @@ cuda = ["mlx[cuda]"]
 dev = [
   "openai>=2.6.0", # for OpenAI compatibility tests
   "pytest>=8.4.2",
+  "python-dotenv>=1.0.0",
   "mypy>=1.3.0",  # Type checking
   "ruff>=0.0.285",
   "types-psutil>=7.1.3",

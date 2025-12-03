@@ -1,51 +1,61 @@
-"""Logging utilities for dnet."""
+"""
+Logging utilities for dnet.
+
+Usage:
+    from dnet.utils.logger import logger
+    logger.info("message")
+    # Log level and profile logging are controlled by .env or environment variables:
+    # DNET_LOG=DEBUG
+    # PROFILE=1
+"""
 
 import logging
 import os
 from functools import lru_cache
 
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
+
+
+def is_env_truthy(val: str) -> bool:
+    """Return True if the string represents a truthy value (1, true, yes, on)."""
+    return val.strip().lower() in {"1", "true", "yes", "on"}
+
 
 @lru_cache(maxsize=None)
 def get_logger() -> logging.Logger:
-    """Get configured logger for dnet.
-
-    Profile logs (containing [PROFILE]) are only shown when PROFILE env var is set.
-
-    Returns:
-        Configured logger instance
     """
-    logLevelEnv = os.getenv("DNET_LOG", "INFO").strip().upper()
-    logLevel = logging.INFO  # default
-    if logLevelEnv in logging._nameToLevel:
-        logLevel = logging._nameToLevel[logLevelEnv]
-
+    Returns a configured logger for dnet.
+    Log level is set by DNET_LOG env var (default INFO).
+    Profile logs ([PROFILE]) are shown only if PROFILE env var is truthy.
+    """
+    log_level_str = os.getenv("DNET_LOG", "INFO").strip().upper()
+    log_level = getattr(logging, log_level_str, logging.INFO)
     logging.basicConfig(
-        level=logLevel,
+        level=log_level,
         format="%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s",
     )
 
-    class _ProfileLogFilter(logging.Filter):
-        """Filter that controls profile log visibility."""
-
-        def __init__(self, enabled: bool) -> None:
+    class ProfileLogFilter(logging.Filter):
+        def __init__(self, enabled: bool):
             super().__init__()
             self.enabled = enabled
 
         def filter(self, record: logging.LogRecord) -> bool:
-            try:
-                msg = record.getMessage()
-            except Exception:
-                msg = str(record.msg)
-            if "[PROFILE]" in msg and not self.enabled:
-                return False
-            return True
+            msg = (
+                record.getMessage()
+                if hasattr(record, "getMessage")
+                else str(record.msg)
+            )
+            return not ("[PROFILE]" in msg and not self.enabled)
 
-    # PROFILE env: enable profile logs when set to a truthy value
-    prof_env = os.getenv("PROFILE", "0").strip().lower()
-    profile_enabled = prof_env in {"1", "true", "yes", "on"}
-
+    profile_enabled = is_env_truthy(os.getenv("PROFILE", "0"))
     logger = logging.getLogger("dnet")
-    logger.addFilter(_ProfileLogFilter(profile_enabled))
+    logger.addFilter(ProfileLogFilter(profile_enabled))
 
     # Add file handler for crash reports
     try:
@@ -66,7 +76,7 @@ def get_logger() -> logging.Logger:
         log_file = log_dir / filename
 
         file_handler = logging.FileHandler(log_file)
-        file_handler.setLevel(logLevel)
+        file_handler.setLevel(log_level)
         file_handler.setFormatter(
             logging.Formatter(
                 "%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s"

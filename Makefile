@@ -1,6 +1,12 @@
+UV_RUN = uv run --env-file .env
+
+.PHONY: run #          | Run
+run:
+	$(UV_RUN)
+
 .PHONY: lint #         | Run linter
 lint:
-	   uv run ruff check
+	$(UV_RUN) ruff check
 
 .PHONY: lint-fix #     | Fix linting issues
 lint-fix:
@@ -8,19 +14,19 @@ lint-fix:
 
 .PHONY: format #       | Check formatting
 format:
-		uv run ruff format --diff
+		$(UV_RUN) ruff format --diff
 
 .PHONEY: format-fix #   | Fix formatting issues
 format-fix:
-		uv run ruff format .
+		$(UV_RUN) ruff format .
 
 .PHONY: typecheck #    | Run type checker
 typecheck:
-		uv run mypy .
+		$(UV_RUN) mypy .
 
 .PHONY: protos #       | Generate protobuf files
 protos:
-		uv run ./scripts/generate_protos.py
+		$(UV_RUN) ./scripts/generate_protos.py
 
 .PHONY: update #       | Update git submodules
 update:
@@ -33,7 +39,7 @@ pull:
 
 .PHONY: test #         | Run tests
 test:
-		uv run pytest -v
+		$(UV_RUN) pytest -v
 
 .PHONY: reset-sync #   | Reset virtual environment and sync dependencies again
 reset-sync:
@@ -43,6 +49,7 @@ reset-sync:
 
 .PHONY: init #         | One-time setup: install hooks and generate protos
 init:
+		$(MAKE) ensure-env
 		$(MAKE) hooks-install
 		$(MAKE) protos
 
@@ -57,6 +64,15 @@ hooks-run:
 .PHONY: hooks-update # | Update hook versions
 hooks-update:
 		uv run pre-commit autoupdate
+
+.PHONY: ensure-env #   | Ensure .env exists
+ensure-env:
+	@if [ ! -f .env ]; then \
+		cp .env.example .env; \
+		echo 'Copied .env.example to .env'; \
+	else \
+		echo '.env already exists'; \
+	fi
 
 .PHONY: help #         | List targets
 help:

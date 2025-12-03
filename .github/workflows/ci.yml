@@ -12,114 +12,13 @@ on:
 
 jobs:
   matrix-checks:
-    name: CI (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    env:
-      PYTHONPATH: src
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup SSH agent for submodules
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.CI_SSH_KEY }}" > ~/.ssh/dnet_id_ed25519
-          chmod 600 ~/.ssh/dnet_id_ed25519
-          ssh-keyscan github.com >> ~/.ssh/known_hosts
-          git config --global core.sshCommand "ssh -i ~/.ssh/dnet_id_ed25519 -o IdentitiesOnly=yes"
-
-      - name: Checkout submodules
-        run: |
-          git submodule sync --recursive
-          git submodule update --init --recursive
-
-      - name: Cleanup SSH key
-        if: always()
-        run: |
-          rm -f ~/.ssh/dnet_id_ed25519
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-
-      - name: Sync dev dependencies
-        run: |
-          if [[ "$RUNNER_OS" == "macOS" ]]; then
-            uv sync --extra mac --extra dev
-          else
-            uv sync --extra cpu --extra dev
-          fi
-
-      - name: Generate protobuf stubs
-        run: |
-          make protos
-
-      - name: Ruff format check (style/format) via uvx
-        run: |
-          uvx ruff format --check .
-
-      - name: Ruff lint via uvx
-        run: |
-          uvx ruff check .
-
-      - name: Run tests (pytest) via uv
-        if: matrix.os == 'macos-latest'
-        run: |
-          # currently, there are no tests, so we ignore exit code 5 (no tests collected)
-          uv run pytest || ([ $? -eq 5 ] && echo "No tests collected, continuing..." && exit 0 || exit $?)
+    uses: ./.github/workflows/matrix-checks.yml
+    secrets: inherit
+    with:
+      python_version: '3.12'
 
   tests-macos:
-    name: Pytest (${{ matrix.mark }}) on macOS
-    runs-on: macos-14
-    strategy:
-      fail-fast: false
-      matrix:
-        mark: [ "core", "api", "shard" ]
-    env:
-      PROJECT_ROOT: ${{ github.workspace }}
-      PYTHONPATH: src
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup SSH for submodules
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.CI_SSH_KEY }}" > ~/.ssh/dnet_id_ed25519
-          chmod 600 ~/.ssh/dnet_id_ed25519
-          ssh-keyscan github.com >> ~/.ssh/known_hosts
-          git config --global core.sshCommand "ssh -i ~/.ssh/dnet_id_ed25519 -o IdentitiesOnly=yes"
-
-      - name: Checkout submodules
-        run: |
-          git submodule sync --recursive
-          git submodule update --init --recursive
-
-      - name: Cleanup SSH key
-        if: always()
-        run: |
-          rm -f ~/.ssh/dnet_id_ed25519
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          python-version: "3.12"
-
-      - name: Sync dev dependencies
-        run: |
-          uv sync --extra dev
-
-      - name: Ensure compatible gRPC/protobuf versions
-        run: |
-          # Generated *_pb2_grpc requires grpcio>=1.75 and pb2 uses protobuf>=6.31
-          uv pip install --upgrade "grpcio>=1.75.1" "protobuf>=6.31.1"
-
-      - name: Generate protobuf stubs
-        run: |
-          make protos
-
-      - name: Run pytest by marker
-        run: |
-          uv run pytest -m "${{ matrix.mark }} and not e2e" -q
+    uses: ./.github/workflows/tests-macos.yml
+    secrets: inherit
+    with:
+      python_version: '3.12'

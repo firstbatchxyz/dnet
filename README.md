@@ -245,6 +245,26 @@ curl http://localhost:8080/v1/devices \
   -H "Content-Type: application/json"
 ```
 
+## Configuration (.env)
+
+**dnet** supports configuration via a `.env` file in the project root. This allows you to set environment variables for logging, profiling, and other runtime options without modifying code or command-line arguments.
+
+### Example `.env`
+
+```env
+# Set logging level (e.g., DEBUG, INFO, WARNING, ERROR)
+LOG_LEVEL=INFO
+
+# Enable profiling (set to 1 to enable)
+PROFILE=0
+
+# Add other environment variables as needed
+```
+
+Please see `.env.example` for a complete example. The `.env` file is automatically loaded when running via `uv run` or using the provided Makefile targets. This ensures consistent configuration in both local development and CI environments.
+
+For more details, see the relevant sections in the Makefile and CI workflow.
+
 ## Testing
 
 Before testing make sure to install dev path

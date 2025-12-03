@@ -1,0 +1,37 @@
+name: 'Setup Environment'
+description: 'Sets up SSH for submodules, installs uv, and syncs dependencies for the correct platform.'
+
+inputs:
+  python_version:
+    description: 'Python version to use for uv.'
+    required: false
+    default: '3.12'
+  ssh_key:
+    description: 'SSH private key for accessing submodules'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup SSH for Submodules
+      uses: ./.github/actions/setup-ssh
+      with:
+        ssh_key: ${{ inputs.ssh_key }}
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v5
+      with:
+        python-version: ${{ inputs.python_version || '3.12' }}
+
+    - name: Sync dev dependencies
+      run: |
+        if [[ "$RUNNER_OS" == "macOS" ]]; then
+          uv sync --extra mac --extra dev
+        else
+          uv sync --extra cpu --extra dev
+        fi
+      shell: bash
+
+    - name: Initialize repo files
+      run: make init
+      shell: bash

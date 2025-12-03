@@ -1,0 +1,27 @@
+name: 'Setup SSH for Submodules'
+description: 'Sets up SSH agent and configures git for submodules.'
+
+inputs:
+  ssh_key:
+    description: 'SSH private key for accessing submodules'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - run: |
+        mkdir -p ~/.ssh
+        echo "${{ inputs.ssh_key }}" > ~/.ssh/dnet_id_ed25519
+        chmod 600 ~/.ssh/dnet_id_ed25519
+        ssh-keyscan github.com >> ~/.ssh/known_hosts
+        git config --global core.sshCommand "ssh -i ~/.ssh/dnet_id_ed25519 -o IdentitiesOnly=yes"
+      shell: bash
+
+    - run: |
+        git submodule sync --recursive
+        git submodule update --init --recursive
+      shell: bash
+
+    - run: |
+        rm -f ~/.ssh/dnet_id_ed25519
+      shell: bash

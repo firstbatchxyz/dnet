@@ -1,0 +1,41 @@
+name: Tests MacOS
+on:
+  workflow_call:
+    inputs:
+      python_version:
+        required: false
+        type: string
+    secrets:
+      CI_SSH_KEY:
+        required: true
+
+jobs:
+  tests-macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        mark: [ "core", "api", "shard" ]
+    runs-on: macos-14
+    env:
+      PROJECT_ROOT: ${{ github.workspace }}
+      PYTHONPATH: src
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Setup Environment
+        uses: ./.github/actions/setup-env
+        with:
+          python_version: ${{ inputs.python_version || '3.12' }}
+          ssh_key: ${{ secrets.CI_SSH_KEY }}
+
+      - name: Ensure compatible gRPC/protobuf versions
+        run: |
+          uv pip install --upgrade "grpcio>=1.75.1" "protobuf>=6.31.1"
+
+      - name: Run pytest by marker
+        run: |
+          make test ARGS="-m '${{ matrix.mark }} and not e2e' -q"

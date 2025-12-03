@@ -226,7 +226,7 @@ class BaseRingModel(nn.Module, metaclass=ABCMeta):
 
     def apply_quantization_from_config(
         self, model_config: Any, model_metadata: Any
-    ) -> bool:
+    ) -> Tuple[bool, bool]:
         """Quantize using a simple MLX-style predicate with optional per-path overrides.
 
         - If config["quantization"][path] exists, use that for this path.
@@ -408,15 +408,17 @@ class BaseRingModel(nn.Module, metaclass=ABCMeta):
                     )
             except Exception:
                 self._converted_to_quantized = False
-                return False
+                if g_bits != 0 and g_group != 0:
+                    return (True, False)
+                return (False, False)
             self._converted_to_quantized = True
-            return True
+            return (True, True)
         except Exception:
             try:
                 self._converted_to_quantized = False
             except Exception:
                 pass
-            return False
+            return (False, False)
 
     @staticmethod
     def _shrink_linear_like(mod) -> None:

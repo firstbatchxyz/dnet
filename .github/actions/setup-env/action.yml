@@ -31,3 +31,7 @@ runs:
           uv sync --extra cpu --extra dev
         fi
       shell: bash
+
+    - name: Initialize repo files
+      run: make init
+      shell: bash

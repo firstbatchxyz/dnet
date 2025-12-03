@@ -36,9 +36,6 @@ jobs:
         run: |
           uv pip install --upgrade "grpcio>=1.75.1" "protobuf>=6.31.1"
 
-      - name: Initialize repo files
-        run: make init
-
       - name: Run pytest by marker
         run: |
           make test ARGS="-m '${{ matrix.mark }} and not e2e' -q"

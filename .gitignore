@@ -45,4 +45,5 @@ repacked_weights/*
 repacked_models/*
 
 # Env files
-.env
+*.env*
+!.env*.example

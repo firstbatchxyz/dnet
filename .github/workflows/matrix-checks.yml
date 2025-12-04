@@ -13,7 +13,7 @@ jobs:
   matrix-checks:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, mac2.metal]
     runs-on: ${{ matrix.os }}
 
     env:
@@ -33,7 +33,7 @@ jobs:
           ssh_key: ${{ secrets.CI_SSH_KEY }}
 
       - name: Ensure compatible gRPC/protobuf versions
-        if: ${{ matrix.os == 'macos-latest' }}
+        if: ${{ matrix.os == 'mac2.metal' }}
         run: |
           uv pip install --upgrade "grpcio>=1.75.1" "protobuf>=6.31.1"
 
@@ -44,6 +44,6 @@ jobs:
         run: make lint
 
       - name: Run tests (pytest)
-        if: ${{ matrix.os == 'macos-latest' }}
+        if: ${{ matrix.os == 'macthese2.metal' }}
         run: |
           make test || ([ $? -eq 5 ] && echo "No tests collected, continuing..." && exit 0 || exit $?)

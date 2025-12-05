@@ -1,18 +1,21 @@
 name: 'Setup Environment'
-description: 'Sets up SSH for submodules, installs uv, and syncs dependencies for the correct platform.'
+description: 'Sets up submodules, installs uv, and syncs dependencies for the correct platform.'
 
 inputs:
   python_version:
     description: 'Python version to use for uv.'
     required: false
     default: '3.12'
-  ssh_key:
-    description: 'SSH private key for accessing submodules'
-    required: true
 
 runs:
   using: 'composite'
   steps:
+    - name: Sync Submodules
+      run: |
+        git submodule sync --recursive
+        git submodule update --init --recursive
+      shell: bash
+
     - name: Install uv
       uses: astral-sh/setup-uv@v5
       with:

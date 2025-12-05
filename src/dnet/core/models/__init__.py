@@ -8,6 +8,9 @@ from .deepseek_v2 import DeepseekV2RingModel
 from .llama import LlamaRingModel
 from .gpt_oss import GptOssRingModel
 from .qwen3 import Qwen3RingModel
+from .qwen3_moe import Qwen3MoERingModel
+from .glm4 import Glm4RingModel
+from .olmo3 import Olmo3RingModel
 
 
 def get_ring_model(
@@ -41,5 +44,8 @@ __all__ = [
     "LlamaRingModel",
     "GptOssRingModel",
     "Qwen3RingModel",
+    "Qwen3MoERingModel",
+    "Glm4RingModel",
+    "Olmo3RingModel",
     "get_ring_model",
 ]

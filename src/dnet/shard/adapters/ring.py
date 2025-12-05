@@ -266,11 +266,11 @@ class RingAdapter(TopologyAdapter):
             logger.error("Streaming disabled or next node not connected; cannot send")
             return
         try:
-            data = self.codec.serialize(msg, self.transport_config)
+            data, meta = self.codec.serialize(msg, self.transport_config)
         except Exception as e:
             logger.error("Serialization failed for nonce %s: %s", msg.nonce, e)
             return
-        msg.dtype = self.runtime._wire_dtype_str
+        msg.dtype = meta
         request = msg.to_proto(data)
         request.timestamp = int(time.time() * 1000)
 

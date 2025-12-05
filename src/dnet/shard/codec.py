@@ -33,24 +33,76 @@ class ActivationCodec:
         try:
             # Compressed Tensors
             if "|" in activation.dtype:
-                deq = decompress_tensor_from_protobuf_data(
-                    tensor_data=activation.data,
-                    shape=list(activation.shape),
-                    dtype_with_metadata=activation.dtype,
-                )
-                pool_id = self.runtime.input_pool.allocate_for_layer(
-                    layer_id=activation.layer_id,
-                    dtype=deq.dtype,
-                    shape=tuple(deq.shape),
-                )
-                if pool_id is not None:
-                    buffer = self.runtime.input_pool.get_buffer(pool_id)
-                    flat = deq.reshape(-1)
-                    buffer[: flat.size] = flat
-                    msg = ActivationMessage.from_proto(request, pool_id)
-                    msg.dtype = str(deq.dtype)
-                    msg.shape = tuple(deq.shape)
-                    return msg
+                # Check for Q8 dense format
+                if "fmt=q8_dense_v0" in activation.dtype:
+                    parts = dict(
+                        item.split("=")
+                        for item in activation.dtype.split("|")
+                        if "=" in item
+                    )
+                    rows = int(parts["rows"])
+                    cols = int(parts["cols"])
+                    rd_str = parts["rd"]
+                    # Map string dtype to numpy/mlx dtype
+                    rd_dtype = mlx_dtype_map.get(rd_str, mx.float16)
+
+                    # Read scales (first rows * 2 bytes for float16)
+                    scale_bytes = rows * 2
+                    scales_np = np.frombuffer(
+                        activation.data[:scale_bytes], dtype=np.float16
+                    ).astype(np.float32)
+
+                    # Read codes
+                    codes_np = np.frombuffer(
+                        activation.data[scale_bytes:], dtype=np.int8
+                    ).reshape(rows, cols)
+
+                    # Dequantize: x = codes * scales
+
+                    x_deq = (codes_np.astype(np.float32) * scales_np[:, None]).astype(
+                        dtype_map.get(rd_str, np.float16)
+                    )
+
+                    # Use original shape from proto for allocation and message
+                    original_shape = tuple(activation.shape)
+
+                    pool_id = self.runtime.input_pool.allocate_for_layer(
+                        layer_id=activation.layer_id,
+                        dtype=rd_dtype,
+                        shape=original_shape,
+                    )
+
+                    if pool_id is not None:
+                        buffer = self.runtime.input_pool.get_buffer(pool_id)
+                        # buffer is a memoryview or similar, we can write directly
+                        flat = x_deq.reshape(-1)
+                        buffer[: flat.size] = flat
+
+                        msg = ActivationMessage.from_proto(request, pool_id)
+                        msg.dtype = rd_str
+                        msg.shape = original_shape
+                        return msg
+
+                else:
+                    # Existing compression path
+                    deq = decompress_tensor_from_protobuf_data(
+                        tensor_data=activation.data,
+                        shape=list(activation.shape),
+                        dtype_with_metadata=activation.dtype,
+                    )
+                    pool_id = self.runtime.input_pool.allocate_for_layer(
+                        layer_id=activation.layer_id,
+                        dtype=deq.dtype,
+                        shape=tuple(deq.shape),
+                    )
+                    if pool_id is not None:
+                        buffer = self.runtime.input_pool.get_buffer(pool_id)
+                        flat = deq.reshape(-1)
+                        buffer[: flat.size] = flat
+                        msg = ActivationMessage.from_proto(request, pool_id)
+                        msg.dtype = str(deq.dtype)
+                        msg.shape = tuple(deq.shape)
+                        return msg
 
             # Tokens (Integer sequences)
             elif activation.dtype == "tokens":
@@ -106,7 +158,7 @@ class ActivationCodec:
 
         return None
 
-    def serialize(self, msg: ActivationMessage, transport_config) -> bytes:
+    def serialize(self, msg: ActivationMessage, transport_config) -> tuple[bytes, str]:
         """
         Reads from output pool/tensor, compresses, and returns bytes + wire dtype.
         """
@@ -118,6 +170,46 @@ class ActivationCodec:
             data_size = int(np.prod(msg.shape))
             shaped = output_buffer[:data_size].reshape(msg.shape)
 
+        # Check for Q8 dense mode
+        if getattr(transport_config, "wire_mode", "fp16") == "q8_dense":
+            # x = shaped.astype(self.runtime._wire_mx_dtype).reshape(R, D)
+            if isinstance(shaped, np.ndarray):
+                x = mx.array(shaped)
+            else:
+                x = shaped
+
+            # Ensure 2D shape for quantization
+            if len(x.shape) == 2:
+                R, D = x.shape
+            elif len(x.shape) > 2:
+                # Flatten all leading dims into rows
+                D = x.shape[-1]
+                R = int(np.prod(x.shape[:-1]))
+                x = x.reshape(R, D)
+            else:
+                # 1D tensor? Treat as 1 row
+                R = 1
+                D = x.shape[0]
+                x = x.reshape(R, D)
+
+            x = x.astype(self.runtime._wire_mx_dtype)
+
+            s = (mx.abs(x).max(axis=1) / 127).astype(mx.float16)
+            s = mx.where(s == 0, mx.array(1e-8, dtype=mx.float16), s)
+
+            q = (x / s[:, None]).round().astype(mx.int8)
+
+            scales_bytes = np.array(s).tobytes()
+            q_bytes = np.array(q).tobytes()
+            data = scales_bytes + q_bytes
+
+            meta = f"int8|fmt=q8_dense_v0|rd={self.runtime._wire_dtype_str}|rows={R}|cols={D}"
+            
+            # Clean up reference
+            msg.tensor = None
+            return data, meta
+
+        # Standard path
         data = to_bytes(
             shaped,
             wire_dtype_str=self.runtime._wire_dtype_str,
@@ -128,4 +220,4 @@ class ActivationCodec:
 
         # Clean up reference immediately to assist GC
         msg.tensor = None
-        return data
+        return data, self.runtime._wire_dtype_str

@@ -9,7 +9,8 @@ inputs:
 runs:
   using: 'composite'
   steps:
-    - run: |
+    - if: runner.os != 'macOS'
+      run: |
         mkdir -p ~/.ssh
         echo "${{ inputs.ssh_key }}" > ~/.ssh/dnet_id_ed25519
         chmod 600 ~/.ssh/dnet_id_ed25519
@@ -17,11 +18,13 @@ runs:
         git config --global core.sshCommand "ssh -i ~/.ssh/dnet_id_ed25519 -o IdentitiesOnly=yes"
       shell: bash
 
-    - run: |
+    - if: runner.os != 'macOS'
+      run: |
         git submodule sync --recursive
         git submodule update --init --recursive
       shell: bash
 
-    - run: |
+    - if: runner.os != 'macOS'
+      run: |
         rm -f ~/.ssh/dnet_id_ed25519
       shell: bash

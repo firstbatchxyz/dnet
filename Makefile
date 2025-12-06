@@ -39,7 +39,7 @@ pull:
 
 .PHONY: test #         | Run tests
 test:
-		$(UV_RUN) pytest -v
+		$(UV_RUN) pytest -v $(ARGS)
 
 .PHONY: reset-sync #   | Reset virtual environment and sync dependencies again
 reset-sync:

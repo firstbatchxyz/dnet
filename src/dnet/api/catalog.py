@@ -1,4 +1,6 @@
-model_catalog = {
+from typing import Any
+
+model_catalog: dict[str, list[dict[str, Any]]] = {
     "models": [
         {
             "id": "mlx-community/gpt-oss-20b-MXFP4-Q8",
@@ -41,6 +43,7 @@ model_catalog = {
             "arch": "qwen3",
             "quantization": "4bit",
             "alias": "qwen3-4b",
+            "ci_test": True,
         },
         {
             "id": "Qwen/Qwen3-8B-MLX-bf16",
@@ -113,6 +116,7 @@ model_catalog = {
             "arch": "llama",
             "quantization": "4bit",
             "alias": "llama-3.2-3b-instruct",
+            "ci_test": True,
         },
         {
             "id": "mlx-community/Llama-3.1-8B-Instruct",
@@ -170,3 +174,11 @@ model_catalog = {
         },
     ]
 }
+
+
+def get_ci_test_models() -> list[dict[str, Any]]:
+    """Return models marked for CI integration testing.
+
+    These models are small enough to run on a single CI machine.
+    """
+    return [m for m in model_catalog["models"] if m.get("ci_test", False)]

@@ -1,0 +1,79 @@
+name: Integration Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_filter:
+        description: 'Optional model alias filter (e.g., "qwen3-4b" or leave empty for all)'
+        required: false
+        default: ''
+
+jobs:
+  integration-tests:
+    runs-on: mac2.metal
+    timeout-minutes: 60
+    env:
+      PROJECT_ROOT: ${{ github.workspace }}
+      PYTHONPATH: src
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Environment
+        uses: ./.github/actions/setup-env
+        with:
+          python_version: '3.12'
+
+      - name: Ensure compatible gRPC/protobuf versions
+        run: |
+          uv pip install --upgrade "grpcio>=1.75.1" "protobuf>=6.31.1"
+
+      - name: Kill processes on required ports
+        run: |
+          # Kill any processes on the ports we need
+          for port in 8080 8081 58080 58081; do
+            lsof -ti:$port | xargs kill -9 2>/dev/null || true
+          done
+          sleep 2
+
+      - name: Start shard server
+        run: |
+          uv run dnet-shard --http-port 8081 --grpc-port 58081 &
+          echo "SHARD_PID=$!" >> $GITHUB_ENV
+          sleep 5
+
+      - name: Start API server
+        run: |
+          uv run dnet-api --http-port 8080 --grpc-port 58080 &
+          echo "API_PID=$!" >> $GITHUB_ENV
+          sleep 5
+
+      - name: Wait for servers to be healthy
+        run: |
+          for i in {1..30}; do
+            if curl -s http://localhost:8080/health | grep -q "ok"; then
+              echo "API server is healthy"
+              exit 0
+            fi
+            echo "Waiting for API server... ($i/30)"
+            sleep 2
+          done
+          echo "API server failed to become healthy"
+          exit 1
+
+      - name: Run integration tests
+        run: |
+          if [ -n "${{ github.event.inputs.model_filter }}" ]; then
+            uv run pytest tests/integration/test_model_catalog.py -v -x -k "${{ github.event.inputs.model_filter }}" --tb=short
+          else
+            uv run pytest tests/integration/test_model_catalog.py -v -x --tb=short
+          fi
+
+      - name: Cleanup servers
+        if: always()
+        run: |
+          kill $API_PID 2>/dev/null || true
+          kill $SHARD_PID 2>/dev/null || true

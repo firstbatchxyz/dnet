@@ -69,7 +69,7 @@ uv --version
 **dnet** currently only supports MLX on Apple Silicon. To install, run:
 
 ```sh
-uv sync --extra mac
+uv sync --extra mac --extra dev
 ```
 
 After syncing dependencies, run the one-time setup to install Git hooks and generate protos:

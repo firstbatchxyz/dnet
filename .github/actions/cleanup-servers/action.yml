@@ -1,0 +1,35 @@
+name: 'Cleanup Servers'
+description: 'Stops running dnet servers'
+
+inputs:
+  ports:
+    description: 'Space-separated list of ports to clean up'
+    required: false
+    default: '8080 8081 58080 58081'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Kill servers by PID
+      shell: bash
+      run: |
+        # Try to kill by stored PIDs first
+        if [ -n "$API_PID" ]; then
+          echo "Killing API server (PID: $API_PID)"
+          kill $API_PID 2>/dev/null || true
+        fi
+        if [ -n "$SHARD_PID" ]; then
+          echo "Killing shard server (PID: $SHARD_PID)"
+          kill $SHARD_PID 2>/dev/null || true
+        fi
+
+    - name: Kill any remaining processes on ports
+      shell: bash
+      run: |
+        for port in ${{ inputs.ports }}; do
+          PID=$(lsof -ti:$port 2>/dev/null) || true
+          if [ -n "$PID" ]; then
+            echo "Killing process on port $port (PID: $PID)"
+            kill -9 $PID 2>/dev/null || true
+          fi
+        done

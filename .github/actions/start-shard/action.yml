@@ -1,0 +1,80 @@
+name: 'Start Shard Server'
+description: 'Starts a dnet shard server and waits for it to be ready'
+
+inputs:
+  http_port:
+    description: 'HTTP port for the shard server'
+    required: false
+    default: '8081'
+  grpc_port:
+    description: 'gRPC port for the shard server'
+    required: false
+    default: '58081'
+  shard_name:
+    description: 'Optional shard name for discovery (required for hostfile mode)'
+    required: false
+    default: ''
+  log_file:
+    description: 'Path to log file'
+    required: false
+    default: 'shard.log'
+  timeout:
+    description: 'Timeout in seconds to wait for server'
+    required: false
+    default: '30'
+
+outputs:
+  pid:
+    description: 'PID of the started shard server'
+    value: ${{ steps.start.outputs.pid }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Start shard server
+      id: start
+      shell: bash
+      run: |
+        # Build command
+        CMD="uv run dnet-shard --http-port ${{ inputs.http_port }} --grpc-port ${{ inputs.grpc_port }}"
+        if [ -n "${{ inputs.shard_name }}" ]; then
+          CMD="$CMD --shard-name ${{ inputs.shard_name }}"
+        fi
+
+        echo "Starting shard: $CMD"
+        $CMD > ${{ inputs.log_file }} 2>&1 &
+
+        # Wait for port to be ready
+        for i in $(seq 1 ${{ inputs.timeout }}); do
+          if lsof -ti:${{ inputs.http_port }} > /dev/null 2>&1; then
+            echo "Shard port ${{ inputs.http_port }} is open."
+            break
+          fi
+          echo "Waiting for shard port... ($i/${{ inputs.timeout }})"
+          sleep 1
+        done
+
+        # Verify server started
+        SHARD_PID=$(lsof -ti:${{ inputs.http_port }}) || true
+        if [ -z "$SHARD_PID" ]; then
+          echo "::error::Shard failed to start or bind port. Logs:"
+          cat ${{ inputs.log_file }}
+          exit 1
+        fi
+
+        echo "pid=$SHARD_PID" >> $GITHUB_OUTPUT
+        echo "SHARD_PID=$SHARD_PID" >> $GITHUB_ENV
+        echo "Shard started with PID $SHARD_PID"
+
+    - name: Wait for health check
+      shell: bash
+      run: |
+        for i in $(seq 1 ${{ inputs.timeout }}); do
+          if curl -s http://localhost:${{ inputs.http_port }}/health 2>/dev/null | grep -q "ok"; then
+            echo "Shard server is healthy"
+            exit 0
+          fi
+          echo "Waiting for shard health... ($i/${{ inputs.timeout }})"
+          sleep 1
+        done
+        echo "::warning::Shard health check timed out, but port is open"

@@ -1,0 +1,80 @@
+name: 'Start API Server'
+description: 'Starts a dnet API server and waits for it to be ready'
+
+inputs:
+  http_port:
+    description: 'HTTP port for the API server'
+    required: false
+    default: '8080'
+  grpc_port:
+    description: 'gRPC port for the API server'
+    required: false
+    default: '58080'
+  hostfile:
+    description: 'Path to hostfile for static discovery (optional)'
+    required: false
+    default: ''
+  log_file:
+    description: 'Path to log file'
+    required: false
+    default: 'api.log'
+  timeout:
+    description: 'Timeout in seconds to wait for server'
+    required: false
+    default: '30'
+
+outputs:
+  pid:
+    description: 'PID of the started API server'
+    value: ${{ steps.start.outputs.pid }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Start API server
+      id: start
+      shell: bash
+      run: |
+        # Build command
+        CMD="uv run dnet-api --http-port ${{ inputs.http_port }} --grpc-port ${{ inputs.grpc_port }}"
+        if [ -n "${{ inputs.hostfile }}" ]; then
+          CMD="$CMD --hostfile ${{ inputs.hostfile }}"
+        fi
+
+        echo "Starting API: $CMD"
+        $CMD > ${{ inputs.log_file }} 2>&1 &
+
+        # Wait for port to be ready
+        for i in $(seq 1 ${{ inputs.timeout }}); do
+          if lsof -ti:${{ inputs.http_port }} > /dev/null 2>&1; then
+            echo "API port ${{ inputs.http_port }} is open."
+            break
+          fi
+          echo "Waiting for API port... ($i/${{ inputs.timeout }})"
+          sleep 1
+        done
+
+        # Verify server started
+        API_PID=$(lsof -ti:${{ inputs.http_port }}) || true
+        if [ -z "$API_PID" ]; then
+          echo "::error::API failed to start or bind port. Logs:"
+          cat ${{ inputs.log_file }}
+          exit 1
+        fi
+
+        echo "pid=$API_PID" >> $GITHUB_OUTPUT
+        echo "API_PID=$API_PID" >> $GITHUB_ENV
+        echo "API started with PID $API_PID"
+
+    - name: Wait for health check
+      shell: bash
+      run: |
+        for i in $(seq 1 ${{ inputs.timeout }}); do
+          if curl -s http://localhost:${{ inputs.http_port }}/health 2>/dev/null | grep -q "ok"; then
+            echo "API server is healthy"
+            exit 0
+          fi
+          echo "Waiting for API health... ($i/${{ inputs.timeout }})"
+          sleep 1
+        done
+        echo "::warning::API health check timed out, but port is open"

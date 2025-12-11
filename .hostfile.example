@@ -1,0 +1,37 @@
+# dnet Static Peer Discovery Hostfile
+# ====================================
+#
+# This file allows you to specify shard locations statically,
+# bypassing UDP broadcast discovery. Useful for:
+#
+#   - CI/CD environments where UDP broadcast doesn't work
+#   - Cloud deployments (AWS, GCP, Azure) across subnets
+#   - Any environment where mDNS/UDP discovery fails
+#
+# Usage:
+#   1. Start shards with explicit names:
+#      dnet-shard --http-port 8081 --grpc-port 58081 --shard-name shard-1
+#      dnet-shard --http-port 8082 --grpc-port 58082 --shard-name shard-2
+#
+#   2. Create a hostfile (copy this file and edit):
+#      cp .hostfile.example hostfile
+#
+#   3. Start API with the hostfile:
+#      dnet-api --http-port 8080 --grpc-port 58080 --hostfile hostfile
+#
+# Format: instance_name ip http_port grpc_port
+#
+#   - instance_name: Must EXACTLY match the --shard-name used when starting the shard
+#   - ip: IP address where the shard is reachable (use 127.0.0.1 for local testing)
+#   - http_port: Shard's HTTP port (--http-port)
+#   - grpc_port: Shard's gRPC port (--grpc-port)
+#
+# JSON format is also supported:
+#   [
+#     {"instance": "shard-1", "local_ip": "10.0.1.100", "server_port": 8081, "shard_port": 58081},
+#     {"instance": "shard-2", "local_ip": "10.0.1.101", "server_port": 8082, "shard_port": 58082}
+#   ]
+#
+# Example entries (uncomment and edit to use):
+# shard-1 10.0.1.100 8081 58081
+# shard-2 10.0.1.101 8082 58082

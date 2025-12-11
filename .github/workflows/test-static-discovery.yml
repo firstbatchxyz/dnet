@@ -1,0 +1,63 @@
+name: Test Static Discovery
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test-hostfile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONPATH: src
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Environment
+        uses: ./.github/actions/setup-env
+        with:
+          python_version: '3.12'
+
+      - name: Run unit tests
+        run: uv run pytest tests/test_static_discovery.py -v
+
+      - name: Start shard with explicit name
+        uses: ./.github/actions/start-shard
+        with:
+          http_port: '8081'
+          grpc_port: '58081'
+          shard_name: 'ci-shard'
+
+      - name: Create hostfile
+        run: echo "ci-shard 127.0.0.1 8081 58081" > hostfile
+
+      - name: Start API with hostfile
+        uses: ./.github/actions/start-api
+        with:
+          http_port: '8080'
+          grpc_port: '58080'
+          hostfile: 'hostfile'
+
+      - name: Verify static discovery
+        run: |
+          echo "Checking /v1/devices endpoint..."
+          DEVICES=$(curl -s http://localhost:8080/v1/devices)
+          echo "Response: $DEVICES"
+          echo "$DEVICES" | grep -q "ci-shard" && echo "✓ Static discovery working - shard found via hostfile"
+
+      - name: Cleanup
+        if: always()
+        uses: ./.github/actions/cleanup-servers
+
+      - name: Show logs on failure
+        if: failure()
+        run: |
+          echo "=== Shard logs ==="
+          cat shard.log 2>/dev/null || echo "(no shard log)"
+          echo ""
+          echo "=== API logs ==="
+          cat api.log 2>/dev/null || echo "(no API log)"

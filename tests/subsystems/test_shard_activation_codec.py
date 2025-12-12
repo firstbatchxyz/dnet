@@ -95,12 +95,15 @@ def test_serialize_with_tensor_and_wire_dtype():
     )
     from dnet.shard.config import TransportConfig
 
-    data = codec.serialize(
+    data, meta = codec.serialize(
         msg,
-        transport_config=TransportConfig(compress=False, compress_min_bytes=65536),
+        transport_config=TransportConfig(
+            compress=False, compress_min_bytes=65536, wire_mode="fp16"
+        ),
     )
     # float16 wire dtype -> 2 bytes per element
     assert isinstance(data, (bytes, bytearray)) and len(data) == 3 * 2
+    assert meta == rt._wire_dtype_str
 
 
 def test_serialize_reads_from_output_pool_when_no_tensor():
@@ -127,10 +130,14 @@ def test_serialize_reads_from_output_pool_when_no_tensor():
         callback_url="cb",
         tensor=None,
     )
-    data = codec.serialize(
-        msg, transport_config=TransportConfig(compress=False, compress_min_bytes=0)
+    data, meta = codec.serialize(
+        msg,
+        transport_config=TransportConfig(
+            compress=False, compress_min_bytes=0, wire_mode="fp16"
+        ),
     )
     assert isinstance(data, (bytes, bytearray)) and len(data) == 3 * 2
+    assert meta == rt._wire_dtype_str
 
 
 def test_deserialize_returns_none_when_no_input_pool():
@@ -198,3 +205,84 @@ def test_deserialize_compressed_decompress_error_returns_none(monkeypatch):
         nonce="n8", activation=act, timestamp=0, node_origin="S", callback_url="cb"
     )
     assert codec.deserialize(req) is None
+
+
+def test_serialize_deserialize_q8_dense():
+    codec, rt = _create_codec()
+    from dnet.core.types.messages import ActivationMessage
+    from dnet.shard.config import TransportConfig
+
+    # Create 3D tensor to test flattening/restoration
+    B, L, D = 2, 4, 8
+    original_shape = (B, L, D)
+    # Use random data
+    original_data = np.random.randn(*original_shape).astype(np.float16)
+    t = mx.array(original_data)
+
+    msg = ActivationMessage(
+        nonce="q8",
+        pool_id=0,
+        batch_size=B,
+        shape=original_shape,
+        dtype="float16",
+        layer_id=0,
+        timestamp=0,
+        node_origin="S",
+        callback_url="cb",
+        tensor=t,
+    )
+
+    # Serialize with q8_dense
+    data, meta = codec.serialize(
+        msg,
+        transport_config=TransportConfig(wire_mode="q8_dense"),
+    )
+
+    # Check metadata
+    assert "fmt=q8_dense_v0" in meta
+    assert f"rows={B * L}" in meta
+    assert f"cols={D}" in meta
+
+    # Mock input pool allocation for deserialization
+    # We need to mock allocate_for_layer and get_buffer
+    pool_id = 123
+
+    def _alloc(layer_id, dtype, shape):
+        return pool_id
+
+    # Use a real numpy array as the buffer backing
+    buffer_backing = np.zeros(B * L * D, dtype=np.float16)
+
+    def _get_buf(pid):
+        if pid == pool_id:
+            return buffer_backing
+        return None
+
+    codec.runtime.input_pool.allocate_for_layer = _alloc
+    codec.runtime.input_pool.get_buffer = _get_buf
+
+    # Deserialize
+    act = Activation(
+        data=data,
+        batch_size=B,
+        shape=list(original_shape),
+        dtype=meta,
+        layer_id=0,
+    )
+    req = ActivationRequest(
+        nonce="q8", activation=act, timestamp=0, node_origin="S", callback_url="cb"
+    )
+
+    decoded_msg = codec.deserialize(req)
+
+    assert decoded_msg is not None
+    assert decoded_msg.pool_id == pool_id
+    assert tuple(decoded_msg.shape) == original_shape
+
+    # Check data accuracy
+    reconstructed_data = buffer_backing.reshape(original_shape)
+    diff = np.abs(original_data - reconstructed_data)
+    max_diff = np.max(diff)
+
+    # Q8 quantization error should be small (< 0.1 for this range)
+    assert max_diff < 0.1

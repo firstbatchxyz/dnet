@@ -25,7 +25,7 @@ pytestmark = [pytest.mark.shard, pytest.mark.ring]
 def _create_adapter(assigned_next=None, streaming=True):
     rt = FakeRuntimeForAdapter(assigned_next=(assigned_next or set()))
     disc = FakeDiscovery({})
-    cfg = TransportConfig(streaming=streaming)
+    cfg = TransportConfig(streaming=streaming, wire_mode="fp16")
     ad = RingAdapter(runtime=rt, discovery=disc, transport_config=cfg)
     return ad, rt
 

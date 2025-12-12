@@ -33,7 +33,7 @@ class ComputeConfig:
 class TransportConfig:
     """Transport configuration for a shard process."""
 
-    wire_mode: str = "q8_dense" #fp16
+    wire_mode: str = "q8_dense"
     wire_dtype: str = "fp16"
     streaming: bool = True
     stream_backoff_s: float = 0.5

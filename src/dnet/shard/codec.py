@@ -204,7 +204,6 @@ class ActivationCodec:
             data = scales_bytes + q_bytes
 
             meta = f"int8|fmt=q8_dense_v0|rd={self.runtime._wire_dtype_str}|rows={R}|cols={D}"
-            
             # Clean up reference
             msg.tensor = None
             return data, meta

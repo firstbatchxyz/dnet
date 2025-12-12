@@ -3,11 +3,13 @@
 import asyncio
 import signal
 from argparse import ArgumentParser
+from pathlib import Path
 from secrets import token_hex
 from socket import gethostname
+from typing import Optional, Union
 
 from dnet.utils.logger import logger
-from dnet_p2p import AsyncDnetP2P
+from dnet_p2p import AsyncDnetP2P, StaticDiscovery
 from dnet.api.cluster import ClusterManager
 from dnet.api.model_manager import ModelManager
 from dnet.api.inference import InferenceManager
@@ -15,7 +17,9 @@ from dnet.api.http_api import HTTPServer as ApiHTTPServer
 from dnet.api.grpc_servicer import GrpcServer as ApiGrpcServer
 
 
-async def serve(http_port: int, grpc_port: int) -> None:
+async def serve(
+    http_port: int, grpc_port: int, hostfile: Optional[Path] = None
+) -> None:
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
 
@@ -34,17 +38,29 @@ async def serve(http_port: int, grpc_port: int) -> None:
     tui = DnetTUI(title="DNET API Server")
     tui_task = asyncio.create_task(tui.run(stop_event))
 
+    # Discovery setup - either static (hostfile) or dynamic (UDP broadcast)
+    discovery: Union[StaticDiscovery, AsyncDnetP2P]
+    node_id = f"api-{token_hex(4)}-{gethostname()}"
+
     try:
-        tui.update_status("Initializing Discovery...")
-        # Discovery
-        discovery = AsyncDnetP2P("lib/dnet-p2p/lib")
-        node_id = f"api-{token_hex(4)}-{gethostname()}"
-        discovery.create_instance(node_id, http_port, grpc_port, is_manager=True)
-        await discovery.async_start()
+        if hostfile:
+            tui.update_status("Initializing Static Discovery...")
+            logger.info("Using static discovery from hostfile: %s", hostfile)
+            discovery = StaticDiscovery(
+                hostfile=hostfile,
+                own_instance=node_id,
+                own_http_port=http_port,
+                own_grpc_port=grpc_port,
+            )
+            await discovery.async_start()
+        else:
+            tui.update_status("Initializing Discovery...")
+            discovery = AsyncDnetP2P("lib/dnet-p2p/lib")
+            discovery.create_instance(node_id, http_port, grpc_port, is_manager=True)
+            await discovery.async_start()
 
         # Components
         from dnet.api.strategies.ring import RingStrategy
-        from typing import Optional
 
         strategy = RingStrategy()  # ContextParallelStrategy()
 
@@ -84,7 +100,8 @@ async def serve(http_port: int, grpc_port: int) -> None:
         await grpc_server.start()
         await http_server.start(shutdown_trigger=stop_event.wait)
 
-        tui.update_status(f"Running on HTTP:{http_port} gRPC:{grpc_port}")
+        mode = "static" if hostfile else "dynamic"
+        tui.update_status(f"Running on HTTP:{http_port} gRPC:{grpc_port} ({mode})")
         await stop_event.wait()
     finally:
         # Ensure TUI task is cancelled or finished if we exit early
@@ -113,12 +130,23 @@ def main() -> None:
     ap.add_argument(
         "-g", "--grpc-port", type=int, required=True, help="gRPC callback port"
     )
+    ap.add_argument(
+        "--hostfile",
+        type=str,
+        default=None,
+        help="Path to hostfile for static peer discovery (bypasses UDP broadcast)",
+    )
     args = ap.parse_args()
+
+    hostfile = Path(args.hostfile) if args.hostfile else None
 
     logger.info(
         f"Starting API server on HTTP port {args.http_port}, gRPC port {args.grpc_port}"
     )
-    asyncio.run(serve(args.http_port, args.grpc_port))
+    if hostfile:
+        logger.info(f"Using static discovery from hostfile: {hostfile}")
+
+    asyncio.run(serve(args.http_port, args.grpc_port, hostfile=hostfile))
 
 
 if __name__ == "__main__":

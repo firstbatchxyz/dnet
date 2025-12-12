@@ -1,18 +1,13 @@
-name: Integration Tests
+name: Test Static Discovery
 
 on:
-  workflow_dispatch:
-    inputs:
-      model_filter:
-        description: 'Model filter for tests (e.g. "qwen")'
-        required: false
-        default: ''
   pull_request:
+  workflow_dispatch:
 
 jobs:
-  integration-tests:
+  test-hostfile:
     runs-on: mac2.metal
-    timeout-minutes: 60
+    timeout-minutes: 15
     env:
       PROJECT_ROOT: ${{ github.workspace }}
       PYTHONPATH: src
@@ -39,27 +34,34 @@ jobs:
           done
           sleep 2
 
-      - name: Start shard server
+      - name: Run unit tests
+        run: uv run pytest tests/test_static_discovery.py -v
+
+      - name: Start shard with explicit name
         uses: ./.github/actions/start-shard
         with:
           http_port: '8081'
           grpc_port: '58081'
+          shard_name: 'ci-shard'
 
-      - name: Start API server
+      - name: Create hostfile
+        run: echo "ci-shard 127.0.0.1 8081 58081" > hostfile
+
+      - name: Start API with hostfile
         uses: ./.github/actions/start-api
         with:
           http_port: '8080'
           grpc_port: '58080'
+          hostfile: 'hostfile'
 
-      - name: Run integration tests
+      - name: Verify static discovery
         run: |
-          if [ -n "${{ github.event.inputs.model_filter }}" ]; then
-            uv run pytest tests/integration/test_model_catalog.py -v -x -k "${{ github.event.inputs.model_filter }}" --tb=short
-          else
-            uv run pytest tests/integration/test_model_catalog.py -v -x --tb=short
-          fi
+          echo "Checking /v1/devices endpoint..."
+          DEVICES=$(curl -s http://localhost:8080/v1/devices)
+          echo "Response: $DEVICES"
+          echo "$DEVICES" | grep -q "ci-shard" && echo "✓ Static discovery working - shard found via hostfile"
 
-      - name: Cleanup servers
+      - name: Cleanup
         if: always()
         uses: ./.github/actions/cleanup-servers
 

@@ -1,5 +1,6 @@
 from typing import Optional, Any, List
 import asyncio
+import os
 from hypercorn import Config
 from hypercorn.utils import LifespanFailureError
 import hypercorn.asyncio as aio_hypercorn
@@ -180,13 +181,29 @@ class HTTPServer:
                 self.cluster_manager.current_topology = topology
 
             api_props = await self.cluster_manager.discovery.async_get_own_properties()
+            grpc_port = int(self.inference_manager.grpc_port)
+
+            # Callback address shards should use for SendToken.
+            # In static discovery / cloud setups, discovery may report 127.0.0.1 which is not usable.
+            api_callback_addr = (os.getenv("DNET_API_CALLBACK_ADDR") or "").strip()
+            if not api_callback_addr:
+                api_callback_addr = f"{api_props.local_ip}:{grpc_port}"
+                if api_props.local_ip in ("127.0.0.1", "localhost"):
+                    logger.warning(
+                        "API callback address is loopback (%s). Remote shards will fail to SendToken. "
+                        "Set DNET_API_CALLBACK_ADDR to a reachable host:port.",
+                        api_callback_addr,
+                    )
             response = await self.model_manager.load_model(
-                topology, api_props, self.inference_manager.grpc_port
+                topology,
+                api_props,
+                self.inference_manager.grpc_port,
+                api_callback_address=api_callback_addr,
             )
             if response.success:
                 first_shard = topology.devices[0]
                 await self.inference_manager.connect_to_ring(
-                    first_shard.local_ip, first_shard.shard_port, api_props.local_ip
+                    first_shard.local_ip, first_shard.shard_port, api_callback_addr
                 )
             return response
 
@@ -209,9 +226,17 @@ class HTTPServer:
 
     async def get_devices(self) -> JSONResponse:
         devices = await self.cluster_manager.discovery.async_get_properties()
+        # Ensure we include this API node even if discovery doesn't include "self"
+        # (static hostfile discovery returns only peers).
+        try:
+            own = await self.cluster_manager.discovery.async_get_own_properties()
+            devices = dict(devices)
+            devices[own.instance] = own
+        except Exception:
+            pass
+
         devices_dict = {
-            instance: device_props.model_dump()
-            for instance, device_props in devices.items()
+            instance: props.model_dump() for instance, props in devices.items()
         }
         return JSONResponse(content={"devices": devices_dict})
 

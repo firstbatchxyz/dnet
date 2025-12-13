@@ -56,6 +56,7 @@ class ModelManager:
         topology: TopologyInfo,
         api_properties: DnetDeviceProperties,
         grpc_port: int,
+        api_callback_address: Optional[str] = None,
     ) -> APILoadModelResponse:
         """
         Orchestrates model loading across the cluster based on topology.
@@ -111,8 +112,13 @@ class ModelManager:
                         )
 
                 try:
-                    # Build API callback address (gRPC)
-                    api_callback_address = f"{api_properties.local_ip}:{grpc_port}"
+                    # Build API callback address (gRPC).
+                    # For internet setups, allow explicit override to avoid advertising 127.0.0.1.
+                    cb_addr = (
+                        api_callback_address
+                        if api_callback_address
+                        else f"{api_properties.local_ip}:{grpc_port}"
+                    )
 
                     # Call load_model via HTTP (window_size unified)
                     url = f"http://{shard_props.local_ip}:{shard_props.server_port}/load_model"
@@ -126,7 +132,7 @@ class ModelManager:
                         residency_size=assignment.residency_size,
                         total_layers=topology.num_layers,
                         kv_bits=topology.kv_bits,
-                        api_callback_address=api_callback_address,
+                        api_callback_address=cb_addr,
                     ).model_dump()
 
                     # timeout is `None` because shards may actually be downloading weights

@@ -10,13 +10,13 @@ lint:
 
 .PHONY: lint-fix #     | Fix linting issues
 lint-fix:
-	   uv run ruff check --fix
+	$(UV_RUN) ruff check --fix
 
 .PHONY: format #       | Check formatting
 format:
 		$(UV_RUN) ruff format --diff
 
-.PHONEY: format-fix #   | Fix formatting issues
+.PHONY: format-fix #   | Fix formatting issues
 format-fix:
 		$(UV_RUN) ruff format .
 
@@ -68,8 +68,11 @@ hooks-update:
 .PHONY: ensure-env #   | Ensure .env exists
 ensure-env:
 	@if [ ! -f .env ]; then \
-		cp .env.example .env; \
-		echo 'Copied .env.example to .env'; \
+		if [ ! -f .env.example ]; then \
+			echo 'Missing .env.example; cannot create .env'; \
+			exit 1; \
+		fi; \
+		cp .env.example .env && echo 'Copied .env.example to .env'; \
 	else \
 		echo '.env already exists'; \
 	fi

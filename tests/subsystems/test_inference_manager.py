@@ -27,7 +27,7 @@ def test_connect_sets_callback_addr():
         mm = FakeModelManager(FakeTokenizer())
         ad = FakeStrategyAdapter()
         mgr = InferenceManager(cm, mm, grpc_port=50500, adapter=ad)
-        await mgr.connect_to_ring("1.2.3.4", 9000, api_ip="9.9.9.9")
+        await mgr.connect_to_ring("1.2.3.4", 9000, "9.9.9.9:50500")
         assert ad.connected == ("1.2.3.4", 9000)
         assert mgr._api_callback_addr == "9.9.9.9:50500"
 
@@ -41,7 +41,7 @@ def test_generate_stream_basic_flow():
         ad = FakeStrategyAdapter()
         cm = FakeClusterManager()
         mgr = InferenceManager(cm, mm, grpc_port=50500, adapter=ad)
-        await mgr.connect_to_ring("1.2.3.4", 9000, api_ip="9.9.9.9")
+        await mgr.connect_to_ring("1.2.3.4", 9000, "9.9.9.9:50500")
         req = ChatRequestModel(
             model="m",
             messages=[ChatMessage(role="user", content="hi")],
@@ -163,7 +163,7 @@ def test_generate_stream_uses_chat_template_when_present():
         ad = FakeStrategyAdapter()
         cm = FakeClusterManager()
         mgr = InferenceManager(cm, mm, grpc_port=4040, adapter=ad)
-        await mgr.connect_to_ring("1.2.3.4", 9000, api_ip="9.9.9.9")
+        await mgr.connect_to_ring("1.2.3.4", 9000, "9.9.9.9:4040")
         req = ChatRequestModel(
             model="m",
             messages=[ChatMessage(role="user", content="x")],

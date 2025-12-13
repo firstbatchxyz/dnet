@@ -225,10 +225,14 @@ class FakeModelManager:
             return True
         return False
 
-    async def load_model(self, topology, api_properties, grpc_port):
+    async def load_model(
+        self, topology, api_properties, grpc_port, api_callback_address: str
+    ):
         from dnet.api.models import APILoadModelResponse
 
-        self.load_calls.append((topology, api_properties, grpc_port))
+        self.load_calls.append(
+            (topology, api_properties, grpc_port, api_callback_address)
+        )
         if self.load_success:
             self.current_model_id = topology.model or "m"
         return APILoadModelResponse(

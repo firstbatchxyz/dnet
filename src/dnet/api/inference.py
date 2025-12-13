@@ -55,7 +55,7 @@ class InferenceManager:
 
     async def connect_to_ring(
         self, first_shard_ip: str, first_shard_port: int, api_callback_addr: str
-    ):
+    ) -> None:
         """
         `api_callback_addr` must be a reachable `host:port` from shards.
         For internet setups, this should be a public IP/DNS or overlay VPN IP.

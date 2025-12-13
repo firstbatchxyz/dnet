@@ -234,10 +234,8 @@ class HTTPServer:
             devices[own.instance] = own
         except Exception:
             pass
-        devices_dict = {
-            instance: device_props.model_dump()
-            for instance, device_props in devices.items()
-        }
+
+        devices_dict = {instance: props.model_dump() for instance, props in devices.items()}
         return JSONResponse(content={"devices": devices_dict})
 
     async def get_topology(self) -> TopologyInfo:

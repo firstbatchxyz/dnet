@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Dict
-import types
+
+from dnet_p2p import DnetDeviceProperties
 
 
 def _to_json_devices(devices: Dict[str, Any]) -> Dict[str, Any]:
@@ -23,22 +23,20 @@ def _to_json_devices(devices: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-@dataclass
-class FakeProps:
-    """Minimal device properties used by tests and fake discovery."""
+def FakeProps(
+    instance: str, local_ip: str, server_port: int, *, is_manager: bool = False
+) -> DnetDeviceProperties:
+    """Strict fake device properties that match production type (`DnetDeviceProperties`)."""
 
-    instance: str
-    local_ip: str
-    server_port: int
-    is_manager: bool = False
-
-    def model_dump(self) -> Dict[str, Any]:
-        return {
-            "instance": self.instance,
-            "local_ip": self.local_ip,
-            "server_port": self.server_port,
-            "is_manager": self.is_manager,
-        }
+    return DnetDeviceProperties(
+        is_manager=is_manager,
+        is_busy=False,
+        instance=instance,
+        server_port=server_port,
+        shard_port=int(server_port) + 1000,
+        local_ip=local_ip,
+        thunderbolt=None,
+    )
 
 
 class FakeTBConn:
@@ -55,8 +53,8 @@ class FakeDiscovery:
     def __init__(self, shards: Dict[str, Any] | None = None):
         self._shards = shards or {}
 
-    async def async_get_properties(self) -> Dict[str, FakeProps]:
-        out: Dict[str, FakeProps] = {}
+    async def async_get_properties(self) -> Dict[str, DnetDeviceProperties]:
+        out: Dict[str, DnetDeviceProperties] = {}
         for k, v in self._shards.items():
             if isinstance(v, dict):
                 d = dict(v)
@@ -64,20 +62,22 @@ class FakeDiscovery:
                 d.setdefault("local_ip", "0.0.0.0")
                 d.setdefault("server_port", 0)
                 d.setdefault("is_manager", False)
-                out[k] = FakeProps(
-                    d["instance"], d["local_ip"], d["server_port"], d["is_manager"]
-                )
+                d.setdefault("shard_port", int(d["server_port"]) + 1000)
+                d.setdefault("is_busy", False)
+                d.setdefault("thunderbolt", None)
+                out[k] = DnetDeviceProperties(**d)
             else:
                 out[k] = v
         return out
 
     async def async_get_own_properties(self):
-        # Minimal self-properties object
-        return types.SimpleNamespace(
-            instance="self",
-            local_ip="127.0.0.1",
-            server_port=0,
+        return DnetDeviceProperties(
             is_manager=True,
+            is_busy=False,
+            instance="self",
+            server_port=0,
+            shard_port=0,
+            local_ip="127.0.0.1",
             thunderbolt=None,
         )
 

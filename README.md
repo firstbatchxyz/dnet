@@ -236,6 +236,30 @@ curl -X POST http://localhost:8080/v1/chat/completions \
   }'
 ```
 
+#### MCP Integration
+
+dnet exposes an MCP server at `/mcp` for use with Claude Desktop, Cursor, and other MCP clients.
+
+Add this to your MCP config:
+
+```json
+{
+  "mcpServers": {
+    "dnet": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote@latest",
+        "http://localhost:8080/mcp",
+        "--allow-http"
+      ]
+    }
+  }
+}
+```
+
+Available tools: `chat_completion`, `load_model`, `unload_model`, `list_models`, `get_status`, `get_cluster_details`.
+
 #### Devices
 
 You can get the list of discoverable devices with:

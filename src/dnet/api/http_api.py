@@ -25,6 +25,7 @@ from .cluster import ClusterManager
 from .inference import InferenceManager
 from .model_manager import ModelManager
 from dnet_p2p import DnetDeviceProperties
+from .mcp_handler import create_mcp_server
 
 
 class HTTPServer:
@@ -41,8 +42,21 @@ class HTTPServer:
         self.inference_manager = inference_manager
         self.model_manager = model_manager
         self.node_id = node_id
-        self.app = FastAPI()
         self.http_server: Optional[asyncio.Task] = None
+
+        # Create MCP server first to get lifespan
+        mcp = create_mcp_server(
+            inference_manager, model_manager, cluster_manager
+        )
+        # Use path='/' since we're mounting at /mcp, so final path will be /mcp/
+        mcp_app = mcp.http_app(path="/")
+        
+        # Create FastAPI app with MCP lifespan
+        self.app = FastAPI(lifespan=mcp_app.lifespan)
+        
+        # Mount MCP server as ASGI app
+        self.app.mount("/mcp", mcp_app)
+
 
     async def start(self, shutdown_trigger: Any = lambda: asyncio.Future()) -> None:
         await self._setup_routes()

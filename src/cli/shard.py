@@ -1,7 +1,11 @@
+"""CLI entry point for dnet ring shard server."""
+
 import asyncio
 import signal
-from socket import gethostname
+from argparse import ArgumentParser
 from secrets import token_hex
+from socket import gethostname
+
 from dnet_p2p import AsyncDnetP2P
 from dnet.shard.adapters.ring import RingAdapter
 from dnet.shard.runtime import ShardRuntime
@@ -9,7 +13,6 @@ from dnet.shard.shard import Shard
 from dnet.shard.http_api import HTTPServer as ShardHTTPServer
 from dnet.shard.grpc_servicer import GrpcServer as ShardGrpcServer
 from dnet.utils.logger import logger
-from argparse import ArgumentParser
 
 
 async def serve(
@@ -139,32 +142,37 @@ def main() -> None:
     The shard server runs without a preloaded model. The API will send
     LoadModel commands via HTTP to configure which layers to load.
     """
+    # Get default values from settings
+    from dnet.config import get_settings
+
+    settings = get_settings()
+
     ap = ArgumentParser(description="dnet ring shard server")
     ap.add_argument(
         "-p",
         "--grpc-port",
         type=int,
-        required=True,
-        help="gRPC server port",
+        default=settings.shard.grpc_port,
+        help=f"gRPC server port (default: {settings.shard.grpc_port})",
     )
     ap.add_argument(
         "--http-port",
         type=int,
-        required=True,
-        help="HTTP server port",
+        default=settings.shard.http_port,
+        help=f"HTTP server port (default: {settings.shard.http_port})",
     )
     ap.add_argument(
         "-q",
         "--queue-size",
         type=int,
-        default=256,
-        help="Activation queue size (default: 256)",
+        default=settings.shard.queue_size,
+        help=f"Activation queue size (default: {settings.shard.queue_size})",
     )
     ap.add_argument(
         "-n",
         "--shard-name",
         type=str,
-        default=None,
+        default=settings.shard.name,
         help="Custom shard name for discovery registration (default: auto-generated)",
     )
     args = ap.parse_args()

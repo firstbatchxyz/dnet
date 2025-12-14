@@ -30,7 +30,7 @@ from dnet.protos.dnet_ring_pb2_grpc import DnetRingServiceStub
 from dnet.core.types.messages import ActivationMessage
 from dnet.utils.logger import logger
 from dnet.core.stream_manager import StreamManager
-from ..config import TransportConfig
+from dnet.config import get_settings, TransportSettings
 from dnet.protos import dnet_ring_pb2 as pb2
 from ..codec import ActivationCodec
 from dnet.protos.shard_api_comm_pb2_grpc import ShardApiServiceStub
@@ -41,22 +41,23 @@ class RingAdapter(TopologyAdapter):
         self,
         runtime: ShardRuntime,
         discovery: AsyncDnetP2P,
-        transport_config: Optional[TransportConfig] = None,
+        transport_settings: Optional[TransportSettings] = None,
     ) -> None:
         super().__init__(runtime, discovery)
 
-        self.transport_config: TransportConfig = (
-            transport_config if transport_config else TransportConfig()
+        # Use provided settings or load from centralized config
+        self.transport_settings: TransportSettings = (
+            transport_settings if transport_settings else get_settings().transport
         )
         self.codec = ActivationCodec(runtime)
 
         self.running = False
         self._active_nonce: Optional[str] = None
 
-        self._streaming_enabled = self.transport_config.streaming
+        self._streaming_enabled = self.transport_settings.streaming
         self._streams: StreamManager = StreamManager(
-            idle_timeout_s=self.transport_config.stream_idle_s,
-            backoff_s=self.transport_config.stream_backoff_s,
+            idle_timeout_s=self.transport_settings.stream_idle_s,
+            backoff_s=self.transport_settings.stream_backoff_s,
         )
 
         # Topology
@@ -266,7 +267,7 @@ class RingAdapter(TopologyAdapter):
             logger.error("Streaming disabled or next node not connected; cannot send")
             return
         try:
-            data = self.codec.serialize(msg, self.transport_config)
+            data = self.codec.serialize(msg, self.transport_settings)
         except Exception as e:
             logger.error("Serialization failed for nonce %s: %s", msg.nonce, e)
             return

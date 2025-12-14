@@ -20,7 +20,7 @@ from dnet.utils.model import ModelMetadata, get_model_metadata
 from dnet.utils.serialization import mlx_dtype_map
 from dnet.core.models import BaseRingModel as BaseShardModel, get_ring_model
 import asyncio
-from .config import ComputeConfig, TransportConfig, TopologyConfig
+from dnet.config import get_settings, KVCacheSettings, ComputeSettings
 from dnet.core.memory.memory_pool import LayerAwareMemoryPool
 from .policies import ComputePolicy, NoopPolicy, make_policy, plan_policy, PolicyPlan
 from dnet.utils.model import (
@@ -29,6 +29,28 @@ from dnet.utils.model import (
     load_final_norm,
     load_lm_head,
 )
+
+
+# Runtime-mutable KV cache config (initialized from settings)
+class RuntimeKVCacheConfig:
+    """Mutable KV cache config for runtime updates."""
+
+    def __init__(self, settings: KVCacheSettings):
+        self.mode: str = settings.mode
+        self.bits: int = settings.bits
+        self.group_size: int = settings.group_size
+        self.kv_ttl_s: float = settings.ttl_s
+
+
+# Runtime-mutable compute config (initialized from settings)
+class RuntimeComputeConfig:
+    """Mutable compute config for runtime updates."""
+
+    def __init__(self, settings: ComputeSettings):
+        self.prefetch_mode: str = settings.prefetch_mode
+        self.mxload_fastpath: bool = settings.mxload_fastpath
+        self.input_pool_mb: int = settings.input_pool_mb
+        self.output_pool_mb: int = settings.output_pool_mb
 
 
 class ShardRuntime:
@@ -42,21 +64,20 @@ class ShardRuntime:
         queue_size: int = 128,
         device_prefetch_workers: int = 4,
         prefetch_threads: int = 2,
-        compute_config: Optional[ComputeConfig] = None,
-        transport_config: Optional[TransportConfig] = None,
-        topology_config: Optional[TopologyConfig] = None,
     ):
         self.shard_id = shard_id
-        self.compute_config: ComputeConfig = (
-            compute_config if compute_config else ComputeConfig()
-        )
-        self.transport_config: TransportConfig = (
-            transport_config if transport_config else TransportConfig()
-        )
 
-        self.topology_config: TopologyConfig = (
-            topology_config if topology_config else TopologyConfig()
-        )
+        # Load from centralized settings
+        settings = get_settings()
+
+        # Store settings references (immutable)
+        self._compute_settings = settings.compute
+        self._transport_settings = settings.transport
+        self._topology_settings = settings.topology
+
+        # Mutable runtime configs (may be updated per-request or by policies)
+        self.kv_cache_config = RuntimeKVCacheConfig(settings.kv_cache)
+        self._compute_config = RuntimeComputeConfig(settings.compute)
 
         self.policy: ComputePolicy = NoopPolicy(runtime=self, resident_windows=1)
 
@@ -91,7 +112,7 @@ class ShardRuntime:
         self.output_pool: Optional[LayerAwareMemoryPool] = None
 
         # Wire dtype
-        _wd = (self.transport_config.wire_dtype or "fp16").strip().lower()
+        _wd = (self._transport_settings.wire_dtype or "fp16").strip().lower()
         if _wd in {"bf16", "bfloat16"}:
             self._wire_dtype_str = "bfloat16"
         else:
@@ -105,7 +126,23 @@ class ShardRuntime:
 
         self._kv_by_nonce: Dict[str, list] = {}
         self._kv_last_seen: Dict[str, float] = {}
-        self._kv_ttl_s: float = self.compute_config.kv_cache.kv_ttl_s
+        self._kv_ttl_s: float = self.kv_cache_config.kv_ttl_s
+
+    # Properties for backward compatibility
+    @property
+    def compute_config(self):
+        """Mutable runtime compute config (for policy updates)."""
+        return self._compute_config
+
+    @property
+    def transport_config(self):
+        """Backward compat: returns transport settings."""
+        return self._transport_settings
+
+    @property
+    def topology_config(self):
+        """Backward compat: returns topology settings."""
+        return self._topology_settings
 
     def attach_loop(self, loop):
         self._loop = loop
@@ -148,7 +185,7 @@ class ShardRuntime:
             local_count=local_count,
             requested_w=int(req.window_size),
             residency_size=int(req.residency_size),
-            topology_config=self.topology_config,
+            topology_config=self._topology_settings,
         )
 
         logger.info(
@@ -163,20 +200,18 @@ class ShardRuntime:
             plan.is_sliding,
         )
 
-        # KV cache config from API
+        # KV cache config from API (mutable update)
         kv = (req.kv_bits or "").strip().lower()
         if kv == "4bit":
-            self.compute_config.kv_cache.mode = "4bit"
-            self.compute_config.kv_cache.bits = 4
+            self.kv_cache_config.mode = "4bit"
+            self.kv_cache_config.bits = 4
         elif kv == "8bit":
-            self.compute_config.kv_cache.mode = "8bit"
-            self.compute_config.kv_cache.bits = 8
+            self.kv_cache_config.mode = "8bit"
+            self.kv_cache_config.bits = 8
         else:
             # fp16 (or default)
-            self.compute_config.kv_cache.mode = "fp16"
-            self.compute_config.kv_cache.bits = max(
-                1, int(getattr(self.compute_config.kv_cache, "bits", 8))
-            )
+            self.kv_cache_config.mode = "fp16"
+            self.kv_cache_config.bits = max(1, self.kv_cache_config.bits)
 
         # Create policy + weight cache
         self.policy = make_policy(plan.mode, self, plan.resident_windows)
@@ -187,10 +222,10 @@ class ShardRuntime:
 
         # Init Pools
         self.input_pool = LayerAwareMemoryPool(
-            total_memory_mb=int(self.compute_config.input_pool_mb)
+            total_memory_mb=int(self._compute_settings.input_pool_mb)
         )
         self.output_pool = LayerAwareMemoryPool(
-            total_memory_mb=int(self.compute_config.output_pool_mb)
+            total_memory_mb=int(self._compute_settings.output_pool_mb)
         )
 
         # Load model
@@ -219,9 +254,9 @@ class ShardRuntime:
         self.model.eval()
         self.cache = make_cache(
             self.model,
-            kv_mode=self.compute_config.kv_cache.mode,
-            kv_bits=self.compute_config.kv_cache.bits,
-            kv_group=self.compute_config.kv_cache.group_size,
+            kv_mode=self.kv_cache_config.mode,
+            kv_bits=self.kv_cache_config.bits,
+            kv_group=self.kv_cache_config.group_size,
         )
 
         # Load (embed/norm/head) if needed
@@ -311,9 +346,9 @@ class ShardRuntime:
         try:
             self.cache = make_cache(
                 self.model,
-                kv_mode=self.compute_config.kv_cache.mode,
-                kv_bits=self.compute_config.kv_cache.bits,
-                kv_group=self.compute_config.kv_cache.group_size,
+                kv_mode=self.kv_cache_config.mode,
+                kv_bits=self.kv_cache_config.bits,
+                kv_group=self.kv_cache_config.group_size,
             )
             logger.info("Node %s: Cache reset successfully", self.shard_id)
         except Exception as e:
@@ -352,9 +387,9 @@ class ShardRuntime:
         if kv is None:
             kv = make_cache(
                 self.model,
-                kv_mode=self.compute_config.kv_cache.mode,
-                kv_bits=self.compute_config.kv_cache.bits,
-                kv_group=self.compute_config.kv_cache.group_size,
+                kv_mode=self.kv_cache_config.mode,
+                kv_bits=self.kv_cache_config.bits,
+                kv_group=self.kv_cache_config.group_size,
             )
             self._kv_by_nonce[nonce] = kv
         self._kv_last_seen[nonce] = time.perf_counter()

@@ -7,7 +7,6 @@ import pytest
 mx = pytest.importorskip("mlx.core")
 
 from dnet.shard.runtime import ShardRuntime
-from dnet.shard.config import TransportConfig
 from dnet.shard.models import ShardLoadModelRequest, ShardUnloadModelResponse
 from dnet.core.types.messages import ActivationMessage
 from tests.fakes import FakeModelMetadata, FakeRingModel, FakePolicyPlan, FakePolicy
@@ -94,10 +93,7 @@ def test_load_model_core_sets_policy_kv_config_and_pools(monkeypatch):
     )
 
     rt.load_model_core(_create_request(kv_bits="8bit", layers=[0, 3]))
-    assert (
-        rt.compute_config.kv_cache.mode == "8bit"
-        and rt.compute_config.kv_cache.bits == 8
-    )
+    assert rt.kv_cache_config.mode == "8bit" and rt.kv_cache_config.bits == 8
     assert rt.input_pool is not None and rt.output_pool is not None
     assert hasattr(rt.policy, "configured") and rt.policy.window_size == 2
     assert made_caches and made_caches[0][0] in ("8bit", "fp16", "quant")
@@ -142,8 +138,8 @@ def test_load_model_core_kv_modes(monkeypatch, bits):
         "dnet.shard.runtime.load_lm_head", lambda *a, **k: 0, raising=True
     )
     rt.load_model_core(_create_request(kv_bits=bits, layers=[1]))
-    assert rt.compute_config.kv_cache.mode in ("4bit", "8bit", "fp16")
-    assert rt.compute_config.kv_cache.bits >= 1
+    assert rt.kv_cache_config.mode in ("4bit", "8bit", "fp16")
+    assert rt.kv_cache_config.bits >= 1
 
 
 def test_unload_model_core_no_model_ok():
@@ -285,16 +281,24 @@ def test_compute_calls_policy_process():
     assert getattr(rt.policy, "processed", False) is True
 
 
-def test_wire_dtype_bf16_mapping():
-    rt = ShardRuntime("Sbf", transport_config=TransportConfig(wire_dtype="bf16"))
+def test_wire_dtype_bf16_mapping(monkeypatch):
+    # Set env var before creating runtime to test bf16 mapping
+    monkeypatch.setenv("DNET_TRANSPORT_WIRE_DTYPE", "bf16")
+    # Clear the cached settings to pick up new env var
+    from dnet.config import get_settings
+
+    get_settings.cache_clear()
+    rt = ShardRuntime("Sbf")
     assert rt._wire_dtype_str == "bfloat16" and str(rt._wire_mx_dtype) == str(
         mx.bfloat16
     )
+    # Restore default
+    get_settings.cache_clear()
 
 
 def test_invalid_kv_bits_fallback(monkeypatch):
     rt = ShardRuntime("Sbad")
-    rt.compute_config.kv_cache.bits = 7
+    rt.kv_cache_config.bits = 7
     monkeypatch.setattr(
         "dnet.shard.runtime.get_model_metadata",
         lambda _: FakeModelMetadata(model_type="llama", model_config={}, num_layers=2),
@@ -344,7 +348,4 @@ def test_invalid_kv_bits_fallback(monkeypatch):
         },
     )()
     rt.load_model_core(req)
-    assert (
-        rt.compute_config.kv_cache.mode == "fp16"
-        and rt.compute_config.kv_cache.bits == 7
-    )
+    assert rt.kv_cache_config.mode == "fp16" and rt.kv_cache_config.bits == 7

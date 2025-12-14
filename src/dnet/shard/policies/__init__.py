@@ -3,9 +3,9 @@ from . import fit_in_memory, offload
 from .noop import NoopPolicy
 from .fit_in_memory import FitInMemoryPolicy
 from .offload import OffloadPolicy
-from ..config import TopologyConfig
+from dnet.config import TopologySettings
 from dataclasses import dataclass
-from typing import Type
+from typing import Type, Union
 
 
 @dataclass
@@ -22,7 +22,7 @@ def plan_policy(
     local_count: int,
     requested_w: int,
     residency_size: int,
-    topology_config: TopologyConfig,
+    topology_config: Union[TopologySettings, "TopologySettings"],
 ) -> PolicyPlan:
     requested_w = max(1, requested_w)
     n_residency = max(1, residency_size)

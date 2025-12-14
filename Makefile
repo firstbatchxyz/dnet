@@ -1,4 +1,4 @@
-UV_RUN = uv run --env-file .env
+UV_RUN = uv run
 
 .PHONY: run #          | Run
 run:
@@ -47,11 +47,15 @@ reset-sync:
 		rm uv.lock
 		uv sync
 
-.PHONY: init #         | One-time setup: install hooks and generate protos
+.PHONY: init #         | One-time setup: install hooks, generate protos and .env
 init:
-		$(MAKE) ensure-env
+		$(MAKE) env-example
 		$(MAKE) hooks-install
 		$(MAKE) protos
+	@if [ ! -f .env ]; then \
+		cp .env.example .env; \
+		echo 'Copied .env.example to .env'; \
+	fi
 
 .PHONY: hooks-install # | Install pre-commit hooks
 hooks-install:
@@ -65,17 +69,9 @@ hooks-run:
 hooks-update:
 		uv run pre-commit autoupdate
 
-.PHONY: ensure-env #   | Ensure .env exists
-ensure-env:
-	@if [ ! -f .env ]; then \
-		if [ ! -f .env.example ]; then \
-			echo 'Missing .env.example; cannot create .env'; \
-			exit 1; \
-		fi; \
-		cp .env.example .env && echo 'Copied .env.example to .env'; \
-	else \
-		echo '.env already exists'; \
-	fi
+.PHONY: env-example #  | Regenerate .env.example from settings
+env-example:
+		$(UV_RUN) python scripts/generate_env_example.py
 
 .PHONY: help #         | List targets
 help:

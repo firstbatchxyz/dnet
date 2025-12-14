@@ -28,3 +28,10 @@ repos:
         types: [python]
         pass_filenames: false
         require_serial: true
+
+      - id: generate-env-example
+        name: Generate .env.example
+        entry: uv run python scripts/generate_env_example.py
+        language: system
+        files: ^src/dnet/config\.py$
+        pass_filenames: false

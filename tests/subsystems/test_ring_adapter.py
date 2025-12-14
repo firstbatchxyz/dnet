@@ -6,7 +6,7 @@ import pytest
 from dnet_p2p import DnetDeviceProperties
 from dnet.shard.adapters.ring import RingAdapter
 from dnet.shard.models import ShardLoadModelRequest
-from dnet.shard.config import TransportConfig
+from dnet.config import TransportSettings
 from dnet.protos.dnet_ring_pb2 import Activation, ActivationRequest
 from dnet.core.types.messages import ActivationMessage
 
@@ -25,8 +25,8 @@ pytestmark = [pytest.mark.shard, pytest.mark.ring]
 def _create_adapter(assigned_next=None, streaming=True):
     rt = FakeRuntimeForAdapter(assigned_next=(assigned_next or set()))
     disc = FakeDiscovery({})
-    cfg = TransportConfig(streaming=streaming)
-    ad = RingAdapter(runtime=rt, discovery=disc, transport_config=cfg)
+    cfg = TransportSettings(streaming=streaming)
+    ad = RingAdapter(runtime=rt, discovery=disc, transport_settings=cfg)
     return ad, rt
 
 

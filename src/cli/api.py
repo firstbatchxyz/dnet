@@ -123,12 +123,25 @@ async def serve(
 
 
 def main() -> None:
+    # Get default values from settings
+    from dnet.config import get_settings
+
+    settings = get_settings()
+
     ap = ArgumentParser(description="dnet ring API server (new architecture)")
     ap.add_argument(
-        "-p", "--http-port", type=int, required=True, help="HTTP server port"
+        "-p",
+        "--http-port",
+        type=int,
+        default=settings.api.http_port,
+        help=f"HTTP server port (default: {settings.api.http_port})",
     )
     ap.add_argument(
-        "-g", "--grpc-port", type=int, required=True, help="gRPC callback port"
+        "-g",
+        "--grpc-port",
+        type=int,
+        default=settings.api.grpc_port,
+        help=f"gRPC callback port (default: {settings.api.grpc_port})",
     )
     ap.add_argument(
         "--hostfile",

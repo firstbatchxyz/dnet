@@ -7,15 +7,36 @@ Only assigned layers for a shard are repacked to minimize one-time work.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import time
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
 import mlx.core as mx
 
-from .model import ModelMetadata, get_model_metadata, load_weight, MappedFile
-import json
-import time
+from .model import MappedFile, ModelMetadata, get_model_metadata, load_weight
+
+
+def _get_repack_base_dir() -> Path:
+    """Get the base directory for repacked layers.
+
+    Priority: env var > settings > default.
+    Env var is checked first to allow test monkeypatching to work.
+    """
+    # Check env var first (allows tests to override via monkeypatch)
+    env_val = os.getenv("DNET_REPACK_DIR")
+    if env_val:
+        return Path(env_val).expanduser()
+
+    # Then try centralized settings
+    try:
+        from dnet.config import get_settings
+
+        return Path(get_settings().storage.repack_dir).expanduser()
+    except Exception:
+        # Default fallback using Path.home() for cross-platform compat
+        return Path.home() / ".dria" / "dnet" / "repacked_layers"
 
 
 def _sanitize_model_id(model_id: str) -> str:
@@ -160,10 +181,8 @@ def ensure_repacked_for_layers(
     """
     safe = _sanitize_model_id(model_id)
     layer_hash = _hash_layers(assigned_layers)
-    base_dir = Path(
-        os.getenv("DNET_REPACK_DIR", "~/.dria/dnet/repacked_layers")
-    ).expanduser()
-    out_root = base_dir / safe / layer_hash
+    base = _get_repack_base_dir()
+    out_root = base / safe / layer_hash
     # Quick existence check: if at least one expected file exists, assume done
     expected = (
         out_root / f"layer_{int(sorted(set(assigned_layers))[0]):04d}.safetensors"
@@ -219,8 +238,9 @@ def delete_repacked_layers(
     import shutil
 
     if base_dir is None:
-        base_dir = os.getenv("DNET_REPACK_DIR", "~/.dria/dnet/repacked_layers")
-    base = Path(base_dir).expanduser()
+        base = _get_repack_base_dir()
+    else:
+        base = Path(base_dir).expanduser()
     removed: list[str] = []
 
     if all_flag:

@@ -9,6 +9,10 @@ on:
         default: ''
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   integration-tests:
     runs-on: mac2.metal
@@ -53,6 +57,7 @@ jobs:
 
       - name: Run integration tests
         run: |
+          sleep 10  # Wait for servers to initialize
           if [ -n "${{ github.event.inputs.model_filter }}" ]; then
             uv run pytest tests/integration/test_model_catalog.py -v -x -k "${{ github.event.inputs.model_filter }}" --tb=short
           else

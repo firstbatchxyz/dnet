@@ -54,10 +54,14 @@ class InferenceManager:
         self._api_callback_addr: str = ""
 
     async def connect_to_ring(
-        self, first_shard_ip: str, first_shard_port: int, api_ip: str
-    ):
+        self, first_shard_ip: str, first_shard_port: int, api_callback_addr: str
+    ) -> None:
+        """
+        `api_callback_addr` must be a reachable `host:port` from shards.
+        For internet setups, this should be a public IP/DNS or overlay VPN IP.
+        """
         await self.adapter.connect_first_shard(first_shard_ip, first_shard_port)
-        self._api_callback_addr = f"{api_ip}:{self.grpc_port}"
+        self._api_callback_addr = api_callback_addr
 
     async def generate_stream(self, req: ChatRequestModel):
         """

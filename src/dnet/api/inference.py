@@ -1,9 +1,10 @@
 import asyncio
 import time
 import uuid
+import json
 import mlx.core as mx
 import numpy as np
-from typing import Optional, Any, List
+from typing import Optional, Any, List, Dict
 from dnet.core.tensor import to_bytes
 
 from .models import (
@@ -19,6 +20,7 @@ from .cluster import ClusterManager
 from .model_manager import ModelManager
 from .strategies.base import ApiAdapterBase
 from dnet.core.decoding.config import DecodingConfig
+from dnet.utils.logger import logger
 
 
 async def arange(count: int):
@@ -63,6 +65,7 @@ class InferenceManager:
         await self.adapter.connect_first_shard(first_shard_ip, first_shard_port)
         self._api_callback_addr = api_callback_addr
 
+
     async def generate_stream(self, req: ChatRequestModel):
         """
         Generator for chat completion chunks.
@@ -103,6 +106,18 @@ class InferenceManager:
                 stop_id_sequences.append(
                     tokenizer.encode(stop_word, add_special_tokens=False)
                 )
+
+        # Get grammar JSON schema from request if provided (for structured outputs)
+        grammar_json_schema = None
+        if hasattr(req, "grammar_json_schema") and req.grammar_json_schema:
+            grammar_json_schema = req.grammar_json_schema
+        elif hasattr(req, "response_format") and req.response_format:
+            # Support OpenAI-style response_format with JSON schema
+            if isinstance(req.response_format, dict):
+                if "schema" in req.response_format:
+                    grammar_json_schema = json.dumps(req.response_format["schema"])
+                elif "type" in req.response_format and req.response_format["type"] == "json_object":
+                    grammar_json_schema = json.dumps({"type": "object"})
 
         nonce = f"chatcmpl-{uuid.uuid4()}"
         t_start = time.perf_counter()
@@ -152,6 +167,7 @@ class InferenceManager:
                 min_tokens_to_keep=req.min_tokens_to_keep
                 if hasattr(req, "min_tokens_to_keep")
                 else 1,
+                grammar_json_schema=grammar_json_schema,
             )
 
             # Send tokens to first shard
@@ -269,7 +285,7 @@ class InferenceManager:
             nonce = chunk.id
             choice = chunk.choices[0]
             if choice.delta and choice.delta.content:
-                full_content += choice.delta.content
+                    full_content += choice.delta.content
 
             if choice.logprobs:
                 if choice.logprobs.token_logprobs:

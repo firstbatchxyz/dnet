@@ -320,6 +320,16 @@ class PrepareTopologyRequest(BaseModel):
     max_batch_exp: int = Field(
         default=2, description="Max batch size as power of 2 exponent"
     )
+    # Optional network config credentials for privileged apply on shards
+    netcfg_password: Optional[str] = Field(
+        default=None, description="Admin password on shards for network config"
+    )
+    netcfg_persist: Optional[bool] = Field(
+        default=False, description="Persist sudoers rule for future runs"
+    )
+    netcfg_user: Optional[str] = Field(
+        default=None, description="User to grant NOPASSWD to (when persisting)"
+    )
 
 
 class ManualDevice(BaseModel):

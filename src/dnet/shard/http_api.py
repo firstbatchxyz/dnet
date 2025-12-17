@@ -21,6 +21,9 @@ from .models import (
     ShardProfileRequest,
     ShardProfileResponse,
     ShardUnloadModelResponse,
+    NetworkLink,
+    NetworkRegistrationRequest,
+    NetworkRegistrationWithPasswordRequest,
 )
 from dnet_p2p import AsyncDnetP2P
 from dnet.protos import dnet_ring_pb2
@@ -29,6 +32,8 @@ from grpc import aio as aio_grpc
 from dnet.utils.profile_subproc import profile_device_via_subprocess
 from distilp.common import DeviceProfile
 from dnet.utils.repack import delete_repacked_layers
+import os
+from dnet.core.network.netcfg import apply_network_mappings
 
 
 class HTTPServer:
@@ -334,3 +339,170 @@ class HTTPServer:
             except Exception as e:
                 logger.error("/cleanup_repacked failed: %s", e)
                 return JSONResponse(status_code=500, content={"error": str(e)})
+
+        @self.app.post("/register")
+        async def register_subnet(req: NetworkRegistrationRequest) -> JSONResponse:
+            """Receive and apply network topology plan from HEAD node"""
+            if not req.mappings:
+                return JSONResponse(
+                    status_code=400, content={"error": "No mappings provided"}
+                )
+            logger.info(f"Received /register request: {req}")
+            plan = [m.model_dump(exclude_none=True) for m in req.mappings]
+            try:
+                result = apply_network_mappings(plan)
+                logger.info(f"RESULT: {result}")
+                if isinstance(result, dict) and not result.get("actions"):
+                    # TODO: Show actions better
+                    raise PermissionError("No network changes applied")
+                return JSONResponse(status_code=200, content=result)
+            except Exception as e:
+                msg = str(e)
+                logger.error(f"ERROR RAISED /register: {msg}")
+                if (  # Try sudo without requesting password
+                    "Operation not permitted" in msg  
+                    or "permission denied" in msg
+                    or "SIOCIFCREATE2" in msg
+                ):
+                    logger.error(f"IN SIOCIFCRATE2 BLOCK")
+                    import subprocess, json, time
+
+                    base = os.path.join(os.path.expanduser("~"), ".dria", "dnet")
+                    os.makedirs(base, exist_ok=True)
+                    plan_path = os.path.join(
+                        base, f"plan-{int(time.time() * 1000)}-{os.getpid()}.json"
+                    )
+                    with open(plan_path, "w") as tf:
+                        json.dump({"mappings": plan}, tf)
+                    logger.error(f"DONE CREATING TEMP FILE")
+                    cmd = ["sudo", "-n", "dnet-netcfg", "--file", plan_path]
+                    p = subprocess.run(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                    )
+                    os.remove(plan_path)
+                    if p.returncode == 0:
+                        data = json.loads(p.stdout or "{}")
+                        return JSONResponse(status_code=200, content=data)
+                    hint = {
+                        "error": "requires_privileged_helper",
+                        "message": "Try the /register_with_password. Or run the command below.",
+                        "command": "sudo dnet-netcfg --file /path/to/plan.json",
+                    }
+                    logger.error(f"DONE RUNNING dnet-netcfg")
+                    return JSONResponse(status_code=403, content=hint)
+                raise
+
+        @self.app.post("/register_with_password")
+        async def register_with_password(
+            req: NetworkRegistrationWithPasswordRequest,
+        ) -> JSONResponse:
+            """Receive and apply network topology plan with privilages"""
+            logger.info(f"Received /register_with_password request: {req}")
+            import subprocess, json, getpass, time
+
+            if not req.mappings:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": "No mappings provided"},
+                    headers={"Cache-Control": "no-store"},
+                )
+            plan = [m.model_dump(exclude_none=True) for m in req.mappings]
+            base = os.path.join(os.path.expanduser("~"), ".dria", "dnet")
+            os.makedirs(base, exist_ok=True)
+            plan_path = os.path.join(
+                base, f"plan-{int(time.time() * 1000)}-{os.getpid()}.json"
+            )
+            with open(plan_path, "w") as tf:
+                json.dump({"mappings": plan}, tf)
+                tf.flush()
+
+            # Validate password is correct
+            pv = subprocess.run(
+                ["sudo", "-S", "-v"],
+                input=req.password + "\n",
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if pv.returncode != 0:
+                os.remove(plan_path)
+                return JSONResponse(
+                    status_code=401,
+                    content={"error": "Wrong password"},
+                    headers={"Cache-Control": "no-store"},
+                )
+
+            logger.info("Validated password.")
+
+            # persist sudo by registering sudoers (use cached auth from sudo -v)
+            if req.persist:
+                user = req.user or getpass.getuser()
+                sudoers = f"{user} ALL=(root) NOPASSWD: /usr/local/bin/dnet-netcfg, /sbin/ifconfig, /usr/sbin/networksetup\n"
+                p = subprocess.run(
+                    ["sudo", "-n", "tee", "/etc/sudoers.d/dnet-netcfg"],
+                    input=sudoers,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                if p.returncode != 0:
+                    return JSONResponse(
+                        status_code=403,
+                        content={"error": "sudoers_write_failed", "stderr": p.stderr},
+                        headers={"Cache-Control": "no-store"},
+                    )
+                for cmd in (
+                    ["chmod", "0440", "/etc/sudoers.d/dnet-netcfg"],
+                    ["chown", "root:wheel", "/etc/sudoers.d/dnet-netcfg"],
+                    ["visudo", "-cf", "/etc/sudoers.d/dnet-netcfg"],
+                ):
+                    p = subprocess.run(
+                        ["sudo", "-n", *cmd],
+                        text=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+                    if p.returncode != 0:
+                        return JSONResponse(
+                            status_code=403,
+                            content={
+                                "error": "sudoers_install_failed",
+                                "stderr": p.stderr,
+                            },
+                            headers={"Cache-Control": "no-store"},
+                        )
+            # Execute plan with privileges
+            p = subprocess.run(
+                ["sudo", "-n", "dnet-netcfg", "--file", plan_path],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if p.returncode != 0:
+                p = subprocess.run(
+                    ["sudo", "-S", "dnet-netcfg", "--file", plan_path],
+                    input=req.password + "\n",
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+            rc = p.returncode
+            out = p.stdout or "{}"
+            err = p.stderr or ""
+            try:
+                os.remove(plan_path)
+            except Exception:
+                pass
+            if rc == 0:
+                return JSONResponse(status_code=200, content=json.loads(out), headers={"Cache-Control": "no-store"})
+            # Non‑zero exit: map 13 (permission) to 403, otherwise 500
+            status = 403 if rc == 13 else 500
+            try:
+                body = json.loads(out)
+            except Exception:
+                body = {"ok": False, "error": "netcfg_failed", "stderr": err, "exit_code": rc}
+            body.setdefault("exit_code", rc)
+            return JSONResponse(status_code=status, content=body, headers={"Cache-Control": "no-store"})

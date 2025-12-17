@@ -1,4 +1,5 @@
 from typing import Optional, Any, List
+import httpx
 import asyncio
 import os
 from hypercorn import Config
@@ -7,6 +8,7 @@ import hypercorn.asyncio as aio_hypercorn
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse
 from dnet.utils.model import get_model_config_json
+from dnet.core.network.create import topo_to_network
 from distilp.profiler import profile_model
 from dnet.utils.logger import logger
 from .models import (
@@ -25,6 +27,8 @@ from .cluster import ClusterManager
 from .inference import InferenceManager
 from .model_manager import ModelManager
 from dnet_p2p import DnetDeviceProperties
+import sys
+import getpass
 
 
 class HTTPServer:
@@ -35,6 +39,7 @@ class HTTPServer:
         inference_manager: InferenceManager,
         model_manager: ModelManager,
         node_id: str,
+        tui: Optional["DnetTUI"] = None,
     ):
         self.http_port = http_port
         self.cluster_manager = cluster_manager
@@ -43,6 +48,7 @@ class HTTPServer:
         self.node_id = node_id
         self.app = FastAPI()
         self.http_server: Optional[asyncio.Task] = None
+        self.tui = tui
 
     async def start(self, shutdown_trigger: Any = lambda: asyncio.Future()) -> None:
         await self._setup_routes()
@@ -251,6 +257,89 @@ class HTTPServer:
             )
         return topo
 
+    async def _create_subnetworks(
+        self,
+        topology: TopologyInfo,
+        netcfg_password: Optional[str] = None,
+        netcfg_persist: Optional[bool] = False,
+        netcfg_user: Optional[str] = None,
+    ) -> None:
+        net_topo = topo_to_network(topology)
+        shards = self.cluster_manager.shards
+
+        # Forward subnetwork config to shards for execution
+        async with httpx.AsyncClient(trust_env=False) as client:
+            for instance, plan in net_topo.nodes.items():
+                shard = shards.get(instance)
+                if not shard or shard.is_manager:
+                    continue
+                url = f"http://{shard.local_ip}:{shard.server_port}/register"
+                payload = {"mappings": [r.model_dump(exclude_none=True) for r in plan.routes]}
+
+                try:
+                    res = await client.post(url, json=payload, timeout=10.0)
+                except Exception as e:
+                    logger.warning("Network config failed on %s: %r", instance, e)
+                    continue
+                logger.error(res)
+                if res.status_code == 200:
+                    continue
+
+                if res.status_code == 403:
+                    password = netcfg_password
+                    persist = bool(netcfg_persist or False)
+                    user = netcfg_user
+                    if not password and getattr(self, "tui", None) is not None:
+                        persist = await self.tui.prompt_yes_no(
+                            f"Shard {instance} needs sudo. Persist NOPASSWD for future runs?",
+                            default=False,
+                        )
+                        if persist:
+                            default_user = getpass.getuser()
+                            user = await self.tui.prompt_text(
+                                "User to grant NOPASSWD", default=default_user
+                            )
+                        password = await self.tui.prompt_password(
+                            f"Enter admin password for {instance}: "
+                        )
+
+                    if password:
+                        body = {
+                            "mappings": payload["mappings"],
+                            "password": password,
+                            "persist": persist,
+                            "user": user,
+                        }
+                        try:
+                            res2 = await client.post(
+                                f"http://{shard.local_ip}:{shard.server_port}/register_with_password",
+                                json=body,
+                                timeout=60.0,
+                            )
+                            logger.error("=====================")
+                            logger.error(res2)
+                            if res2.status_code == 200:
+                                continue
+                            if res2.status_code == 401:
+                                logger.warning("Wrong password for %s", instance)
+                                continue
+                        except Exception as e:
+                            logger.warning(
+                                "Privileged apply failed on %s: %r", instance, e
+                            )
+                    else:
+                        logger.warning(
+                            "Network config skipped on %s (password not provided)",
+                            instance,
+                        )
+                else:
+                    logger.warning(
+                        "Network config skipped on %s (status %s): %s",
+                        instance,
+                        res.status_code,
+                        (res.text or "")[:120],
+                    )
+
     async def prepare_topology(self, req: PrepareTopologyRequest) -> TopologyInfo:
         try:
             if not self.model_manager.is_model_available(req.model):
@@ -292,6 +381,15 @@ class HTTPServer:
                 profiles, model_profile, req.model, num_layers, req.kv_bits
             )
             self.cluster_manager.current_topology = topology
+
+            await self._create_subnetworks(
+                topology,
+                netcfg_password=req.netcfg_password,
+                netcfg_persist=req.netcfg_persist,
+                netcfg_user=req.netcfg_user,
+            )
+            logger.warning("AWAIT NETWORK DONE")
+
             return topology
         except Exception as e:
             logger.exception("Error in prepare_topology: %s", e)

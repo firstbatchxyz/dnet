@@ -94,6 +94,7 @@ async def serve(
             inference_manager=inference_manager,
             model_manager=model_manager,
             node_id=node_id,
+            tui=tui,
         )
 
         tui.update_status("Starting Servers...")

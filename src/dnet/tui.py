@@ -80,6 +80,7 @@ class DnetTUI:
         # Setup logging
         self.log_handler = TUILogHandler(self.log_queue)
         dnet_logger.addHandler(self.log_handler)
+        self._live: Optional[Live] = None
 
     def _generate_header(self) -> Panel:
         return Panel(
@@ -223,7 +224,8 @@ class DnetTUI:
         """Run the TUI loop until stop_event is set."""
         self.is_running = True
 
-        with Live(self.layout, console=self.console, refresh_per_second=4, screen=True):
+        with Live(self.layout, console=self.console, refresh_per_second=4, screen=True) as live:
+            self._live = live
             while not stop_event.is_set():
                 self.layout["header"].update(self._generate_header())
                 self.layout["body"].update(self._generate_logs())
@@ -234,3 +236,51 @@ class DnetTUI:
 
         self.is_running = False
         dnet_logger.removeHandler(self.log_handler)
+        self._live = None
+
+    async def prompt_yes_no(self, prompt: str, default: bool = False) -> bool:
+        def _ask() -> bool:
+            p = f"{prompt} [{'Y/n' if default else 'y/N'}]: "
+            ans = input(p).strip().lower()
+            if not ans:
+                return default
+            return ans in ("y", "yes")
+
+        if self._live:
+            self._live.stop()
+            try:
+                return _ask()
+            finally:
+                self._live.start()
+        return _ask()
+
+    async def prompt_text(self, prompt: str, default: Optional[str] = None) -> str:
+        def _ask() -> str:
+            p = f"{prompt}"
+            if default:
+                p += f" [{default}]"
+            p += ": "
+            ans = input(p).strip()
+            return ans or (default or "")
+
+        if self._live:
+            self._live.stop()
+            try:
+                return _ask()
+            finally:
+                self._live.start()
+        return _ask()
+
+    async def prompt_password(self, prompt: str) -> str:
+        import getpass as _gp
+
+        def _ask() -> str:
+            return _gp.getpass(prompt)
+
+        if self._live:
+            self._live.stop()
+            try:
+                return _ask()
+            finally:
+                self._live.start()
+        return _ask()

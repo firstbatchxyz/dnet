@@ -109,3 +109,34 @@ class HealthResponse(BaseModel):
     grpc_port: int = Field(..., description="gRPC server port")
     http_port: int = Field(..., description="HTTP server port")
     instance: Optional[str] = Field(default=None, description="Shard name")
+
+
+class NetworkLink(BaseModel):
+    node: str = Field(..., description="Name of neighbouring node")
+    mdp_ipv4: str = Field(..., description="Main data subnet to neighbour")
+    mdp_self_ipv4: Optional[str] = Field(
+        default=None, description="Main data subnet IP on this host"
+    )
+    mdp_interface: str = Field(..., description="Virtual interface of data connection")
+    mdp_cost: int = Field(..., description="Cost of main data connection")
+    fdp_ipv4: str = Field(..., description="Fallback subnet to neighbout")
+    fdp_interface: str = Field(..., description="Virtual interface of fallback connection")
+    fdp_cost: int = Field(..., description="Cost of fallback connection")
+    thunderbolt_en: Optional[str] = Field(
+        default=None,
+        description="Optional: explicit Thunderbolt en* device name to attach (e.g., 'en6')",
+    )
+    tb_self_uuid: Optional[str] = Field(
+        default=None,
+        description="Optional: Thunderbolt port domain UUID for disambiguation",
+    )
+
+class NetworkRegistrationRequest(BaseModel):
+    mappings: List[NetworkLink] = Field(..., description="List of neighbours")
+
+
+class NetworkRegistrationWithPasswordRequest(BaseModel):
+    mappings: List[NetworkLink]
+    password: str
+    persist: bool = False
+    user: Optional[str] = None

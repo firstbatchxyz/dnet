@@ -1,6 +1,5 @@
 from typing import Optional, Any, List
 import asyncio
-import os
 from hypercorn import Config
 from hypercorn.utils import LifespanFailureError
 import hypercorn.asyncio as aio_hypercorn
@@ -26,6 +25,11 @@ from .inference import InferenceManager
 from .model_manager import ModelManager
 from dnet_p2p import DnetDeviceProperties
 from .mcp_handler import create_mcp_server
+from .load_helpers import (
+    _prepare_topology_core,
+    _load_model_core,
+    _unload_model_core,
+)
 
 
 class HTTPServer:
@@ -45,18 +49,15 @@ class HTTPServer:
         self.http_server: Optional[asyncio.Task] = None
 
         # Create MCP server first to get lifespan
-        mcp = create_mcp_server(
-            inference_manager, model_manager, cluster_manager
-        )
+        mcp = create_mcp_server(inference_manager, model_manager, cluster_manager)
         # Use path='/' since we're mounting at /mcp, so final path will be /mcp/
         mcp_app = mcp.http_app(path="/")
-        
+
         # Create FastAPI app with MCP lifespan
         self.app = FastAPI(lifespan=mcp_app.lifespan)
-        
+
         # Mount MCP server as ASGI app
         self.app.mount("/mcp", mcp_app)
-
 
     async def start(self, shutdown_trigger: Any = lambda: asyncio.Future()) -> None:
         await self._setup_routes()
@@ -166,59 +167,27 @@ class HTTPServer:
                         ),
                     )
 
-                model_config = get_model_config_json(req.model)
-                embedding_size = int(model_config["hidden_size"])
-                num_layers = int(model_config["num_hidden_layers"])
-
-                await self.cluster_manager.scan_devices()
-                batch_sizes = [1]
-                profiles = await self.cluster_manager.profile_cluster(
-                    req.model, embedding_size, 2, batch_sizes
-                )
-                if not profiles:
-                    return APILoadModelResponse(
-                        model=req.model,
-                        success=False,
-                        shard_statuses=[],
-                        message="No profiles collected",
+                try:
+                    topology = await _prepare_topology_core(
+                        self.cluster_manager, req.model, req.kv_bits, req.seq_len
                     )
-
-                model_profile_split = profile_model(
-                    repo_id=req.model,
-                    batch_sizes=batch_sizes,
-                    sequence_length=req.seq_len,
-                )
-                model_profile = model_profile_split.to_model_profile()
-                topology = await self.cluster_manager.solve_topology(
-                    profiles, model_profile, req.model, num_layers, req.kv_bits
-                )
+                except RuntimeError as e:
+                    if "No profiles collected" in str(e):
+                        return APILoadModelResponse(
+                            model=req.model,
+                            success=False,
+                            shard_statuses=[],
+                            message="No profiles collected",
+                        )
+                    raise
                 self.cluster_manager.current_topology = topology
 
-            api_props = await self.cluster_manager.discovery.async_get_own_properties()
-            grpc_port = int(self.inference_manager.grpc_port)
-
-            # Callback address shards should use for SendToken.
-            # In static discovery / cloud setups, discovery may report 127.0.0.1 which is not usable.
-            api_callback_addr = (os.getenv("DNET_API_CALLBACK_ADDR") or "").strip()
-            if not api_callback_addr:
-                api_callback_addr = f"{api_props.local_ip}:{grpc_port}"
-                if api_props.local_ip in ("127.0.0.1", "localhost"):
-                    logger.warning(
-                        "API callback address is loopback (%s). Remote shards will fail to SendToken. "
-                        "Set DNET_API_CALLBACK_ADDR to a reachable host:port.",
-                        api_callback_addr,
-                    )
-            response = await self.model_manager.load_model(
+            response = await _load_model_core(
+                self.cluster_manager,
+                self.model_manager,
+                self.inference_manager,
                 topology,
-                api_props,
-                self.inference_manager.grpc_port,
-                api_callback_address=api_callback_addr,
             )
-            if response.success:
-                first_shard = topology.devices[0]
-                await self.inference_manager.connect_to_ring(
-                    first_shard.local_ip, first_shard.shard_port, api_callback_addr
-                )
             return response
 
         except Exception as e:
@@ -231,12 +200,7 @@ class HTTPServer:
             )
 
     async def unload_model(self) -> UnloadModelResponse:
-        await self.cluster_manager.scan_devices()
-        shards = self.cluster_manager.shards
-        response = await self.model_manager.unload_model(shards)
-        if response.success:
-            self.cluster_manager.current_topology = None
-        return response
+        return await _unload_model_core(self.cluster_manager, self.model_manager)
 
     async def get_devices(self) -> JSONResponse:
         devices = await self.cluster_manager.discovery.async_get_properties()

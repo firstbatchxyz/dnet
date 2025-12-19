@@ -409,7 +409,7 @@ def test_load_model_bootstrap_profiles_empty_returns_failure(monkeypatch):
     srv = _create_server(cm, im, mm)
 
     monkeypatch.setattr(
-        "dnet.api.http_api.get_model_config_json",
+        "dnet.api.load_helpers.get_model_config_json",
         lambda m: {"hidden_size": 8, "num_hidden_layers": 4},
         raising=True,
     )
@@ -437,7 +437,7 @@ def test_load_model_bootstrap_success_connects(monkeypatch):
     srv = _create_server(cm, im, mm)
 
     monkeypatch.setattr(
-        "dnet.api.http_api.get_model_config_json",
+        "dnet.api.load_helpers.get_model_config_json",
         lambda m: {"hidden_size": 16, "num_hidden_layers": 6},
         raising=True,
     )
@@ -450,7 +450,7 @@ def test_load_model_bootstrap_success_connects(monkeypatch):
     from tests.fakes import FakeModelProfile as _MP2
 
     monkeypatch.setattr(
-        "dnet.api.http_api.profile_model",
+        "dnet.api.load_helpers.profile_model",
         lambda repo_id, batch_sizes, sequence_length: _MP2(),
         raising=True,
     )

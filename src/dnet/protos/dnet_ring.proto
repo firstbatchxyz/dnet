@@ -44,6 +44,9 @@ message ActivationRequest {
     optional float repetition_penalty = 11;
     optional float min_p = 12;
     optional int32 min_tokens_to_keep = 13;
+
+    // Structured output support
+    optional string grammar_json_schema = 14;
 }
 
 // Response message for activation sending

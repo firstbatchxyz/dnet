@@ -16,6 +16,11 @@ from .base import register_policy, ComputePolicy
 class FitInMemoryPolicy(ComputePolicy):
     """Everything fits - no offloading needed"""
 
+    # Cache grammar states by nonce to maintain state across token generations
+    # TODO: Add TTL-based cleanup for _grammar_states to prevent memory growth
+    # See: _kv_by_nonce pattern in runtime.py
+    _grammar_states: dict = {}
+
     def configure_policy_for_model(self, req: ShardLoadModelRequest) -> None:
         self._mode = "fit"
         local_count = max(1, len(self.runtime.assigned_layers))
@@ -138,7 +143,10 @@ class FitInMemoryPolicy(ComputePolicy):
                                 y = self.runtime.model.normalize(x_cast)
                                 y = self.runtime.model.lm_project(y)
 
-                            # Sampling
+                                grammar_schema = getattr(
+                                    msg, "grammar_json_schema", None
+                                )
+
                             decoding_config = DecodingConfig(
                                 temperature=msg.temperature,
                                 top_p=msg.top_p,
@@ -146,14 +154,54 @@ class FitInMemoryPolicy(ComputePolicy):
                                 repetition_penalty=msg.repetition_penalty,
                                 min_p=msg.min_p,
                                 min_tokens_to_keep=msg.min_tokens_to_keep,
+                                grammar_json_schema=grammar_schema,
                             )
 
-                            sampler = Sampler()
-                            result = sampler.sample(
+                            # Get or create grammar state (cached by nonce for multi-token generation)
+                            grammar_state = None
+                            if grammar_schema:
+                                nonce = msg.nonce
+                                if nonce in FitInMemoryPolicy._grammar_states:
+                                    grammar_state = FitInMemoryPolicy._grammar_states[
+                                        nonce
+                                    ]
+                                    # Check if grammar state was already terminated - if so, don't reuse it
+                                    if grammar_state is not None and getattr(
+                                        grammar_state, "_terminated", False
+                                    ):
+                                        logger.info(
+                                            f"Grammar state for nonce {nonce} already terminated, removing from cache - this should not happen!"
+                                        )
+                                        del FitInMemoryPolicy._grammar_states[nonce]
+                                        grammar_state = None
+                                    else:
+                                        logger.debug(
+                                            f"Reusing grammar state for nonce {nonce}, _terminated={getattr(grammar_state, '_terminated', False) if grammar_state else None}"
+                                        )
+
+                                if grammar_state is None:
+                                    logger.debug(
+                                        f"Creating new grammar state for nonce {nonce}"
+                                    )
+                                    tokenizer = getattr(self.runtime, "tokenizer", None)
+                                    model_vocab_size = (
+                                        y.shape[-1] if hasattr(y, "shape") else None
+                                    )
+                                    if tokenizer:
+                                        grammar_state = Sampler.create_grammar_state(
+                                            grammar_schema, tokenizer, model_vocab_size
+                                        )
+                                        if grammar_state:
+                                            FitInMemoryPolicy._grammar_states[nonce] = (
+                                                grammar_state
+                                            )
+
+                            result = Sampler.sample(
                                 logits=y,
                                 config=decoding_config,
                                 req_logprobs=msg.req_logprobs,
                                 req_top_logprobs=msg.req_top_logprobs,
+                                grammar_state=grammar_state,
                             )
 
                             token_id = result.token_id

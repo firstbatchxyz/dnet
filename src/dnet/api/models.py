@@ -29,6 +29,29 @@ class ChatCompletionReason(str, Enum):
     STOP = "stop"
 
 
+class StructuredOutputsParams(BaseModel):
+    """Parameters for structured output generation."""
+
+    json: Optional[Dict[str, Any]] = Field(default=None)
+
+    @field_validator("json")
+    @classmethod
+    def validate_json_schema(cls, v):
+        if v is None:
+            return v
+        if not isinstance(v, dict):
+            raise ValueError("JSON schema must be a dictionary")
+        if "type" not in v:
+            raise ValueError("JSON schema must have a 'type' field")
+        try:
+            import json
+
+            json.dumps(v)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"JSON schema must be JSON serializable: {e}")
+        return v
+
+
 class RingInferenceError(BaseModel):
     """Error response for ring inference."""
 
@@ -49,10 +72,13 @@ class RingInferenceError(BaseModel):
 
 
 class ChatMessage(BaseModel):
-    """A single message in a chat conversation."""
+    """A single message in a chat conversation.
 
-    role: str  # "system" | "user" | "assistant" | "tool" | "developer" # TODO: use Literal?
-    content: str
+    Compatible with OpenAI format.
+    """
+
+    role: str  # "system" | "user" | "assistant" | "developer" # TODO: use Literal?
+    content: Optional[str] = None
 
 
 class ChatParams(BaseModel):
@@ -78,7 +104,12 @@ class ChatParams(BaseModel):
     # prediction: NOT USED
     # presence_penalty: float = Field(default=0.0, ge=-2.0, le=2.0)  # NOTE: unused
     # prompt_cache_key: Optional[str] = Field(default=None)  # NOTE: unused
-    # TODO: response_format:
+    structured_outputs: Optional[StructuredOutputsParams] = Field(
+        default=None
+    )  # Structured output parameters for grammar-constrained generation
+    response_format: Optional[Dict[str, Any]] = Field(
+        default=None
+    )  # OpenAI-compatible response format (json_schema, etc.)
     # safety_identifier: Optional[str] = Field(default=None)  # NOTE: unused
     # service_tier: Optional[str] = Field(default=None)  # NOTE: unused
     stop: Union[str, List[str]] = Field(default_factory=list)
@@ -298,7 +329,7 @@ class ListModelsResponseModel(BaseModel):
     data: List[ModelObject]
 
 
-type RetrieveModelResponseModel = ModelObject
+RetrieveModelResponseModel = ModelObject
 
 
 # ------------------------

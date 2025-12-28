@@ -1,9 +1,11 @@
 import asyncio
 import time
 import uuid
+import json
 import mlx.core as mx
 import numpy as np
 from typing import Optional, Any, List
+from builtins import aiter, anext
 from dnet.core.tensor import to_bytes
 
 from .models import (
@@ -14,11 +16,13 @@ from .models import (
     ChatUsage,
     ChatCompletionReason,
     ChatLogProbs,
+    StructuredOutputsParams,
 )
 from .cluster import ClusterManager
 from .model_manager import ModelManager
 from .strategies.base import ApiAdapterBase
 from dnet.core.decoding.config import DecodingConfig
+from dnet.utils.logger import logger
 
 
 async def arange(count: int):
@@ -64,9 +68,9 @@ class InferenceManager:
         self._api_callback_addr = api_callback_addr
 
     async def generate_stream(self, req: ChatRequestModel):
-        """
-        Generator for chat completion chunks.
-        """
+        """Generator for chat completion chunks."""
+        logger.debug(f"generate_stream called: model={req.model}")
+
         if not self.model_manager.tokenizer:
             raise RuntimeError(
                 "Inference manager not ready (ring not connected or tokenizer not loaded)"
@@ -79,9 +83,12 @@ class InferenceManager:
                 hasattr(tokenizer, "chat_template")
                 and tokenizer.chat_template is not None
             ):
-                message_dicts = [
-                    {"role": m.role, "content": m.content} for m in req.messages
-                ]
+                # Convert messages to dict format
+                message_dicts = []
+                for m in req.messages:
+                    msg_dict = {"role": m.role, "content": m.content or ""}
+                    message_dicts.append(msg_dict)
+
                 prompt_text = tokenizer.apply_chat_template(
                     message_dicts,
                     add_generation_prompt=True,
@@ -89,10 +96,13 @@ class InferenceManager:
                 )
             else:
                 prompt_text = (
-                    "\n".join(m.content for m in req.messages) + "\nAssistant:"
+                    "\n".join(m.content or "" for m in req.messages) + "\nAssistant:"
                 )
-        except Exception:
-            prompt_text = "\n".join(m.content for m in req.messages) + "\nAssistant:"
+        except Exception as e:
+            logger.warning(f"Failed to apply chat template: {e}, using fallback")
+            prompt_text = (
+                "\n".join(m.content or "" for m in req.messages) + "\nAssistant:"
+            )
 
         prompt_tokens = tokenizer.encode(prompt_text)
         prompt_array = mx.array(prompt_tokens)
@@ -103,6 +113,16 @@ class InferenceManager:
                 stop_id_sequences.append(
                     tokenizer.encode(stop_word, add_special_tokens=False)
                 )
+
+        # Convert OpenAI response_format to internal structured_outputs format
+        if req.response_format and req.response_format.get("type") == "json_schema":
+            json_schema = req.response_format["json_schema"]["schema"]
+            req.structured_outputs = StructuredOutputsParams(json=json_schema)
+
+        # Get grammar JSON schema for structured output
+        grammar_json_schema = None
+        if req.structured_outputs and req.structured_outputs.json:
+            grammar_json_schema = json.dumps(req.structured_outputs.json)
 
         nonce = f"chatcmpl-{uuid.uuid4()}"
         t_start = time.perf_counter()
@@ -152,6 +172,7 @@ class InferenceManager:
                 min_tokens_to_keep=req.min_tokens_to_keep
                 if hasattr(req, "min_tokens_to_keep")
                 else 1,
+                grammar_json_schema=grammar_json_schema,
             )
 
             # Send tokens to first shard
@@ -209,9 +230,29 @@ class InferenceManager:
             if token == tokenizer.eos_token_id:
                 completion_reason = ChatCompletionReason.STOP
                 break
+
             y = mx.array([token], dtype=mx.int32)
 
         detokenizer.finalize()
+        final_text = detokenizer.text
+
+        # Strip special tokens from output
+        # mlx-lm's NaiveStreamingDetokenizer calls tokenizer.decode() without skip_special_tokens=True
+        # (see: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/tokenizer_utils.py)
+        # So we strip them manually as a post-processing step
+        SPECIAL_TOKENS_TO_STRIP = [
+            "<|im_end|>",  # Qwen, ChatML format
+            "<|im_start|>",  # Qwen, ChatML format
+            "<|endoftext|>",  # GPT/generic
+            "</s>",  # Llama, Mistral
+            "<|eot_id|>",  # Llama 3
+            "<|end|>",  # Phi
+            "<|assistant|>",  # Some chat templates
+            "<|user|>",  # Some chat templates
+        ]
+        for token in SPECIAL_TOKENS_TO_STRIP:
+            final_text = final_text.replace(token, "")
+        final_text = final_text.strip()
 
         metrics_dict = None
         t_end = time.perf_counter()
@@ -232,13 +273,19 @@ class InferenceManager:
                 ),
             }
 
-        # Final chunk with finish reason
+        final_message = ChatMessage(
+            role="assistant",
+            content=final_text,
+        )
+
+        # Final chunk
         yield ChatResponseModel(
             id=nonce,
             choices=[
                 ChatChoice(
                     index=0,
-                    delta=ChatMessage(role="assistant", content=""),
+                    delta=None,
+                    message=final_message,
                     finish_reason=completion_reason,
                 )
             ],
@@ -287,6 +334,13 @@ class InferenceManager:
 
             if chunk.usage:
                 usage = chunk.usage
+
+        # Clean up structured output responses - remove end tokens
+        if req.structured_outputs and req.structured_outputs.json:
+            full_content = full_content.strip()
+            for token in ["<|im_end|>", "<|endoftext|>", "</s>"]:
+                if token in full_content:
+                    full_content = full_content.split(token)[0].strip()
 
         return ChatResponseModel(
             id=nonce,

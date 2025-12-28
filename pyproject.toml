@@ -38,6 +38,7 @@ dependencies = [
   "dnet-p2p @ file://${PROJECT_ROOT}/lib/dnet-p2p/bindings/py",
   "rich>=13.0.0",
   "psutil>=5.9.0",
+  "outlines>=1.2.0",
 ]
 
 [project.optional-dependencies]

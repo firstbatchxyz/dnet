@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
@@ -12,3 +13,5 @@ class DecodingConfig:
     logit_bias: dict[int, float] | None = None
     min_p: float = 0.0
     min_tokens_to_keep: int = 1
+    # Structured output support
+    grammar_json_schema: Optional[str] = None

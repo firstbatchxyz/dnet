@@ -148,43 +148,67 @@ class CPRingCommunicator:
 
     async def _send_to_next(self, data: bytes, tag: str) -> None:
         """
-        Send data to next rank in the ring.
+        Send data to next rank in the ring via gRPC.
 
-        This is a placeholder - actual implementation depends on the
-        gRPC service definition (CPRingService.StreamBlocks).
+        Uses CPRingService.SendBlock unary RPC with raw bytes in a CPBlockFrame.
         """
         if not self._next_channel:
             raise RuntimeError("Not connected to next rank")
 
-        # TODO: Implement actual gRPC call when proto is defined
-        # For now, this is a stub that will be completed with dnet_cp.proto
-        logger.debug(
-            "Rank %d: sending %d bytes to rank %d (tag=%s)",
-            self.rank_id,
-            len(data),
-            self.next_rank,
-            tag,
+        from dnet.protos import dnet_cp_pb2, dnet_cp_pb2_grpc
+
+        stub = dnet_cp_pb2_grpc.CPRingServiceStub(self._next_channel)
+        frame = dnet_cp_pb2.CPBlockFrame(
+            nonce=tag,
+            source_rank=self.rank_id,
+            # Use partial_output to carry raw bytes (reusing existing proto field)
+            partial_output=dnet_cp_pb2.PartialOutput(output_data=data),
         )
+
+        try:
+            ack = await stub.SendBlock(frame)
+            if not ack.accepted:
+                raise RuntimeError(f"Block rejected by next rank: {ack.error_message}")
+            logger.debug(
+                "Rank %d: sent %d bytes to rank %d (tag=%s)",
+                self.rank_id,
+                len(data),
+                self.next_rank,
+                tag,
+            )
+        except Exception as e:
+            logger.error("Rank %d: failed to send to next rank: %s", self.rank_id, e)
+            raise
 
     async def _recv_from_prev(self, tag: str) -> bytes:
         """
         Receive data from previous rank in the ring.
 
-        This is a placeholder - actual implementation depends on the
-        gRPC service definition (CPRingService.StreamBlocks).
+        Uses a pending receive pattern - the gRPC server calls resolve_recv
+        when data arrives, and this method waits on the future.
         """
         if not self._prev_channel:
             raise RuntimeError("Not connected to previous rank")
 
-        # TODO: Implement actual gRPC call when proto is defined
-        # For now, return empty bytes as stub
-        logger.debug(
-            "Rank %d: receiving from rank %d (tag=%s)",
-            self.rank_id,
-            self.prev_rank,
-            tag,
-        )
-        return b""
+        # Create a future for this tag if it doesn't exist
+        if tag not in self._pending_recv:
+            self._pending_recv[tag] = asyncio.get_event_loop().create_future()
+
+        # Wait for the data to arrive (set by resolve_recv when server receives it)
+        try:
+            data = await asyncio.wait_for(self._pending_recv[tag], timeout=30.0)
+            logger.debug(
+                "Rank %d: received %d bytes from rank %d (tag=%s)",
+                self.rank_id,
+                len(data),
+                self.prev_rank,
+                tag,
+            )
+            return data
+        except asyncio.TimeoutError:
+            raise RuntimeError(
+                f"Rank {self.rank_id}: timeout waiting for data from prev rank (tag={tag})"
+            )
 
     def resolve_recv(self, tag: str, data: bytes) -> None:
         """

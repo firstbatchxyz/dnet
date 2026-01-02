@@ -144,6 +144,8 @@ def unshard(
     output = mx.zeros((total_seq_len,) + rest_shape, dtype=dtype)
 
     # Scatter chunks back to original positions
+    # Note: Using .add() even though indices are disjoint because MLX ArrayAt
+    # doesn't have .set() method. Since indices don't overlap, this is equivalent.
     for chunk, indices in zip(sharded_chunks, indices_per_rank):
         if len(indices) != chunk.shape[0]:
             raise ValueError(

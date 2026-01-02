@@ -8,12 +8,16 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Optional, Callable, Awaitable
+from typing import TYPE_CHECKING, Optional, Callable, Awaitable, AsyncIterator
 
+import grpc
 from grpc import aio as aio_grpc
 
 from dnet.utils.grpc_config import GRPC_AIO_OPTIONS
 from dnet.utils.logger import logger
+
+if TYPE_CHECKING:
+    pass
 
 
 @dataclass
@@ -221,58 +225,102 @@ class CPRingCommunicator:
             del self._pending_recv[tag]
 
 
-class MockRingCommunicator:
+class CPRingServiceServicer:
     """
-    Mock ring communicator for testing without actual gRPC.
+    gRPC servicer for CP ring communication.
 
-    Simulates a ring of N ranks where each rank's send_data
-    becomes the next rank's recv_data.
+    Receives blocks from other ranks and routes them to the appropriate
+    CPRingCommunicator via resolve_recv.
     """
 
-    def __init__(self, num_ranks: int):
-        """Create a mock ring with num_ranks participants."""
-        self.num_ranks = num_ranks
-        self._buffers: dict[int, dict[str, bytes]] = {i: {} for i in range(num_ranks)}
-        self._lock = asyncio.Lock()
+    def __init__(self) -> None:
+        """Initialize servicer with no attached communicator."""
+        self._communicator: Optional[CPRingCommunicator] = None
 
-    def get_communicator(self, rank_id: int) -> "MockRankCommunicator":
-        """Get a communicator instance for a specific rank."""
-        return MockRankCommunicator(self, rank_id, self.num_ranks)
+    def attach_communicator(self, communicator: CPRingCommunicator) -> None:
+        """Attach a communicator to receive incoming blocks."""
+        self._communicator = communicator
 
-
-class MockRankCommunicator:
-    """Per-rank mock communicator that shares state with the ring."""
-
-    def __init__(self, ring: MockRingCommunicator, rank_id: int, num_ranks: int):
-        self._ring = ring
-        self.rank_id = rank_id
-        self.num_ranks = num_ranks
-        self.prev_rank = (rank_id - 1) % num_ranks
-        self.next_rank = (rank_id + 1) % num_ranks
-
-    async def send_recv(self, send_data: bytes, tag: str) -> bytes:
+    async def SendBlock(
+        self,
+        request: object,
+        context: object,
+    ) -> object:
         """
-        Mock send/recv that stores data for next rank to read.
+        Handle incoming block from another rank.
 
-        In the mock, we store send_data in next_rank's buffer,
-        and read from our own buffer (populated by prev_rank).
+        Extracts the data and routes it to the communicator.
         """
-        if self.num_ranks == 1:
-            return send_data
+        from typing import cast
+        from dnet.protos import dnet_cp_pb2
 
-        async with self._ring._lock:
-            # Store data for next rank to receive
-            self._ring._buffers[self.next_rank][tag] = send_data
+        # Cast to proper type
+        req = cast(dnet_cp_pb2.CPBlockFrame, request)
+        tag = req.nonce
 
-        # Small delay to simulate network
-        await asyncio.sleep(0.001)
+        if not self._communicator:
+            return dnet_cp_pb2.CPBlockAck(
+                nonce=tag, accepted=False, error_message="No communicator attached"
+            )
 
-        # Wait for data from prev rank
-        for _ in range(100):  # Max 100ms wait
-            async with self._ring._lock:
-                if tag in self._ring._buffers[self.rank_id]:
-                    data = self._ring._buffers[self.rank_id].pop(tag)
-                    return data
-            await asyncio.sleep(0.001)
+        # Extract data from the partial_output field
+        if req.HasField("partial_output"):
+            data = req.partial_output.output_data
+        else:
+            data = b""
 
-        raise TimeoutError(f"Rank {self.rank_id}: timeout waiting for {tag}")
+        # Route to communicator
+        self._communicator.resolve_recv(tag, data)
+
+        logger.debug(
+            "CPRingServiceServicer: received %d bytes (tag=%s) from rank %d",
+            len(data),
+            tag,
+            req.source_rank,
+        )
+
+        return dnet_cp_pb2.CPBlockAck(nonce=tag, seq=req.seq, accepted=True)
+
+    async def StreamBlocks(
+        self,
+        request_iterator: object,
+        context: object,
+    ) -> AsyncIterator[object]:
+        """
+        Handle streaming blocks (for high-throughput scenarios).
+        """
+        async for request in request_iterator:  # type: ignore[attr-defined]
+            ack = await self.SendBlock(request, context)
+            yield ack
+
+
+async def start_cp_ring_server(
+    port: int, communicator: CPRingCommunicator
+) -> grpc.aio.Server:
+    """
+    Start a gRPC server for CP ring communication.
+
+    Args:
+        port: Port to listen on
+        communicator: CPRingCommunicator to receive incoming blocks
+
+    Returns:
+        Running gRPC server
+    """
+    from typing import cast, Any
+
+    from dnet.protos import dnet_cp_pb2_grpc
+
+    server = aio_grpc.server()
+    servicer = CPRingServiceServicer()
+    servicer.attach_communicator(communicator)
+    # Cast to Any to satisfy mypy - our servicer implements the protocol
+    dnet_cp_pb2_grpc.add_CPRingServiceServicer_to_server(cast(Any, servicer), server)
+
+    server.add_insecure_port(f"[::]:{port}")
+    await server.start()
+
+    logger.info(
+        "CP ring server started on port %d for rank %d", port, communicator.rank_id
+    )
+    return server

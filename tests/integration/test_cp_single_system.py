@@ -33,7 +33,8 @@ from dnet.core.cp.merge_attention import (
 from dnet.core.cp.heuristics import select_algorithm, CPAlgorithm
 from dnet.core.cp.ring_comm import (
     CPRingCommunicator,
-    MockRingCommunicator,
+    RingNeighbors,
+    start_cp_ring_server,
 )
 from dnet.shard.adapters.context_parallel import CPAdapter
 from dnet.config import ContextParallelSettings, get_settings
@@ -217,46 +218,83 @@ class TestCPRingCommunication:
     """Test ring communication with actual async operations."""
 
     def test_ring_full_rotation_4_ranks(self) -> None:
-        """Test that data correctly rotates through all ranks in the ring."""
+        """Test that data correctly rotates through all ranks in the ring.
+
+        This test starts 4 real gRPC servers and has each rank send/recv data,
+        verifying that after N-1 rotations, each rank has seen all other ranks' data.
+        """
         import asyncio
 
         async def run_test():
             num_ranks = 4
-            ring = MockRingCommunicator(num_ranks=num_ranks)
-            ranks = [ring.get_communicator(i) for i in range(num_ranks)]
+            base_port = 59100
 
-            # Each rank starts with unique data
-            initial_data = [f"rank_{i}_data".encode() for i in range(num_ranks)]
-
-            # Track what each rank sees over N-1 rotations
-            all_seen: list[list[bytes]] = [[] for _ in range(num_ranks)]
-
-            current_data = initial_data.copy()
-
-            for step in range(num_ranks - 1):
-                # All ranks send/recv simultaneously
-                results = await asyncio.gather(
-                    *[
-                        ranks[i].send_recv(current_data[i], f"step_{step}")
-                        for i in range(num_ranks)
-                    ]
-                )
-
-                # Update current data and track what we received
-                for i in range(num_ranks):
-                    all_seen[i].append(results[i])
-                    current_data[i] = results[i]
-
-            # After N-1 rotations, each rank should have seen all other ranks' data
+            # Create communicators for each rank
+            comms = []
             for rank_id in range(num_ranks):
-                seen_set = set(all_seen[rank_id])
-                # Should have received from all ranks except self
-                expected_others = {
-                    d for i, d in enumerate(initial_data) if i != rank_id
-                }
-                assert seen_set == expected_others, (
-                    f"Rank {rank_id} missing data: {expected_others - seen_set}"
+                prev_rank = (rank_id - 1) % num_ranks
+                next_rank = (rank_id + 1) % num_ranks
+                comm = CPRingCommunicator(rank_id=rank_id, num_ranks=num_ranks)
+                comms.append(comm)
+
+            # Start gRPC servers for each rank
+            servers = []
+            for rank_id in range(num_ranks):
+                server = await start_cp_ring_server(
+                    port=base_port + rank_id,
+                    communicator=comms[rank_id],
                 )
+                servers.append(server)
+
+            # Connect communicators to neighbors
+            for rank_id in range(num_ranks):
+                prev_rank = (rank_id - 1) % num_ranks
+                next_rank = (rank_id + 1) % num_ranks
+                neighbors = RingNeighbors(
+                    prev_address=f"localhost:{base_port + prev_rank}",
+                    next_address=f"localhost:{base_port + next_rank}",
+                )
+                await comms[rank_id].connect(neighbors)
+
+            try:
+                # Each rank starts with unique data
+                initial_data = [f"rank_{i}_data".encode() for i in range(num_ranks)]
+
+                # Track what each rank sees over N-1 rotations
+                all_seen: list[list[bytes]] = [[] for _ in range(num_ranks)]
+
+                current_data = initial_data.copy()
+
+                for step in range(num_ranks - 1):
+                    # All ranks send/recv simultaneously
+                    results = await asyncio.gather(
+                        *[
+                            comms[i].send_recv(current_data[i], f"step_{step}")
+                            for i in range(num_ranks)
+                        ]
+                    )
+
+                    # Update current data and track what we received
+                    for i in range(num_ranks):
+                        all_seen[i].append(results[i])
+                        current_data[i] = results[i]
+
+                # After N-1 rotations, each rank should have seen all other ranks' data
+                for rank_id in range(num_ranks):
+                    seen_set = set(all_seen[rank_id])
+                    # Should have received from all ranks except self
+                    expected_others = {
+                        d for i, d in enumerate(initial_data) if i != rank_id
+                    }
+                    assert seen_set == expected_others, (
+                        f"Rank {rank_id} missing data: {expected_others - seen_set}"
+                    )
+            finally:
+                # Cleanup: disconnect and stop servers
+                for comm in comms:
+                    await comm.disconnect()
+                for server in servers:
+                    await server.stop(grace=0.1)
 
         asyncio.run(run_test())
 

@@ -15,8 +15,8 @@ from dnet.core.cp.heuristics import select_algorithm, CPAlgorithm
 from dnet.core.cp.ring_comm import (
     CPRingCommunicator,
     RingNeighbors,
-    MockRingCommunicator,
-    MockRankCommunicator,
+    CPRingServiceServicer,
+    start_cp_ring_server,
 )
 
 
@@ -58,6 +58,6 @@ __all__ = [
     "CPAlgorithm",
     "CPRingCommunicator",
     "RingNeighbors",
-    "MockRingCommunicator",
-    "MockRankCommunicator",
+    "CPRingServiceServicer",
+    "start_cp_ring_server",
 ]

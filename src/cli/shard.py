@@ -34,7 +34,23 @@ async def serve(
     discovery = AsyncDnetP2P("lib/dnet-p2p/lib")
     # Core - use instance_name for runtime to align logs/metrics with discovery name
     runtime = ShardRuntime(shard_id=instance_name, queue_size=queue_size)
-    adapter = RingAdapter(runtime=runtime, discovery=discovery)
+
+    # Select adapter based on CP config
+    from dnet.config import get_settings
+    from dnet.shard.adapters.base import TopologyAdapter
+
+    settings = get_settings()
+    adapter: TopologyAdapter
+    if settings.context_parallel.enabled:
+        from dnet.shard.adapters.context_parallel import CPAdapter
+
+        logger.info("Context parallelism enabled - using CPAdapter")
+        adapter = CPAdapter(
+            runtime=runtime, discovery=discovery, rank_id=0, num_ranks=1
+        )
+    else:
+        adapter = RingAdapter(runtime=runtime, discovery=discovery)
+
     shard = Shard(shard_id=shard_id, adapter=adapter)
 
     # Servers

@@ -38,6 +38,17 @@ jobs:
         with:
           python_version: '3.12'
 
+      - name: Enable CP in .env
+        run: |
+          # Force DNET_CP_ENABLED=true in .env file (overrides default)
+          if grep -q "^DNET_CP_ENABLED=" .env 2>/dev/null; then
+            sed -i 's/^DNET_CP_ENABLED=.*/DNET_CP_ENABLED=true/' .env
+          else
+            echo "DNET_CP_ENABLED=true" >> .env
+          fi
+          echo "Updated .env:"
+          grep DNET_CP_ .env || echo "No DNET_CP_ settings found"
+
       - name: Ensure compatible gRPC/protobuf versions
         run: |
           uv pip install --upgrade "grpcio>=1.75.1" "protobuf>=6.31.1"

@@ -59,10 +59,19 @@ async def serve(
             discovery.create_instance(node_id, http_port, grpc_port, is_manager=True)
             await discovery.async_start()
 
-        # Components
+        # Components - select strategy based on config
+        from dnet.config import get_settings
+        from dnet.api.strategies.base import Strategy
         from dnet.api.strategies.ring import RingStrategy
+        from dnet.api.strategies.context_parallel import ContextParallelStrategy
 
-        strategy = RingStrategy()  # ContextParallelStrategy()
+        settings = get_settings()
+        strategy: Strategy
+        if settings.context_parallel.enabled:
+            logger.info("Context parallelism enabled - using ContextParallelStrategy")
+            strategy = ContextParallelStrategy()
+        else:
+            strategy = RingStrategy()
 
         def update_tui_model_info(
             model_name: Optional[str], layers: int, loaded: bool

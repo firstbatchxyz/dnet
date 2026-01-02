@@ -31,6 +31,21 @@ class ShardLoadModelRequest(BaseModel):
         description="API callback address for final layer completion (gRPC host:port)",
     )
 
+    # Context Parallelism fields
+    cp_rank_id: int = Field(
+        default=0, description="This shard's rank ID for context parallelism"
+    )
+    cp_num_ranks: int = Field(
+        default=1, description="Total number of CP ranks (1=single device mode)"
+    )
+    cp_rank_addresses: List[str] = Field(
+        default_factory=list,
+        description="Ordered list of CP rank addresses (host:port) for ring communication",
+    )
+    cp_algorithm: Literal["auto", "pass_kv", "pass_q", "ring_reduce"] = Field(
+        default="auto", description="CP algorithm selection"
+    )
+
 
 class ShardLoadModelResponse(BaseModel):
     """Response from model loading operation on shard."""

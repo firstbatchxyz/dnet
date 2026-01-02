@@ -41,8 +41,9 @@ jobs:
       - name: Enable CP in .env
         run: |
           # Force DNET_CP_ENABLED=true in .env file (overrides default)
+          # Note: macOS sed requires -i '' for in-place edit
           if grep -q "^DNET_CP_ENABLED=" .env 2>/dev/null; then
-            sed -i 's/^DNET_CP_ENABLED=.*/DNET_CP_ENABLED=true/' .env
+            sed -i '' 's/^DNET_CP_ENABLED=.*/DNET_CP_ENABLED=true/' .env
           else
             echo "DNET_CP_ENABLED=true" >> .env
           fi

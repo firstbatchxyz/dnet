@@ -329,8 +329,12 @@ class TestCPAdapterIntegration:
 class TestCPConfiguration:
     """Test CP configuration loading and validation."""
 
-    def test_settings_defaults(self) -> None:
-        """Test default CP settings are loaded correctly."""
+    def test_settings_defaults(self, monkeypatch) -> None:
+        """Test default CP settings without environment overrides."""
+        # Clear any env vars that would override defaults
+        monkeypatch.delenv("DNET_CP_ENABLED", raising=False)
+        monkeypatch.delenv("DNET_CP_ALGORITHM", raising=False)
+
         settings = ContextParallelSettings()
 
         assert settings.enabled is False
@@ -339,14 +343,17 @@ class TestCPConfiguration:
         assert settings.min_tokens_for_pass_kv == 256
         assert settings.chunk_overlap == 0
 
-    def test_settings_in_dnet_settings(self) -> None:
-        """Test CP settings are accessible from main DnetSettings."""
+    def test_settings_accessible_from_dnet_settings(self) -> None:
+        """Test CP settings are integrated into main DnetSettings."""
         all_settings = get_settings()
         cp_settings = all_settings.context_parallel
 
-        assert hasattr(cp_settings, "enabled")
-        assert hasattr(cp_settings, "algorithm")
-        assert hasattr(cp_settings, "min_context_for_cp")
+        # Verify CP settings are loaded and accessible
+        _ = cp_settings.enabled
+        _ = cp_settings.algorithm
+        _ = cp_settings.min_context_for_cp
+        _ = cp_settings.min_tokens_for_pass_kv
+        _ = cp_settings.chunk_overlap
 
 
 # =============================================================================

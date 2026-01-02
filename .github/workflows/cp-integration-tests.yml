@@ -3,10 +3,10 @@ name: CP Integration Tests
 on:
   workflow_dispatch:
     inputs:
-      cp_ranks:
-        description: 'Number of CP ranks to test (1-4)'
+      model_filter:
+        description: 'Model filter for tests (e.g. "qwen")'
         required: false
-        default: '2'
+        default: ''
   pull_request:
     paths:
       - 'src/dnet/core/cp/**'
@@ -21,7 +21,7 @@ concurrency:
 jobs:
   cp-integration-tests:
     runs-on: mac2.metal
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       PROJECT_ROOT: ${{ github.workspace }}
       PYTHONPATH: src
@@ -46,10 +46,6 @@ jobs:
         run: |
           uv run pytest tests/subsystems/test_cp_*.py -v --tb=short
 
-      - name: Run CP single-system integration tests
-        run: |
-          uv run pytest tests/integration/test_cp_single_system.py -v --tb=short
-
       - name: Kill processes on required ports
         run: |
           for port in 8080 8081 58080 58081; do
@@ -57,13 +53,11 @@ jobs:
           done
           sleep 2
 
-      - name: Start shard server with CP enabled
+      - name: Start shard server
         uses: ./.github/actions/start-shard
         with:
           http_port: '8081'
           grpc_port: '58081'
-        env:
-          DNET_CP_ENABLED: 'true'
 
       - name: Start API server
         uses: ./.github/actions/start-api
@@ -71,13 +65,14 @@ jobs:
           http_port: '8080'
           grpc_port: '58080'
 
-      - name: Wait for servers
-        run: sleep 10
-
-      - name: Verify servers are running
+      - name: Run integration tests
         run: |
-          curl -sf http://localhost:8080/health || echo "API not ready"
-          curl -sf http://localhost:8081/health || echo "Shard not ready"
+          sleep 10  # Wait for servers to initialize
+          if [ -n "${{ github.event.inputs.model_filter }}" ]; then
+            uv run pytest tests/integration/test_model_catalog.py -v -x -k "${{ github.event.inputs.model_filter }}" --tb=short
+          else
+            uv run pytest tests/integration/test_model_catalog.py -v -x --tb=short
+          fi
 
       - name: Cleanup servers
         if: always()

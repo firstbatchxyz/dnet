@@ -8,7 +8,7 @@ import pytest
 from dnet.core.cp.ring_comm import (
     CPRingCommunicator,
     RingNeighbors,
-    MockRingCommunicator,
+    start_cp_ring_server,
 )
 
 
@@ -73,90 +73,120 @@ class TestCPRingCommunicator:
         asyncio.run(_test())
 
 
-class TestMockRingCommunicator:
-    """Tests for the mock ring communicator."""
+class TestRealGRPCRingCommunication:
+    """Tests for ring communication using real gRPC servers."""
 
     def test_two_rank_exchange(self):
-        """Two ranks should exchange data correctly."""
+        """Two ranks should exchange data correctly via real gRPC."""
 
         async def _test():
-            ring = MockRingCommunicator(num_ranks=2)
-            rank0 = ring.get_communicator(0)
-            rank1 = ring.get_communicator(1)
+            base_port = 59200
+            num_ranks = 2
 
-            # Run both send_recv concurrently
-            data0 = b"from_rank_0"
-            data1 = b"from_rank_1"
+            # Create communicators
+            comms = [
+                CPRingCommunicator(rank_id=i, num_ranks=num_ranks)
+                for i in range(num_ranks)
+            ]
 
-            results = await asyncio.gather(
-                rank0.send_recv(data0, "step1"),
-                rank1.send_recv(data1, "step1"),
-            )
+            # Start gRPC servers
+            servers = []
+            for i in range(num_ranks):
+                server = await start_cp_ring_server(
+                    port=base_port + i, communicator=comms[i]
+                )
+                servers.append(server)
 
-            # rank0 receives from rank1 (prev of 0 is 1 in 2-rank ring)
-            # rank1 receives from rank0 (prev of 1 is 0)
-            assert results[0] == data1  # rank0 got data1
-            assert results[1] == data0  # rank1 got data0
+            # Connect to neighbors
+            for i in range(num_ranks):
+                prev_rank = (i - 1) % num_ranks
+                next_rank = (i + 1) % num_ranks
+                neighbors = RingNeighbors(
+                    prev_address=f"localhost:{base_port + prev_rank}",
+                    next_address=f"localhost:{base_port + next_rank}",
+                )
+                await comms[i].connect(neighbors)
+
+            try:
+                # Run both send_recv concurrently
+                data0 = b"from_rank_0"
+                data1 = b"from_rank_1"
+
+                results = await asyncio.gather(
+                    comms[0].send_recv(data0, "step1"),
+                    comms[1].send_recv(data1, "step1"),
+                )
+
+                # rank0 receives from rank1 (prev of 0 is 1 in 2-rank ring)
+                # rank1 receives from rank0 (prev of 1 is 0)
+                assert results[0] == data1  # rank0 got data1
+                assert results[1] == data0  # rank1 got data0
+            finally:
+                for comm in comms:
+                    await comm.disconnect()
+                for server in servers:
+                    await server.stop(grace=0.1)
 
         asyncio.run(_test())
 
     def test_four_rank_ring(self):
-        """Four ranks should form a proper ring."""
+        """Four ranks should form a proper ring via real gRPC."""
 
         async def _test():
-            ring = MockRingCommunicator(num_ranks=4)
-            ranks = [ring.get_communicator(i) for i in range(4)]
+            base_port = 59210
+            num_ranks = 4
 
-            # Each rank sends its ID as bytes
-            data = [f"rank_{i}".encode() for i in range(4)]
+            # Create communicators
+            comms = [
+                CPRingCommunicator(rank_id=i, num_ranks=num_ranks)
+                for i in range(num_ranks)
+            ]
 
-            results = await asyncio.gather(
-                *[ranks[i].send_recv(data[i], "step1") for i in range(4)]
-            )
+            # Start gRPC servers
+            servers = []
+            for i in range(num_ranks):
+                server = await start_cp_ring_server(
+                    port=base_port + i, communicator=comms[i]
+                )
+                servers.append(server)
 
-            # Each rank should receive from its previous rank
-            # rank 0 receives from rank 3, rank 1 from rank 0, etc.
-            for i in range(4):
-                prev = (i - 1) % 4
-                assert results[i] == data[prev]
+            # Connect to neighbors
+            for i in range(num_ranks):
+                prev_rank = (i - 1) % num_ranks
+                next_rank = (i + 1) % num_ranks
+                neighbors = RingNeighbors(
+                    prev_address=f"localhost:{base_port + prev_rank}",
+                    next_address=f"localhost:{base_port + next_rank}",
+                )
+                await comms[i].connect(neighbors)
+
+            try:
+                # Each rank sends its ID as bytes
+                data = [f"rank_{i}".encode() for i in range(num_ranks)]
+
+                results = await asyncio.gather(
+                    *[comms[i].send_recv(data[i], "step1") for i in range(num_ranks)]
+                )
+
+                # Each rank should receive from its previous rank
+                for i in range(num_ranks):
+                    prev = (i - 1) % num_ranks
+                    assert results[i] == data[prev]
+            finally:
+                for comm in comms:
+                    await comm.disconnect()
+                for server in servers:
+                    await server.stop(grace=0.1)
 
         asyncio.run(_test())
 
-    def test_multiple_steps(self):
-        """Ring should work across multiple communication steps."""
+    def test_single_rank(self):
+        """Single rank should return own data (no gRPC needed)."""
 
         async def _test():
-            ring = MockRingCommunicator(num_ranks=3)
-            ranks = [ring.get_communicator(i) for i in range(3)]
-
-            # Step 1
-            data_step1 = [b"s1_r0", b"s1_r1", b"s1_r2"]
-            results1 = await asyncio.gather(
-                *[ranks[i].send_recv(data_step1[i], "step1") for i in range(3)]
-            )
-
-            # Step 2: use results from step 1
-            results2 = await asyncio.gather(
-                *[ranks[i].send_recv(results1[i], "step2") for i in range(3)]
-            )
-
-            # After 2 steps in a 3-rank ring, data has rotated 2 positions
-            # rank 0: recv from 2, who recv'd from 1 -> original rank 1 data
-            assert results2[0] == b"s1_r1"
-            assert results2[1] == b"s1_r2"
-            assert results2[2] == b"s1_r0"
-
-        asyncio.run(_test())
-
-    def test_single_rank_mock(self):
-        """Single rank mock should return own data."""
-
-        async def _test():
-            ring = MockRingCommunicator(num_ranks=1)
-            rank0 = ring.get_communicator(0)
-
+            comm = CPRingCommunicator(rank_id=0, num_ranks=1)
             data = b"solo"
-            result = await rank0.send_recv(data, "tag")
+            result = await comm.send_recv(data, "tag")
             assert result == data
 
         asyncio.run(_test())

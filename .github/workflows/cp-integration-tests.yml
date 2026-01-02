@@ -53,6 +53,14 @@ jobs:
           done
           sleep 2
 
+      - name: Verify CP environment
+        run: |
+          echo "DNET_CP_ENABLED=${DNET_CP_ENABLED}"
+          if [ "$DNET_CP_ENABLED" != "true" ]; then
+            echo "::error::DNET_CP_ENABLED is not set to true"
+            exit 1
+          fi
+
       - name: Start shard server
         uses: ./.github/actions/start-shard
         with:
@@ -68,6 +76,7 @@ jobs:
       - name: Run integration tests
         run: |
           sleep 10  # Wait for servers to initialize
+          echo "Running tests with DNET_CP_ENABLED=${DNET_CP_ENABLED}"
           if [ -n "${{ github.event.inputs.model_filter }}" ]; then
             uv run pytest tests/integration/test_model_catalog.py -v -x -k "${{ github.event.inputs.model_filter }}" --tb=short
           else

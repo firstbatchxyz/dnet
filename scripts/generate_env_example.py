@@ -18,6 +18,7 @@ def main() -> int:
     from dnet.config import (
         ApiSettings,
         ComputeSettings,
+        ContextParallelSettings,
         GrpcSettings,
         KVCacheSettings,
         LoggingSettings,
@@ -46,6 +47,7 @@ def main() -> int:
         ("Transport", TransportSettings),
         ("Compute", ComputeSettings),
         ("KV Cache", KVCacheSettings),
+        ("Context Parallelism", ContextParallelSettings),
         ("gRPC", GrpcSettings),
         ("Storage", StorageSettings),
     ]

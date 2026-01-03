@@ -19,6 +19,7 @@ from .cluster import ClusterManager
 from .model_manager import ModelManager
 from .strategies.base import ApiAdapterBase
 from dnet.core.decoding.config import DecodingConfig
+from dnet.utils.logger import logger
 
 
 async def arange(count: int):
@@ -61,6 +62,30 @@ class InferenceManager:
         For internet setups, this should be a public IP/DNS or overlay VPN IP.
         """
         await self.adapter.connect_first_shard(first_shard_ip, first_shard_port)
+        self._api_callback_addr = api_callback_addr
+
+    async def connect_to_cp_ranks(
+        self, rank_addresses: list[str], api_callback_addr: str
+    ) -> None:
+        """
+        Connect to all CP ranks for multi-rank broadcasting.
+
+        Args:
+            rank_addresses: List of "host:port" strings for each rank.
+            api_callback_addr: Callback address for shards to send tokens.
+        """
+        from dnet.api.strategies.context_parallel import CPApiAdapter
+
+        if isinstance(self.adapter, CPApiAdapter) and len(rank_addresses) > 1:
+            await self.adapter.connect_all_ranks(rank_addresses)
+            logger.info("Connected to %d CP ranks", len(rank_addresses))
+        else:
+            # Fallback to single shard connection
+            if rank_addresses:
+                parts = rank_addresses[0].split(":")
+                ip, port = parts[0], int(parts[1])
+                await self.adapter.connect_first_shard(ip, port)
+
         self._api_callback_addr = api_callback_addr
 
     async def generate_stream(self, req: ChatRequestModel):

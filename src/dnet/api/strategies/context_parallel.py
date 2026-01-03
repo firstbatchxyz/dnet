@@ -156,21 +156,32 @@ class CPTopologySolver(TopologySolver):
 
 
 class CPApiAdapter(ApiAdapterBase):
-    """API adapter for context parallel communication."""
+    """API adapter for context parallel communication.
+
+    Supports multi-rank broadcasting: splits token sequence across ranks
+    and sends chunks in parallel. Only the last rank samples and returns.
+    """
 
     def __init__(self) -> None:
         super().__init__()
-        # For CP, we broadcast tokens to all shards (rank 0 is primary)
+        # Legacy single-shard connection (kept for backward compat)
         self.primary_channel: Optional[aio_grpc.Channel] = None
         self.primary_stub: Optional[DnetRingServiceStub] = None
         self._streams = StreamManager(idle_timeout_s=5.0, backoff_s=0.2)
         self._pending: Dict[str, asyncio.Future[TokenResult]] = {}
+
+        # Multi-rank connections for CP
+        self.num_ranks: int = 1
+        self.rank_channels: Dict[int, aio_grpc.Channel] = {}
+        self.rank_stubs: Dict[int, DnetRingServiceStub] = {}
+        self._streams_by_rank: Dict[int, StreamManager] = {}
 
     async def start(self) -> None:
         self.running = True
 
     async def shutdown(self) -> None:
         self.running = False
+        # Clean up legacy streams
         for nonce in list(getattr(self._streams, "_streams", {}).keys()):
             try:
                 await self._streams.end_stream(nonce)
@@ -184,25 +195,96 @@ class CPApiAdapter(ApiAdapterBase):
         self.primary_channel = None
         self.primary_stub = None
 
+        # Clean up multi-rank streams and channels
+        for streams in self._streams_by_rank.values():
+            for nonce in list(getattr(streams, "_streams", {}).keys()):
+                try:
+                    await streams.end_stream(nonce)
+                except Exception:
+                    pass
+        for channel in self.rank_channels.values():
+            try:
+                await channel.close()
+            except Exception:
+                pass
+        self.rank_channels.clear()
+        self.rank_stubs.clear()
+        self._streams_by_rank.clear()
+
     async def connect_first_shard(self, ip: str, port: int) -> None:
-        """Connect to primary shard (rank 0) which coordinates CP."""
+        """Connect to primary shard (rank 0) - legacy single-shard mode."""
         target = f"{ip}:{port}"
         if self.primary_channel:
             try:
                 await self.primary_channel.close()
             except Exception:
                 pass
-        self.primary_channel = aio_grpc.insecure_channel(target)
+        from dnet.utils.grpc_config import GRPC_AIO_OPTIONS
+
+        self.primary_channel = aio_grpc.insecure_channel(
+            target, options=GRPC_AIO_OPTIONS
+        )
         self.primary_stub = DnetRingServiceStub(self.primary_channel)
         logger.info("CP adapter connected to primary shard at %s", target)
 
+    async def connect_all_ranks(self, rank_addresses: List[str]) -> None:
+        """Connect to all CP ranks for multi-rank broadcasting.
+
+        Args:
+            rank_addresses: List of "host:port" strings, one per rank, in order.
+        """
+        from dnet.utils.grpc_config import GRPC_AIO_OPTIONS
+
+        # Close existing connections
+        for channel in self.rank_channels.values():
+            try:
+                await channel.close()
+            except Exception:
+                pass
+        self.rank_channels.clear()
+        self.rank_stubs.clear()
+        self._streams_by_rank.clear()
+
+        self.num_ranks = len(rank_addresses)
+        for rank, addr in enumerate(rank_addresses):
+            self.rank_channels[rank] = aio_grpc.insecure_channel(
+                addr, options=GRPC_AIO_OPTIONS
+            )
+            self.rank_stubs[rank] = DnetRingServiceStub(self.rank_channels[rank])
+            self._streams_by_rank[rank] = StreamManager(
+                idle_timeout_s=60.0, backoff_s=0.2
+            )
+
+        # Also set primary for backward compat
+        if rank_addresses:
+            self.primary_channel = self.rank_channels.get(0)
+            self.primary_stub = self.rank_stubs.get(0)
+
+        logger.info(
+            "CP adapter connected to %d ranks: %s", self.num_ranks, rank_addresses
+        )
+
     async def reset_cache(self) -> None:
-        if not self.primary_stub:
+        """Reset cache on all ranks."""
+        if self.num_ranks > 1 and self.rank_stubs:
+            # Multi-rank: reset on all
+            async def reset_rank(rank: int):
+                stub = self.rank_stubs.get(rank)
+                if stub:
+                    try:
+                        await stub.ResetCache(pb2.ResetCacheRequest())
+                    except Exception as e:
+                        logger.warning("ResetCache failed on rank %d: %s", rank, e)
+
+            await asyncio.gather(*[reset_rank(r) for r in range(self.num_ranks)])
+        elif self.primary_stub:
+            # Single-rank fallback
+            try:
+                await self.primary_stub.ResetCache(pb2.ResetCacheRequest())
+            except Exception as e:
+                logger.warning("ResetCache RPC failed: %s", e)
+        else:
             raise RuntimeError("CP adapter not connected")
-        try:
-            await self.primary_stub.ResetCache(pb2.ResetCacheRequest())
-        except Exception as e:
-            logger.warning("ResetCache RPC failed: %s", e)
 
     async def send_tokens(
         self,
@@ -213,15 +295,40 @@ class CPApiAdapter(ApiAdapterBase):
         top_logprobs: int = 0,
         decoding_config: Optional[Any] = None,
     ) -> None:
-        """Send tokens to primary shard for CP inference."""
-        if not self.primary_stub:
-            raise RuntimeError("CP adapter not connected to primary shard")
+        """Send tokens to all CP ranks (split and broadcast).
 
+        If multi-rank is configured, splits the token sequence using
+        shard_for_mode() and sends each chunk to its corresponding rank.
+        Only the last rank will sample and return the result.
+        """
+        if self.num_ranks > 1 and self.rank_stubs:
+            # Multi-rank mode: split and broadcast
+            await self._send_tokens_multi_rank(
+                nonce, tokens, callback_addr, logprobs, top_logprobs, decoding_config
+            )
+        elif self.primary_stub:
+            # Single-rank fallback (legacy behavior)
+            await self._send_tokens_single_rank(
+                nonce, tokens, callback_addr, logprobs, top_logprobs, decoding_config
+            )
+        else:
+            raise RuntimeError("CP adapter not connected to any shard")
+
+    async def _send_tokens_single_rank(
+        self,
+        nonce: str,
+        tokens: bytes,
+        callback_addr: str,
+        logprobs: bool,
+        top_logprobs: int,
+        decoding_config: Optional[Any],
+    ) -> None:
+        """Legacy single-rank send (original behavior)."""
         msg = ActivationMessage(
             nonce=nonce,
             pool_id=-1,
             batch_size=1,
-            shape=(1,),
+            shape=(len(tokens) // 4,),  # int32 tokens
             dtype="tokens",
             layer_id=-1,
             timestamp=utc_epoch_now(),
@@ -243,6 +350,7 @@ class CPApiAdapter(ApiAdapterBase):
         req = msg.to_proto(tokens)
 
         stub = self.primary_stub
+        assert stub is not None, "primary_stub should be set"
         ctx = await self._streams.get_or_create_stream(
             nonce,
             lambda it: stub.StreamActivations(it),
@@ -255,6 +363,92 @@ class CPApiAdapter(ApiAdapterBase):
             pb2.ActivationFrame(request=req, seq=ctx.last_seq, end_of_request=False)
         )
         ctx.last_activity_t = asyncio.get_running_loop().time()
+
+    async def _send_tokens_multi_rank(
+        self,
+        nonce: str,
+        tokens: bytes,
+        callback_addr: str,
+        logprobs: bool,
+        top_logprobs: int,
+        decoding_config: Optional[Any],
+    ) -> None:
+        """Multi-rank send: split tokens and broadcast to all ranks."""
+        import numpy as np
+        from dnet.core.cp.sharding import shard_for_mode
+        import mlx.core as mx
+
+        # Deserialize full token sequence
+        full_tokens = np.frombuffer(tokens, dtype=np.int32)
+        num_tokens = len(full_tokens)
+
+        logger.debug(
+            "CP multi-rank send: nonce=%s, %d tokens -> %d ranks",
+            nonce,
+            num_tokens,
+            self.num_ranks,
+        )
+
+        async def send_to_rank(rank: int) -> None:
+            # Shard the sequence for this rank
+            chunk_mx, indices = shard_for_mode(
+                mx.array(full_tokens), self.num_ranks, rank, "prefill"
+            )
+            chunk = np.array(chunk_mx, dtype=np.int32)
+            chunk_bytes = chunk.tobytes()
+
+            logger.debug(
+                "CP rank %d: sending %d tokens (indices %d-%d)",
+                rank,
+                len(chunk),
+                indices[0] if indices else 0,
+                indices[-1] if indices else 0,
+            )
+
+            msg = ActivationMessage(
+                nonce=nonce,
+                pool_id=-1,
+                batch_size=1,
+                shape=(len(chunk),),
+                dtype="tokens",
+                layer_id=-1,
+                timestamp=utc_epoch_now(),
+                node_origin="api",
+                callback_url=f"grpc://{callback_addr}",
+                req_logprobs=logprobs,
+                req_top_logprobs=top_logprobs,
+                temperature=decoding_config.temperature if decoding_config else 1.0,
+                top_p=decoding_config.top_p if decoding_config else 1.0,
+                top_k=decoding_config.top_k if decoding_config else -1,
+                repetition_penalty=(
+                    decoding_config.repetition_penalty if decoding_config else 1.0
+                ),
+                min_p=decoding_config.min_p if decoding_config else 0.0,
+                min_tokens_to_keep=(
+                    decoding_config.min_tokens_to_keep if decoding_config else 1
+                ),
+            )
+            req = msg.to_proto(chunk_bytes)
+
+            stub = self.rank_stubs[rank]
+            streams = self._streams_by_rank[rank]
+            ctx = await streams.get_or_create_stream(
+                nonce,
+                lambda it: stub.StreamActivations(it),
+            )
+            if not ctx or not ctx.open:
+                raise RuntimeError(
+                    f"Failed to create stream for rank {rank}, nonce {nonce}"
+                )
+
+            ctx.last_seq += 1
+            await ctx.queue.put(
+                pb2.ActivationFrame(request=req, seq=ctx.last_seq, end_of_request=False)
+            )
+            ctx.last_activity_t = asyncio.get_running_loop().time()
+
+        # Send to all ranks in parallel
+        await asyncio.gather(*[send_to_rank(r) for r in range(self.num_ranks)])
 
     async def await_token(self, nonce: str, timeout_s: float) -> TokenResult:
         fut = asyncio.get_running_loop().create_future()

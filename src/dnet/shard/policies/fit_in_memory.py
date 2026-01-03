@@ -133,6 +133,21 @@ class FitInMemoryPolicy(ComputePolicy):
                     # build output ActivationMessage
                     if nxt >= self.runtime.model_metadata.num_layers:
                         # end-shard sampling
+
+                        # CP multi-rank: Only the last rank holds the final token
+                        # of the distributed sequence. Other ranks finish silently.
+                        cp_num_ranks = getattr(self.runtime, "cp_num_ranks", 1)
+                        cp_rank_id = getattr(self.runtime, "cp_rank_id", 0)
+                        if cp_num_ranks > 1 and cp_rank_id != cp_num_ranks - 1:
+                            # Not the last rank in CP - release resources and return
+                            self.runtime.input_pool.release(msg.pool_id)
+                            logger.debug(
+                                "CP rank %d/%d: finished chunk, not sampling (last rank only)",
+                                cp_rank_id,
+                                cp_num_ranks,
+                            )
+                            return
+
                         try:
                             with self.runtime._mlx_lock:
                                 # We only need the last token's logits for next-token prediction

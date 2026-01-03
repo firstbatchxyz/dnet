@@ -202,10 +202,26 @@ class HTTPServer:
                 api_callback_address=api_callback_addr,
             )
             if response.success:
-                first_shard = topology.devices[0]
-                await self.inference_manager.connect_to_ring(
-                    first_shard.local_ip, first_shard.shard_port, api_callback_addr
-                )
+                # Connect inference manager to shard(s)
+                # For CP with multiple devices, connect to all ranks
+                from dnet.api.strategies.context_parallel import CPApiAdapter
+
+                if (
+                    isinstance(self.inference_manager.adapter, CPApiAdapter)
+                    and len(topology.devices) > 1
+                ):
+                    rank_addresses = [
+                        f"{d.local_ip}:{d.shard_port}" for d in topology.devices
+                    ]
+                    await self.inference_manager.connect_to_cp_ranks(
+                        rank_addresses, api_callback_addr
+                    )
+                else:
+                    # Standard ring or single device
+                    first_shard = topology.devices[0]
+                    await self.inference_manager.connect_to_ring(
+                        first_shard.local_ip, first_shard.shard_port, api_callback_addr
+                    )
             return response
 
         except Exception as e:

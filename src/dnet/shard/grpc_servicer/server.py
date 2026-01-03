@@ -1,8 +1,10 @@
 from .servicer import GrpcServicer
 from ..shard import Shard
 from dnet.protos.dnet_ring_pb2_grpc import add_DnetRingServiceServicer_to_server
+from dnet.protos.dnet_cp_pb2_grpc import add_CPRingServiceServicer_to_server
+from dnet.core.cp.ring_comm import CPRingServiceServicer
 from grpc import aio as aio_grpc
-from typing import Optional
+from typing import Optional, Any, cast
 from dnet.utils.logger import logger
 
 
@@ -12,6 +14,7 @@ class GrpcServer:
         self.shard = shard
         self.server: Optional[aio_grpc.Server] = None
         self.servicer = GrpcServicer(self.shard)
+        self.cp_servicer: Optional[CPRingServiceServicer] = None
 
     async def start(self):
         """
@@ -19,6 +22,11 @@ class GrpcServer:
         """
         self.server = aio_grpc.server()
         add_DnetRingServiceServicer_to_server(self.servicer, self.server)
+
+        # Register CP ring service (for context parallelism block transfer)
+        self.cp_servicer = CPRingServiceServicer()
+        add_CPRingServiceServicer_to_server(cast(Any, self.cp_servicer), self.server)
+
         listen_addr = f"[::]:{self.grpc_port}"
         self.server.add_insecure_port(listen_addr)
         try:

@@ -56,6 +56,7 @@ async def serve(
 
     # Servers
     grpc_server = ShardGrpcServer(shard=shard, grpc_port=grpc_port)
+    shard.grpc_server = grpc_server  # For CP servicer wiring
     http_server = ShardHTTPServer(
         shard=shard, http_port=http_port, grpc_port=grpc_port, discovery=discovery
     )

@@ -34,7 +34,8 @@ from dnet.utils.time import utc_epoch_now
 from dnet.protos.dnet_ring_pb2 import ActivationRequest
 from dnet.core.types.messages import ActivationMessage
 from dnet.shard.codec import ActivationCodec
-from dnet.protos import shard_api_comm_pb2, shard_api_comm_pb2_grpc
+from dnet.protos import shard_api_comm_pb2, shard_api_comm_pb2_grpc, dnet_cp_pb2
+from dnet.utils.serialization import bytes_to_tensor
 
 
 class CPAdapter(TopologyAdapter):
@@ -134,12 +135,18 @@ class CPAdapter(TopologyAdapter):
         Extracts CP-specific config (rank_id, num_ranks, neighbor addresses)
         and initializes the ring communicator.
         """
-        # Extract CP config from request (will be added to ShardLoadModelRequest)
-        self.rank_id = getattr(req, "cp_rank_id", 0)
-        self.num_ranks = getattr(req, "cp_num_ranks", 1)
+        # Extract CP config using direct field access
+        self.rank_id = req.cp_rank_id
+        self.num_ranks = req.cp_num_ranks
+        self.api_callback_address = req.api_callback_address
+
+        # Extract model attention config for algorithm selection
+        self._num_q_heads = req.num_q_heads
+        self._num_kv_heads = req.num_kv_heads
+        self._head_dim = req.head_dim
 
         # Extract neighbor addresses for ring
-        rank_addresses = getattr(req, "cp_rank_addresses", [])
+        rank_addresses = req.cp_rank_addresses
         if self.num_ranks > 1 and len(rank_addresses) >= self.num_ranks:
             prev_rank = (self.rank_id - 1) % self.num_ranks
             next_rank = (self.rank_id + 1) % self.num_ranks
@@ -152,12 +159,17 @@ class CPAdapter(TopologyAdapter):
                 num_ranks=self.num_ranks,
             )
             await self.ring_comm.connect(neighbors)
+
+            # CPRingServiceServicer is registered on the shard's existing gRPC server
+            # (see GrpcServer.start()) - no need to start a separate server
+
             logger.info(
                 "CPAdapter: connected ring - rank %d, prev=%s, next=%s",
                 self.rank_id,
                 neighbors.prev_address,
                 neighbors.next_address,
             )
+
         else:
             self.ring_comm = CPRingCommunicator(
                 rank_id=0,
@@ -540,40 +552,51 @@ class CPAdapter(TopologyAdapter):
         return mx.matmul(attn_weights, value)
 
     def _serialize_kv(self, key: mx.array, value: mx.array) -> bytes:
-        """Serialize KV tensors for ring transfer."""
-        # Use memoryview for mx.array serialization
-        k_bytes = bytes(memoryview(key))
-        v_bytes = bytes(memoryview(value))
-        # Pack: k_len (4 bytes) + k_bytes + v_bytes
-        k_len = len(k_bytes).to_bytes(4, "little")
-        return k_len + k_bytes + v_bytes
+        """Serialize KV tensors for ring transfer using Protobuf."""
+        block = dnet_cp_pb2.KVBlock(
+            key_data=bytes(memoryview(key)),
+            value_data=bytes(memoryview(value)),
+            key_shape=list(key.shape),
+            value_shape=list(value.shape),
+            dtype=str(key.dtype),
+        )
+        return block.SerializeToString()
 
     def _deserialize_kv(self, data: bytes) -> tuple[mx.array, mx.array]:
-        """Deserialize KV tensors from bytes."""
-        k_len = int.from_bytes(data[:4], "little")
-        _k_bytes = data[4 : 4 + k_len]  # noqa: F841 - placeholder
-        _v_bytes = data[4 + k_len :]  # noqa: F841 - placeholder
-        # TODO: Need shape info to reconstruct properly
-        # For now, return empty arrays as placeholder
-        return mx.zeros((1,)), mx.zeros((1,))
+        """Deserialize KV tensors from bytes using Protobuf."""
+        block = dnet_cp_pb2.KVBlock()
+        block.ParseFromString(data)
+
+        k = bytes_to_tensor(block.key_data, block.dtype).reshape(block.key_shape)
+        v = bytes_to_tensor(block.value_data, block.dtype).reshape(block.value_shape)
+
+        return k, v
 
     def _serialize_partial(self, partial: PartialAttentionOutput) -> bytes:
-        """Serialize partial attention output for ring reduction."""
-        out_bytes = bytes(memoryview(partial.output))
-        max_bytes = bytes(memoryview(partial.max_score))
-        lse_bytes = bytes(memoryview(partial.log_sum_exp))
-        # Pack lengths
-        out_len = len(out_bytes).to_bytes(4, "little")
-        max_len = len(max_bytes).to_bytes(4, "little")
-        return out_len + max_len + out_bytes + max_bytes + lse_bytes
+        """Serialize partial attention output for ring reduction using Protobuf."""
+        msg = dnet_cp_pb2.PartialOutput(
+            output_data=bytes(memoryview(partial.output)),
+            max_scores=bytes(memoryview(partial.max_score)),
+            log_sum_exp=bytes(memoryview(partial.log_sum_exp)),
+            shape=list(partial.output.shape),
+            dtype=str(partial.output.dtype),
+        )
+        return msg.SerializeToString()
 
     def _deserialize_partial(self, data: bytes) -> PartialAttentionOutput:
-        """Deserialize partial attention output from bytes."""
-        _out_len = int.from_bytes(data[:4], "little")  # noqa: F841 - placeholder
-        _max_len = int.from_bytes(data[4:8], "little")  # noqa: F841 - placeholder
-        # TODO: Need shape info to reconstruct properly
+        """Deserialize partial attention output from bytes using Protobuf."""
+        msg = dnet_cp_pb2.PartialOutput()
+        msg.ParseFromString(data)
+
+        out = bytes_to_tensor(msg.output_data, msg.dtype).reshape(msg.shape)
+
+        # Recover stats shape (B, H) from output shape (B, H, D)
+        stat_shape = msg.shape[:2]
+        max_s = bytes_to_tensor(msg.max_scores, msg.dtype).reshape(stat_shape)
+        lse = bytes_to_tensor(msg.log_sum_exp, msg.dtype).reshape(stat_shape)
+
         return PartialAttentionOutput(
-            output=mx.zeros((1,)),
-            max_score=mx.zeros((1,)),
-            log_sum_exp=mx.zeros((1,)),
+            output=out,
+            max_score=max_s,
+            log_sum_exp=lse,
         )

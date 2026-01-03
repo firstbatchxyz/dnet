@@ -46,6 +46,15 @@ class ShardLoadModelRequest(BaseModel):
         default="auto", description="CP algorithm selection"
     )
 
+    # Model attention config (for CP algorithm selection)
+    num_q_heads: int = Field(
+        default=32, description="Number of query heads in the model"
+    )
+    num_kv_heads: int = Field(
+        default=8, description="Number of KV heads (for GQA models)"
+    )
+    head_dim: int = Field(default=128, description="Dimension per attention head")
+
 
 class ShardLoadModelResponse(BaseModel):
     """Response from model loading operation on shard."""

@@ -6,6 +6,7 @@ This test verifies that the model can attend to ALL positions in a long context,
 which is essential for validating that CP is working correctly.
 
 If CP is broken (ranks only see their chunk), the model will fail to find the needle.
+This test works the best with non-thinking models such as mlx-community/Llama-3.2-3B-Instruct-4bit
 
 Usage:
     uv run python scripts/needle_in_haystack.py --api http://localhost:8080 --context-size 4096

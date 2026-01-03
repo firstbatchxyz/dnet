@@ -135,7 +135,10 @@ class FitInMemoryPolicy(ComputePolicy):
                         # end-shard sampling
                         try:
                             with self.runtime._mlx_lock:
-                                y = self.runtime.model.normalize(x_cast)
+                                # We only need the last token's logits for next-token prediction
+                                # Slicing here drastically reduces memory usage (avoiding [B, S, V] projection)
+                                x_last = x_cast[:, -1:, :]
+                                y = self.runtime.model.normalize(x_last)
                                 y = self.runtime.model.lm_project(y)
 
                             # Sampling

@@ -9,7 +9,11 @@ to pass KV or Q blocks between ranks during attention computation.
 from __future__ import annotations
 
 import asyncio
+import queue
+import time
 from typing import Optional, Callable, Awaitable
+from urllib.parse import urlparse
+from grpc import aio as aio_grpc
 
 import mlx.core as mx
 from dnet_p2p import AsyncDnetP2P
@@ -25,8 +29,12 @@ from dnet.shard.adapters.base import TopologyAdapter
 from dnet.shard.runtime import ShardRuntime
 from dnet.shard.models import ShardLoadModelRequest
 from dnet.utils.logger import logger
+from dnet.utils.grpc_config import GRPC_AIO_OPTIONS
+from dnet.utils.time import utc_epoch_now
 from dnet.protos.dnet_ring_pb2 import ActivationRequest
 from dnet.core.types.messages import ActivationMessage
+from dnet.shard.codec import ActivationCodec
+from dnet.protos import shard_api_comm_pb2, shard_api_comm_pb2_grpc
 
 
 class CPAdapter(TopologyAdapter):
@@ -49,6 +57,9 @@ class CPAdapter(TopologyAdapter):
         self.rank_id = rank_id
         self.num_ranks = num_ranks
 
+        # Codec for activation serialization/deserialization
+        self.codec = ActivationCodec(runtime)
+
         # Ring communicator (initialized on configure_topology)
         self.ring_comm: Optional[CPRingCommunicator] = None
 
@@ -59,6 +70,13 @@ class CPAdapter(TopologyAdapter):
         self._num_q_heads: int = 32
         self._num_kv_heads: int = 8
         self._head_dim: int = 128
+
+        # API callback gRPC
+        self.api_channel: Optional[aio_grpc.Channel] = None
+        self.api_stub: Optional[shard_api_comm_pb2_grpc.ShardApiServiceStub] = None
+        self.api_address: Optional[str] = None
+        self.api_callback_address: Optional[str] = None
+        self._active_nonce: Optional[str] = None
 
         # Queues
         self.queue_size = runtime.max_queue_size
@@ -92,6 +110,7 @@ class CPAdapter(TopologyAdapter):
         self._tasks = [
             asyncio.create_task(self._ingress_worker()),
             asyncio.create_task(self._egress_worker()),
+            asyncio.create_task(self._token_tx_worker()),
         ]
         logger.info(
             "CPAdapter started: rank=%d/%d, algorithm=%s",
@@ -175,6 +194,8 @@ class CPAdapter(TopologyAdapter):
 
     async def _ingress_worker(self) -> None:
         """Process incoming activation requests with CP attention."""
+        loop = asyncio.get_running_loop()
+
         while self.running:
             try:
                 req = await self._ingress_q.get()
@@ -182,27 +203,166 @@ class CPAdapter(TopologyAdapter):
                 break
 
             try:
-                # TODO: Integrate with ShardRuntime for actual computation
-                # For now, log and pass through
-                logger.debug(
-                    "CPAdapter: processing request nonce=%s, layer=%d",
-                    req.nonce,
-                    req.activation.layer_id,
+                # Detect new nonce
+                if req.nonce != self._active_nonce:
+                    self._active_nonce = req.nonce
+                    self.runtime.get_or_make_kv(req.nonce)
+
+                # Deserialize and push to runtime execution queue
+                activation_msg = await loop.run_in_executor(
+                    self.runtime.executor,
+                    self.codec.deserialize,
+                    req,
                 )
+                if activation_msg:
+                    await loop.run_in_executor(
+                        None,
+                        self.runtime.activation_recv_queue.put_nowait,
+                        activation_msg,
+                    )
             except Exception as e:
                 logger.error("CPAdapter ingress error: %s", e)
 
     async def _egress_worker(self) -> None:
         """Forward computed activations."""
+        loop = asyncio.get_running_loop()
+        q = self.runtime.activation_send_queue
+
         while self.running:
             try:
-                msg = await self._computed_q.get()
+                # Read from runtime queue
+                msg = await loop.run_in_executor(
+                    self.runtime.executor,
+                    lambda: q.get(timeout=0.5),
+                )
             except asyncio.CancelledError:
                 break
+            except (asyncio.QueueEmpty, queue.Empty):
+                continue
+            except Exception:
+                continue
 
-            # Forward to token queue if final, else to ring
+            # For CP, all outputs are final tokens (full replication)
+            # Unless we support mixed pipeline+CP later.
             if msg.is_final:
                 await self._token_q.put(msg)
+            else:
+                logger.warning("CPAdapter received non-final output, dropping")
+
+    async def _token_tx_worker(self) -> None:
+        """Send generated tokens back to API."""
+        while self.running:
+            try:
+                msg = await self._token_q.get()
+            except asyncio.CancelledError:
+                break
+            await self._send_token(msg)
+
+    async def _send_token(self, msg: ActivationMessage) -> None:
+        """
+        Final-hop delivery of a sampled token to the API.
+        """
+        # Pick the callback address
+        cb = msg.callback_url or ""
+        addr: Optional[str] = None
+
+        if cb:
+            parsed = urlparse(cb)
+            if parsed.scheme == "grpc" and parsed.netloc:
+                addr = parsed.netloc
+            else:
+                logger.error(
+                    "Shard %s: invalid gRPC callback URL for token: %s",
+                    self.runtime.shard_id,
+                    cb,
+                )
+                return
+        elif self.api_callback_address:
+            # Fallback to load_model-provided address: host:port
+            addr = self.api_callback_address
+        else:
+            logger.error(
+                "Shard %s: no callback URL for final token; nonce=%s",
+                self.runtime.shard_id,
+                msg.nonce,
+            )
+            return
+
+        try:
+            if (self.api_channel is None) or (addr != self.api_address):
+                # Close old channel if any
+                try:
+                    if self.api_channel is not None:
+                        await self.api_channel.close()
+                except Exception:
+                    pass
+
+                self.api_address = addr
+                self.api_channel = aio_grpc.insecure_channel(
+                    addr, options=GRPC_AIO_OPTIONS
+                )
+                self.api_stub = shard_api_comm_pb2_grpc.ShardApiServiceStub(
+                    self.api_channel
+                )
+        except Exception as e:
+            logger.error(
+                "Shard %s: failed to create API channel for %s: %s",
+                self.runtime.shard_id,
+                addr,
+                e,
+            )
+            return
+
+        # send token
+        t_rpc = time.perf_counter()
+        try:
+            token_id = int(getattr(msg, "token_id", -1))
+            logprob = float(getattr(msg, "logprob", 0.0))
+            top_logprobs = getattr(msg, "top_logprobs", {}) or {}
+
+            req = shard_api_comm_pb2.TokenRequest(
+                nonce=msg.nonce,
+                token_id=token_id,
+                timestamp=utc_epoch_now(),
+                logprob=logprob,
+                top_logprobs=top_logprobs,
+            )
+
+            if self.api_stub is None:
+                logger.error(
+                    "Shard %s: API stub not available for nonce=%s token=%s",
+                    self.runtime.shard_id,
+                    msg.nonce,
+                    token_id,
+                )
+                return
+
+            resp = await self.api_stub.SendToken(req, timeout=3.0)
+            rpc_ms = (time.perf_counter() - t_rpc) * 1000.0
+
+            if resp is None or not resp.success:
+                logger.error(
+                    "Shard %s: API SendToken failed for nonce=%s token=%s: %s",
+                    self.runtime.shard_id,
+                    msg.nonce,
+                    token_id,
+                    resp.message,
+                )
+            else:
+                logger.debug(
+                    "[TX-TOKEN] shard=%s nonce=%s token=%s rpc_ms=%.2f",
+                    self.runtime.shard_id,
+                    msg.nonce,
+                    token_id,
+                    rpc_ms,
+                )
+        except Exception as e:
+            logger.exception(
+                "Shard %s: error sending token via gRPC for nonce=%s: %s",
+                self.runtime.shard_id,
+                msg.nonce,
+                e,
+            )
 
     def select_algorithm_for_request(
         self,

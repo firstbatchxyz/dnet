@@ -389,13 +389,34 @@ class CPApiAdapter(ApiAdapterBase):
             self.num_ranks,
         )
 
+        # For decode (single token), send only to last rank
+        # This avoids empty chunks when splitting 1 token across multiple ranks
+        if num_tokens <= self.num_ranks:
+            # Decode mode: only last rank gets the token
+            last_rank = self.num_ranks - 1
+            await self._send_chunk_to_rank(
+                last_rank,
+                nonce,
+                tokens,
+                callback_addr,
+                logprobs,
+                top_logprobs,
+                decoding_config,
+                num_tokens,
+            )
+            return
+
         async def send_to_rank(rank: int) -> None:
-            # Shard the sequence for this rank
+            # Shard the sequence for this rank (prefill mode)
             chunk_mx, indices = shard_for_mode(
                 mx.array(full_tokens), self.num_ranks, rank, "prefill"
             )
             chunk = np.array(chunk_mx, dtype=np.int32)
             chunk_bytes = chunk.tobytes()
+
+            if len(chunk) == 0:
+                logger.debug("CP rank %d: skipping empty chunk", rank)
+                return
 
             logger.debug(
                 "CP rank %d: sending %d tokens (indices %d-%d)",
@@ -449,6 +470,66 @@ class CPApiAdapter(ApiAdapterBase):
 
         # Send to all ranks in parallel
         await asyncio.gather(*[send_to_rank(r) for r in range(self.num_ranks)])
+
+    async def _send_chunk_to_rank(
+        self,
+        rank: int,
+        nonce: str,
+        tokens: bytes,
+        callback_addr: str,
+        logprobs: bool,
+        top_logprobs: int,
+        decoding_config: Optional[Any],
+        num_tokens: int,
+    ) -> None:
+        """Send tokens directly to a specific rank (for decode phase)."""
+        logger.debug(
+            "CP decode: sending %d tokens directly to rank %d (last rank)",
+            num_tokens,
+            rank,
+        )
+
+        msg = ActivationMessage(
+            nonce=nonce,
+            pool_id=-1,
+            batch_size=1,
+            shape=(num_tokens,),
+            dtype="tokens",
+            layer_id=-1,
+            timestamp=utc_epoch_now(),
+            node_origin="api",
+            callback_url=f"grpc://{callback_addr}",
+            req_logprobs=logprobs,
+            req_top_logprobs=top_logprobs,
+            temperature=decoding_config.temperature if decoding_config else 1.0,
+            top_p=decoding_config.top_p if decoding_config else 1.0,
+            top_k=decoding_config.top_k if decoding_config else -1,
+            repetition_penalty=(
+                decoding_config.repetition_penalty if decoding_config else 1.0
+            ),
+            min_p=decoding_config.min_p if decoding_config else 0.0,
+            min_tokens_to_keep=(
+                decoding_config.min_tokens_to_keep if decoding_config else 1
+            ),
+        )
+        req = msg.to_proto(tokens)
+
+        stub = self.rank_stubs[rank]
+        streams = self._streams_by_rank[rank]
+        ctx = await streams.get_or_create_stream(
+            nonce,
+            lambda it: stub.StreamActivations(it),
+        )
+        if not ctx or not ctx.open:
+            raise RuntimeError(
+                f"Failed to create stream for rank {rank}, nonce {nonce}"
+            )
+
+        ctx.last_seq += 1
+        await ctx.queue.put(
+            pb2.ActivationFrame(request=req, seq=ctx.last_seq, end_of_request=False)
+        )
+        ctx.last_activity_t = asyncio.get_running_loop().time()
 
     async def await_token(self, nonce: str, timeout_s: float) -> TokenResult:
         fut = asyncio.get_running_loop().create_future()

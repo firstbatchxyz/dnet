@@ -21,7 +21,11 @@ For two-device CP, each device handles half the context window.
 import argparse
 import json
 import sys
+from pathlib import Path
 from typing import Literal
+
+# Add project root to sys.path to allow imports from scripts package
+sys.path.append(str(Path(__file__).parent.parent))
 
 import requests
 

@@ -14,7 +14,11 @@ import argparse
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
+
+# Add project root to sys.path to allow imports from scripts package
+sys.path.append(str(Path(__file__).parent.parent))
 
 import requests
 

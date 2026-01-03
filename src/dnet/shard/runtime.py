@@ -176,6 +176,8 @@ class ShardRuntime:
         self._assigned_sorted = sorted(self.assigned_layers)
         self._assigned_set = set(self._assigned_sorted)
         self.model_path = req.model_path
+        self.cp_rank_id = req.cp_rank_id
+        self.cp_num_ranks = req.cp_num_ranks
 
         if req.max_position_embeddings:
             logger.info(

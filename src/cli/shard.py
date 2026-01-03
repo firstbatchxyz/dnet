@@ -45,6 +45,7 @@ async def serve(
         from dnet.shard.adapters.context_parallel import CPAdapter
 
         logger.info("Context parallelism enabled - using CPAdapter")
+        # Initial defaults; actual rank/logic will be configured by API via LoadModel
         adapter = CPAdapter(
             runtime=runtime, discovery=discovery, rank_id=0, num_ranks=1
         )

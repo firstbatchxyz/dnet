@@ -114,11 +114,29 @@ class ModelManager:
                 try:
                     # Build API callback address (gRPC).
                     # For internet setups, allow explicit override to avoid advertising 127.0.0.1.
-                    cb_addr = (
+                    param_api_callback_addr = (
                         api_callback_address
                         if api_callback_address
                         else f"{api_properties.local_ip}:{grpc_port}"
                     )
+
+                    # Calculate Context Parallelism config
+                    # Device list in topology is strictly ordered by ring position
+                    cp_rank_addresses = [
+                        f"{d.local_ip}:{d.shard_port}" for d in topology.devices
+                    ]
+                    cp_num_ranks = len(cp_rank_addresses)
+                    # Find rank for current instance
+                    try:
+                        # Iterate to find index where instance matches
+                        cp_rank_id = next(
+                            i
+                            for i, d in enumerate(topology.devices)
+                            if d.instance == instance
+                        )
+                    except StopIteration:
+                        # Should not happen if topology is consistent
+                        cp_rank_id = 0
 
                     # Call load_model via HTTP (window_size unified)
                     url = f"http://{shard_props.local_ip}:{shard_props.server_port}/load_model"
@@ -132,7 +150,11 @@ class ModelManager:
                         residency_size=assignment.residency_size,
                         total_layers=topology.num_layers,
                         kv_bits=topology.kv_bits,
-                        api_callback_address=cb_addr,
+                        api_callback_address=param_api_callback_addr,
+                        # Context Parallel fields
+                        cp_rank_id=cp_rank_id,
+                        cp_num_ranks=cp_num_ranks,
+                        cp_rank_addresses=cp_rank_addresses,
                     ).model_dump()
 
                     # timeout is `None` because shards may actually be downloading weights

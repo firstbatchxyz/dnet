@@ -21,25 +21,42 @@ For two-device CP, each device handles half the context window.
 import argparse
 import json
 import sys
+from typing import Literal
 
 import requests
+from dnet_p2p import DnetDeviceProperties
+
+from dnet.api.models import ManualDevice, PrepareTopologyManualRequest
+from dnet.core.types.topology import LayerAssignment
 
 
-def get_default_kv_bits() -> str:
-    """Get default kv_bits from dnet settings (DNET_KV_MODE)."""
+def get_default_kv_bits() -> Literal["4bit", "8bit", "fp16"]:
+    """Get default kv_bits from dnet settings (DNET_KV_MODE/DNET_KV_BITS)."""
     try:
         from dnet.config import get_settings
 
-        return get_settings().kv_cache.mode
+        kv = get_settings().kv_cache
+        # Map mode to API kv_bits value
+        if kv.mode == "fp16":
+            return "fp16"
+        elif kv.mode == "4bit" or (kv.mode == "quant" and kv.bits == 4):
+            return "4bit"
+        else:
+            return "8bit"
     except ImportError:
-        return "4bit"
+        return "8bit"
 
 
-def get_devices(api_url: str) -> dict:
-    """Fetch available devices from API."""
+def get_devices(api_url: str) -> dict[str, DnetDeviceProperties]:
+    """Fetch available devices from API. Returns {instance: DnetDeviceProperties}."""
     response = requests.get(f"{api_url}/v1/devices")
     response.raise_for_status()
-    return response.json()
+    data = response.json()
+    devices_raw = data.get("devices", {})
+    return {
+        instance: DnetDeviceProperties(**props)
+        for instance, props in devices_raw.items()
+    }
 
 
 def get_model_config(model: str) -> dict:
@@ -61,50 +78,42 @@ def get_model_config(model: str) -> dict:
 def prepare_cp_topology(
     api_url: str,
     model: str,
-    devices: list[dict],
+    devices: list[ManualDevice],
     num_layers: int,
     seq_len: int,
-    kv_bits: str = "4bit",
+    kv_bits: Literal["4bit", "8bit", "fp16"],
 ) -> dict:
     """Prepare manual topology for CP mode (all shards get all layers)."""
     all_layers = list(range(num_layers))
 
     # For CP, each device gets ALL layers (full model replication)
-    assignments = []
+    assignments: list[LayerAssignment] = []
     for i, device in enumerate(devices):
         next_idx = (i + 1) % len(devices)
-        next_instance = devices[next_idx]["instance"]
+        next_instance = devices[next_idx].instance
 
         assignments.append(
-            {
-                "instance": device["instance"],
-                "layers": [all_layers],
-                "window_size": num_layers,
-                "next_instance": next_instance,
-            }
+            LayerAssignment(
+                instance=device.instance,
+                layers=[all_layers],
+                window_size=num_layers,
+                residency_size=num_layers,
+                next_instance=next_instance,
+            )
         )
 
-    device_props = [
-        {
-            "instance": d["instance"],
-            "local_ip": d["local_ip"],
-            "server_port": d["server_port"],
-            "shard_port": d["shard_port"],
-        }
-        for d in devices
-    ]
+    request = PrepareTopologyManualRequest(
+        model=model,
+        devices=devices,
+        assignments=assignments,
+        num_layers=num_layers,
+        kv_bits=kv_bits,
+    )
 
-    payload = {
-        "model": model,
-        "devices": device_props,
-        "assignments": assignments,
-        "num_layers": num_layers,
-        "kv_bits": kv_bits,
-        "seq_len": seq_len,
-        "max_batch_size": 1,
-    }
-
-    response = requests.post(f"{api_url}/v1/prepare_topology_manual", json=payload)
+    response = requests.post(
+        f"{api_url}/v1/prepare_topology_manual",
+        json=request.model_dump(),
+    )
     response.raise_for_status()
     return response.json()
 
@@ -117,7 +126,6 @@ def load_model(api_url: str, model: str) -> dict:
 
 
 def main():
-    # Get default kv_bits from settings
     default_kv_bits = get_default_kv_bits()
 
     parser = argparse.ArgumentParser(
@@ -168,32 +176,47 @@ Examples:
     args = parser.parse_args()
 
     api_url = args.api.rstrip("/")
+    kv_bits: Literal["4bit", "8bit", "fp16"] = args.kv_bits
 
     # Step 1: Discover devices
     print(f"[1/4] Fetching available devices from {api_url}...")
     try:
-        all_devices = get_devices(api_url)
+        devices_dict = get_devices(api_url)
     except requests.RequestException as e:
         print(f"Error: Could not connect to API at {api_url}: {e}")
         sys.exit(1)
 
-    shards = [d for d in all_devices.values() if not d.get("is_manager", False)]
+    # Build typed ManualDevice list, filtering out managers
+    all_devices: list[ManualDevice] = []
+    for instance, props in devices_dict.items():
+        if props.is_manager:
+            continue
+        all_devices.append(
+            ManualDevice(
+                instance=instance,
+                local_ip=props.local_ip,
+                server_port=props.server_port,
+                shard_port=props.shard_port,
+            )
+        )
 
-    if not shards:
+    if not all_devices:
         print("Error: No shards available. Make sure shard nodes are running.")
         sys.exit(1)
 
+    # Filter by requested shards if specified
+    shards = all_devices
     if args.shards:
         requested = set(args.shards.split(","))
-        shards = [s for s in shards if s["instance"] in requested]
+        shards = [d for d in all_devices if d.instance in requested]
         if not shards:
             print(f"Error: None of the requested shards found: {args.shards}")
-            print(f"Available: {[s['instance'] for s in all_devices.values()]}")
+            print(f"Available: {[d.instance for d in all_devices]}")
             sys.exit(1)
 
     print(f"    Using {len(shards)} shard(s) for Context Parallelism:")
     for i, s in enumerate(shards):
-        print(f"      [{i}] {s['instance']} ({s['local_ip']}:{s['server_port']})")
+        print(f"      [{i}] {s.instance} ({s.local_ip}:{s.server_port})")
 
     # Step 2: Get model config
     print(f"[2/4] Fetching model config for {args.model}...")
@@ -220,12 +243,12 @@ Examples:
             devices=shards,
             num_layers=num_layers,
             seq_len=seq_len,
-            kv_bits=args.kv_bits,
+            kv_bits=kv_bits,
         )
         print("    Topology prepared successfully")
         print(f"    Model: {topology.get('model')}")
-        devices_str = [a.get("instance") for a in topology.get("assignments", [])]
-        print(f"    Devices: {devices_str}")
+        assignments = topology.get("assignments", [])
+        print(f"    Devices: {[a.get('instance') for a in assignments]}")
     except requests.RequestException as e:
         print(f"Error: Failed to prepare topology: {e}")
         sys.exit(1)
@@ -241,8 +264,8 @@ Examples:
         print("=" * 60)
         print(f"  Model:      {args.model}")
         print(f"  CP Ranks:   {len(shards)}")
-        print(f"  Shards:     {', '.join(s['instance'] for s in shards)}")
-        print(f"  KV Bits:    {args.kv_bits}")
+        print(f"  Shards:     {', '.join(s.instance for s in shards)}")
+        print(f"  KV Bits:    {kv_bits}")
         print(f"  Seq Len:    {seq_len}")
         print()
         print(f"Each shard has the full model and will process 1/{len(shards)} of")

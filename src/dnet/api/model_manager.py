@@ -155,6 +155,7 @@ class ModelManager:
                         cp_rank_id=cp_rank_id,
                         cp_num_ranks=cp_num_ranks,
                         cp_rank_addresses=cp_rank_addresses,
+                        max_position_embeddings=topology.max_position_embeddings,
                     ).model_dump()
 
                     # timeout is `None` because shards may actually be downloading weights

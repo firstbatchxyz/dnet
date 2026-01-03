@@ -83,6 +83,7 @@ def prepare_cp_topology(
         devices=devices,
         assignments=assignments,
         num_layers=num_layers,
+        max_position_embeddings=seq_len,
         kv_bits=kv_bits,
     )
 

@@ -54,6 +54,9 @@ class ShardLoadModelRequest(BaseModel):
         default=8, description="Number of KV heads (for GQA models)"
     )
     head_dim: int = Field(default=128, description="Dimension per attention head")
+    max_position_embeddings: Optional[int] = Field(
+        default=None, description="Override model context length limit"
+    )
 
 
 class ShardLoadModelResponse(BaseModel):

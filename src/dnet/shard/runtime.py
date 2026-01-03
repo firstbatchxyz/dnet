@@ -177,6 +177,17 @@ class ShardRuntime:
         self._assigned_set = set(self._assigned_sorted)
         self.model_path = req.model_path
 
+        if req.max_position_embeddings:
+            logger.info(
+                "Overriding max_position_embeddings to %s", req.max_position_embeddings
+            )
+            # Override common config keys for context limit
+            self.model_metadata.model_config["max_position_embeddings"] = (
+                req.max_position_embeddings
+            )
+            self.model_metadata.model_config["seq_length"] = req.max_position_embeddings
+            self.model_metadata.model_config["n_ctx"] = req.max_position_embeddings
+
         local_count = max(1, len(self.assigned_layers))
         requested_w = max(1, int(req.window_size))
         n_residency = max(1, int(req.residency_size))

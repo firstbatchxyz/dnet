@@ -395,6 +395,7 @@ class HTTPServer:
                 model=req.model,
                 kv_bits=req.kv_bits,
                 num_layers=int(num_layers),
+                max_position_embeddings=req.max_position_embeddings,
                 devices=devices_props,
                 assignments=norm,
                 solution=None,

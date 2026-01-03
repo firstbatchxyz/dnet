@@ -345,6 +345,10 @@ class PrepareTopologyManualRequest(BaseModel):
         default=None,
         description="Total number of layers (optional; inferred if missing)",
     )
+    max_position_embeddings: Optional[int] = Field(
+        default=None,
+        description="Override model context length limit (e.g. for RoPE scaling)",
+    )
 
 
 class APILoadModelRequest(BaseModel):

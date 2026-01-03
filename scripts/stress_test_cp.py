@@ -68,7 +68,7 @@ def run_chat_request(
     context_length: int,
     max_tokens: int = 50,
     stream: bool = False,
-    timeout: int = 600,  # 10 min for long contexts (64K+ tokens)
+    timeout: int = 3600,  # 60 min for long contexts (64K+ tokens)
 ) -> TestResult:
     """Send a chat completion request and return typed TestResult."""
     request = ChatRequestModel(

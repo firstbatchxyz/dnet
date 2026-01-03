@@ -58,9 +58,11 @@ class CPTopologySolver(TopologySolver):
         ordering for minimal inter-device latency.
         """
 
-        # Filter out manager nodes - only include actual shards
+        # Filter out manager nodes - only include actual shards that have profiles
         active_shards = {
-            name: props for name, props in shards.items() if not props.is_manager
+            name: props
+            for name, props in shards.items()
+            if not props.is_manager and name in profiles
         }
 
         # Order devices by Thunderbolt connectivity for minimal latency

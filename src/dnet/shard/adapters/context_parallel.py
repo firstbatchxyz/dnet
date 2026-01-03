@@ -108,6 +108,7 @@ class CPAdapter(TopologyAdapter):
     async def start(self) -> None:
         """Start background workers."""
         self.running = True
+        self._loop = asyncio.get_running_loop()
         self._tasks = [
             asyncio.create_task(self._ingress_worker()),
             asyncio.create_task(self._egress_worker()),
@@ -119,6 +120,25 @@ class CPAdapter(TopologyAdapter):
             self.num_ranks,
             self._algorithm,
         )
+
+    def ring_pass_kv_attention_sync(
+        self,
+        query: mx.array,
+        key: mx.array,
+        value: mx.array,
+    ) -> mx.array:
+        """
+        Synchronous wrapper for ring attention, safe to call from compute threads.
+        Blocks until the async ring operation on the main loop completes.
+        """
+        if not self.running or not hasattr(self, "_loop"):
+            # Fallback to local if not running
+            return self._compute_attention_output(query, key, value)
+
+        future = asyncio.run_coroutine_threadsafe(
+            self.ring_pass_kv_attention(query, key, value), self._loop
+        )
+        return future.result()
 
     async def ingress(self) -> None:
         """Handle incoming activation requests."""
@@ -138,6 +158,12 @@ class CPAdapter(TopologyAdapter):
         # Extract CP config using direct field access
         self.rank_id = req.cp_rank_id
         self.num_ranks = req.cp_num_ranks
+
+        # Inject ourselves into the model
+        if self.runtime.model:
+            logger.info("CPAdapter: Injecting logic into model")
+            self.runtime.model.set_cp_adapter(self)
+
         self.api_callback_address = req.api_callback_address
 
         # Extract model attention config for algorithm selection

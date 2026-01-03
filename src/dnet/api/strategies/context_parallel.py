@@ -23,6 +23,7 @@ from dnet.protos import dnet_ring_pb2 as pb2
 from dnet.protos.dnet_ring_pb2_grpc import DnetRingServiceStub
 from dnet.utils.time import utc_epoch_now
 from dnet.core.types.messages import ActivationMessage
+from dnet.core.cp.sharding import shard_for_mode
 from .base import Strategy, ApiAdapterBase
 
 
@@ -404,61 +405,45 @@ class CPApiAdapter(ApiAdapterBase):
             )
             return
 
-        # For prefill: broadcast FULL tokens to ALL ranks
-        # Ring Attention needs each rank to see the full context to compute
-        # correct Q, K, V - actual savings come from sharded KV cache and ring reduction
-        async def send_full_to_rank(rank: int) -> None:
-            logger.debug(
-                "CP rank %d: broadcasting full %d tokens",
+        # Phase 5: True Ring Attention (Sharded KV)
+        # Use load-balanced 2N sharding for prefill to ensure each rank stores only 1/N KV.
+        # The CPAttentionWrapper will use CPAdapter to rotate KV blocks.
+
+        # Helper to send sharded chunk to a rank
+        async def send_shard_to_rank(rank: int) -> None:
+            import mlx.core as mx
+            import numpy as np
+
+            # shard_for_mode expects mx.array, convert from numpy
+            mx_tokens = mx.array(full_tokens)
+
+            # Get shard for this rank (prefill mode)
+            sharded_chunk_mx, _ = shard_for_mode(
+                mx_tokens, self.num_ranks, rank, "prefill"
+            )
+
+            # Convert back to bytes for network transmission
+            # mx.array -> numpy -> bytes
+            chunk_np = np.array(sharded_chunk_mx)
+            chunk_bytes = chunk_np.tobytes()
+
+            # Only the last rank should sample/generate tokens
+            is_last_rank = rank == self.num_ranks - 1
+
+            # Use existing send helper
+            await self._send_chunk_to_rank(
                 rank,
-                num_tokens,
-            )
-
-            msg = ActivationMessage(
-                nonce=nonce,
-                pool_id=-1,
-                batch_size=1,
-                shape=(num_tokens,),
-                dtype="tokens",
-                layer_id=-1,
-                timestamp=utc_epoch_now(),
-                node_origin="api",
-                callback_url=f"grpc://{callback_addr}",
-                req_logprobs=logprobs,
-                req_top_logprobs=top_logprobs,
-                temperature=decoding_config.temperature if decoding_config else 1.0,
-                top_p=decoding_config.top_p if decoding_config else 1.0,
-                top_k=decoding_config.top_k if decoding_config else -1,
-                repetition_penalty=(
-                    decoding_config.repetition_penalty if decoding_config else 1.0
-                ),
-                min_p=decoding_config.min_p if decoding_config else 0.0,
-                min_tokens_to_keep=(
-                    decoding_config.min_tokens_to_keep if decoding_config else 1
-                ),
-            )
-            req = msg.to_proto(tokens)  # Send full tokens, not chunks
-
-            stub = self.rank_stubs[rank]
-            assert stub is not None, f"rank_stub[{rank}] should be set"
-            streams = self._streams_by_rank[rank]
-            ctx = await streams.get_or_create_stream(
                 nonce,
-                lambda it: stub.StreamActivations(it),
+                chunk_bytes,
+                callback_addr,
+                logprobs if is_last_rank else False,
+                top_logprobs if is_last_rank else 0,
+                decoding_config if is_last_rank else None,
+                len(chunk_np),
             )
-            if not ctx or not ctx.open:
-                raise RuntimeError(
-                    f"Failed to create stream for rank {rank}, nonce {nonce}"
-                )
 
-            ctx.last_seq += 1
-            await ctx.queue.put(
-                pb2.ActivationFrame(request=req, seq=ctx.last_seq, end_of_request=False)
-            )
-            ctx.last_activity_t = asyncio.get_running_loop().time()
-
-        # Broadcast to all ranks in parallel
-        await asyncio.gather(*[send_full_to_rank(r) for r in range(self.num_ranks)])
+        # Send sharded chunks to all ranks in parallel
+        await asyncio.gather(*[send_shard_to_rank(r) for r in range(self.num_ranks)])
 
     async def _send_chunk_to_rank(
         self,

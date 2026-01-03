@@ -99,6 +99,7 @@ def run_needle_test(
     context_size: int,
     needle_position: float,
     timeout: float = 120.0,
+    model: str = "default",
 ) -> dict:
     """
     Run a single needle in haystack test.
@@ -140,7 +141,7 @@ What is the secret password mentioned in the document above? Reply with ONLY the
             response = client.post(
                 f"{api_url}/v1/chat/completions",
                 json={
-                    "model": "default",
+                    "model": model,
                     "messages": [{"role": "user", "content": prompt}],
                     "max_tokens": 256,  # Qwen3 uses thinking mode, needs more tokens
                     "temperature": 0.0,  # Deterministic
@@ -182,7 +183,12 @@ What is the secret password mentioned in the document above? Reply with ONLY the
     }
 
 
-def run_full_test_suite(api_url: str, context_sizes: list[int], timeout: float) -> None:
+def run_full_test_suite(
+    api_url: str,
+    context_sizes: list[int],
+    timeout: float,
+    model: str = "default",
+) -> None:
     """Run full test suite across context sizes and needle positions."""
     positions = [0.1, 0.25, 0.5, 0.75, 0.9]  # Test needle at different depths
 
@@ -190,7 +196,7 @@ def run_full_test_suite(api_url: str, context_sizes: list[int], timeout: float) 
 
     for ctx_size in context_sizes:
         for pos in positions:
-            result = run_needle_test(api_url, ctx_size, pos, timeout)
+            result = run_needle_test(api_url, ctx_size, pos, timeout, model=model)
             result["target_context"] = ctx_size
             results.append(result)
 
@@ -255,15 +261,23 @@ def main():
         "--timeout", type=float, default=300.0, help="Request timeout in seconds"
     )
 
+    parser.add_argument(
+        "--model",
+        default="default",
+        help="Model name to use for requests",
+    )
+
     args = parser.parse_args()
 
     if args.context_size:
         # Single test
-        run_needle_test(args.api, args.context_size, args.position, args.timeout)
+        run_needle_test(
+            args.api, args.context_size, args.position, args.timeout, model=args.model
+        )
     else:
         # Full suite
         sizes = [int(s.strip()) for s in args.sizes.split(",")]
-        run_full_test_suite(args.api, sizes, args.timeout)
+        run_full_test_suite(args.api, sizes, args.timeout, model=args.model)
 
 
 if __name__ == "__main__":

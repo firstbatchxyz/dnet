@@ -57,9 +57,15 @@ class CPTopologySolver(TopologySolver):
         For CP, all devices get the full model. We optimize the ring
         ordering for minimal inter-device latency.
         """
+
+        # Filter out manager nodes - only include actual shards
+        active_shards = {
+            name: props for name, props in shards.items() if not props.is_manager
+        }
+
         # Order devices by Thunderbolt connectivity for minimal latency
         ordered_instances = self._optimize_ring_order(
-            profiles, thunderbolts, list(shards.keys())
+            profiles, thunderbolts, list(active_shards.keys())
         )
 
         # Build layer assignments as list of LayerAssignment objects

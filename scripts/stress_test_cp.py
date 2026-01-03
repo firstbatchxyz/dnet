@@ -85,54 +85,91 @@ def run_chat_request(
     start_time = time.time()
 
     if stream:
-        response = requests.post(
-            f"{api_url}/v1/chat/completions",
-            json=request.model_dump(),
-            stream=True,
-            timeout=timeout,
-        )
-        response.raise_for_status()
+        try:
+            response = requests.post(
+                f"{api_url}/v1/chat/completions",
+                json=request.model_dump(),
+                stream=True,
+                timeout=timeout,
+            )
+            if not response.ok:
+                return TestResult(
+                    context_length=context_length,
+                    prompt_chars=prompt_chars,
+                    success=False,
+                    total_time_s=time.time() - start_time,
+                    error=f"{response.status_code} {response.reason}: {response.text}",
+                    stream=True,
+                )
 
-        chunks = []
-        first_token_time: Optional[float] = None
-        for line in response.iter_lines():
-            if line:
-                decoded = line.decode("utf-8")
-                if decoded.startswith("data: ") and decoded != "data: [DONE]":
-                    if first_token_time is None:
-                        first_token_time = time.time()
-                    chunks.append(decoded[6:])
+            chunks = []
+            first_token_time: Optional[float] = None
+            for line in response.iter_lines():
+                if line:
+                    decoded = line.decode("utf-8")
+                    if decoded.startswith("data: ") and decoded != "data: [DONE]":
+                        if first_token_time is None:
+                            first_token_time = time.time()
+                        chunks.append(decoded[6:])
 
-        end_time = time.time()
-        return TestResult(
-            context_length=context_length,
-            prompt_chars=prompt_chars,
-            success=True,
-            total_time_s=end_time - start_time,
-            time_to_first_token_s=(first_token_time - start_time)
-            if first_token_time
-            else None,
-            num_chunks=len(chunks),
-            stream=True,
-        )
+            end_time = time.time()
+            return TestResult(
+                context_length=context_length,
+                prompt_chars=prompt_chars,
+                success=True,
+                total_time_s=end_time - start_time,
+                time_to_first_token_s=(first_token_time - start_time)
+                if first_token_time
+                else None,
+                num_chunks=len(chunks),
+                stream=True,
+            )
+        except requests.RequestException as e:
+            return TestResult(
+                context_length=context_length,
+                prompt_chars=prompt_chars,
+                success=False,
+                total_time_s=time.time() - start_time,
+                error=str(e),
+                stream=True,
+            )
+
     else:
-        response = requests.post(
-            f"{api_url}/v1/chat/completions",
-            json=request.model_dump(),
-            timeout=timeout,
-        )
-        response.raise_for_status()
-        end_time = time.time()
+        try:
+            response = requests.post(
+                f"{api_url}/v1/chat/completions",
+                json=request.model_dump(),
+                timeout=timeout,
+            )
+            if not response.ok:
+                return TestResult(
+                    context_length=context_length,
+                    prompt_chars=prompt_chars,
+                    success=False,
+                    total_time_s=time.time() - start_time,
+                    error=f"{response.status_code} {response.reason}: {response.text}",
+                    stream=False,
+                )
 
-        chat_response = ChatResponseModel.model_validate(response.json())
-        return TestResult(
-            context_length=context_length,
-            prompt_chars=prompt_chars,
-            success=True,
-            total_time_s=end_time - start_time,
-            response=chat_response,
-            stream=False,
-        )
+            end_time = time.time()
+            chat_response = ChatResponseModel.model_validate(response.json())
+            return TestResult(
+                context_length=context_length,
+                prompt_chars=prompt_chars,
+                success=True,
+                total_time_s=end_time - start_time,
+                response=chat_response,
+                stream=False,
+            )
+        except requests.RequestException as e:
+            return TestResult(
+                context_length=context_length,
+                prompt_chars=prompt_chars,
+                success=False,
+                total_time_s=time.time() - start_time,
+                error=str(e),
+                stream=False,
+            )
 
 
 def run_stress_test(

@@ -141,7 +141,7 @@ What is the secret password mentioned in the document above? Reply with ONLY the
                 json={
                     "model": "default",
                     "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 50,
+                    "max_tokens": 256,  # Qwen3 uses thinking mode, needs more tokens
                     "temperature": 0.0,  # Deterministic
                 },
             )

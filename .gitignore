@@ -47,3 +47,4 @@ repacked_models/*
 # Env files
 *.env*
 !.env*.example
+dnet-tui/

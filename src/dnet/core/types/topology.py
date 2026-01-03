@@ -37,6 +37,9 @@ class TopologyInfo(BaseModel):
         ..., description="KV cache quantization used by solver and shards"
     )
     num_layers: int = Field(..., description="Total number of layers in model")
+    max_position_embeddings: Optional[int] = Field(
+        default=None, description="Override model context length limit"
+    )
     devices: List[DnetDeviceProperties] = Field(
         ..., description="Devices (in solver order)"
     )

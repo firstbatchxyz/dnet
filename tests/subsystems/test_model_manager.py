@@ -260,3 +260,76 @@ def test_load_model_non200_response_causes_failure(monkeypatch):
         assert mm.current_model_id is None
 
     asyncio.run(main())
+
+
+def test_load_model_cp_fields_populated(monkeypatch):
+    """Verify that CP rank fields are correctly populated in load_model requests."""
+    topo, dev1, dev2 = _mk_topology()
+    mm = ModelManager()
+
+    rec = {}
+
+    def _mk_post(url):
+        def f(payload):
+            rec[url] = payload
+            return FakeResponse(
+                200,
+                {
+                    "success": True,
+                    "message": "ok",
+                    "layers_loaded": payload["layers"],
+                    "load_time_ms": 1.0,
+                },
+            )
+
+        return f
+
+    post_map = {
+        f"http://{dev1.local_ip}:{dev1.server_port}/load_model": _mk_post(
+            f"http://{dev1.local_ip}:{dev1.server_port}/load_model"
+        ),
+        f"http://{dev2.local_ip}:{dev2.server_port}/load_model": _mk_post(
+            f"http://{dev2.local_ip}:{dev2.server_port}/load_model"
+        ),
+    }
+
+    monkeypatch.setattr(
+        "httpx.AsyncClient", lambda: FakeClient({}, post_map), raising=True
+    )
+    monkeypatch.setattr(
+        "dnet.api.model_manager.resolve_tokenizer_dir",
+        lambda m: "/tmp/dir",
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "dnet.api.model_manager.load_tokenizer", lambda d, cfg: object(), raising=True
+    )
+
+    api_props = DnetDeviceProperties(
+        is_manager=True,
+        is_busy=False,
+        instance="API",
+        server_port=0,
+        shard_port=0,
+        local_ip="1.1.1.1",
+    )
+
+    async def main():
+        res = await mm.load_model(topo, api_props, grpc_port=5050)
+        assert res.success is True
+
+        # Verify S1 payload (Rank 0)
+        p1 = rec[f"http://{dev1.local_ip}:{dev1.server_port}/load_model"]
+        assert p1["cp_rank_id"] == 0
+        assert p1["cp_num_ranks"] == 2
+        # Check addresses: dev1 is 10.0.0.1:9011, dev2 is 10.0.0.2:9012
+        expected_addrs = ["10.0.0.1:9011", "10.0.0.2:9012"]
+        assert p1["cp_rank_addresses"] == expected_addrs
+
+        # Verify S2 payload (Rank 1)
+        p2 = rec[f"http://{dev2.local_ip}:{dev2.server_port}/load_model"]
+        assert p2["cp_rank_id"] == 1
+        assert p2["cp_num_ranks"] == 2
+        assert p2["cp_rank_addresses"] == expected_addrs
+
+    asyncio.run(main())

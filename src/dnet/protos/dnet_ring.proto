@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package dnetring;
 
+import "dnet_cp.proto";
+
 // The service for running distributed inference over a ring
 service DnetRingService {
     // Send activation data to the next node in the ring
@@ -44,6 +46,9 @@ message ActivationRequest {
     optional float repetition_penalty = 11;
     optional float min_p = 12;
     optional int32 min_tokens_to_keep = 13;
+
+    // Context parallelism configuration (if CP mode enabled)
+    optional dnetcp.CPConfig cp_config = 14;
 }
 
 // Response message for activation sending

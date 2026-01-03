@@ -5,6 +5,7 @@ from typing import Any, Optional, Tuple, Dict, Set, List
 
 import mlx.core as mx
 import mlx.nn as nn
+from dnet.utils.logger import logger
 
 
 class BaseRingModel(nn.Module, metaclass=ABCMeta):
@@ -15,6 +16,39 @@ class BaseRingModel(nn.Module, metaclass=ABCMeta):
     """
 
     model_type: Optional[str] = None
+
+    # Context Parallel injection
+    cp_adapter: Optional[Any] = None
+
+    def set_cp_adapter(self, adapter: Any) -> None:
+        """Inject Context Parallel adapter and wrap attention layers."""
+        from .cp_layers import CPAttentionWrapper
+
+        self.cp_adapter = adapter
+        if not adapter or adapter.num_ranks <= 1:
+            return
+
+        logger.info(
+            "BaseRingModel: Injecting CPAttentionWrapper into %d layers",
+            len(self.layers),
+        )
+
+        # Iterate over all hosted layers and wrap their attention module
+        # Note: self.layers might be exposed by subclasses or not.
+        # BaseRingModel doesn't define self.layers explicitly but implies it via iteration code elsewhere.
+        # We try accessing it, if it fails, catch it?
+        # load_weights uses getattr(self, "layers", []).
+
+        layers = getattr(self, "layers", []) or []
+        for i, layer in enumerate(layers):
+            if hasattr(layer, "self_attn"):
+                # Avoid double-wrapping
+                if isinstance(layer.self_attn, CPAttentionWrapper):
+                    logger.debug("Layer %d already has CP adapter, skipping wrap", i)
+                    continue
+
+                # Wrap existing attention module
+                layer.self_attn = CPAttentionWrapper(layer.self_attn, adapter)
 
     @abstractmethod
     def embed(self, x: mx.array) -> mx.array:

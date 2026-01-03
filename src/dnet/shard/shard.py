@@ -10,11 +10,12 @@ app = FastAPI(); attach_routes(app, shard)
 """
 
 import asyncio
+from typing import Any, Optional
+
 from .runtime import ShardRuntime
 from .adapters.base import TopologyAdapter
 from dnet.protos.dnet_ring_pb2 import ActivationRequest
 from .models import ShardLoadModelResponse, ShardUnloadModelResponse
-
 
 from dnet.utils.repack import delete_repacked_layers
 
@@ -24,6 +25,8 @@ class Shard:
         self.node_id = shard_id
         self.adapter = adapter
         self.runtime: ShardRuntime = adapter.runtime
+        # Optional reference to gRPC server (set by CLI) for CP servicer wiring
+        self.grpc_server: Optional[Any] = None
 
     async def start(self, loop: asyncio.AbstractEventLoop) -> None:
         self.runtime.attach_loop(loop)
@@ -50,6 +53,20 @@ class Shard:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self.runtime.load_model_core, req)
         await self.adapter.configure_topology(req)
+
+        # Wire CP ring_comm to gRPC servicer if using CPAdapter
+        from dnet.shard.adapters.context_parallel import CPAdapter
+
+        if isinstance(self.adapter, CPAdapter) and self.grpc_server:
+            if (
+                hasattr(self.grpc_server, "cp_servicer")
+                and self.grpc_server.cp_servicer
+            ):
+                if self.adapter.ring_comm:
+                    self.grpc_server.cp_servicer.attach_communicator(
+                        self.adapter.ring_comm
+                    )
+
         return ShardLoadModelResponse(
             success=True,
             message="Model loaded successfully",

@@ -91,6 +91,7 @@ class HTTPServer:
             methods=["POST"],
         )
         self.app.add_api_route("/v1/devices", self.get_devices, methods=["GET"])
+        self.app.add_api_route("/v1/settings", self.get_settings, methods=["GET"])
 
     async def health(self) -> HealthResponse:
         return HealthResponse(
@@ -201,10 +202,26 @@ class HTTPServer:
                 api_callback_address=api_callback_addr,
             )
             if response.success:
-                first_shard = topology.devices[0]
-                await self.inference_manager.connect_to_ring(
-                    first_shard.local_ip, first_shard.shard_port, api_callback_addr
-                )
+                # Connect inference manager to shard(s)
+                # For CP with multiple devices, connect to all ranks
+                from dnet.api.strategies.context_parallel import CPApiAdapter
+
+                if (
+                    isinstance(self.inference_manager.adapter, CPApiAdapter)
+                    and len(topology.devices) > 1
+                ):
+                    rank_addresses = [
+                        f"{d.local_ip}:{d.shard_port}" for d in topology.devices
+                    ]
+                    await self.inference_manager.connect_to_cp_ranks(
+                        rank_addresses, api_callback_addr
+                    )
+                else:
+                    # Standard ring or single device
+                    first_shard = topology.devices[0]
+                    await self.inference_manager.connect_to_ring(
+                        first_shard.local_ip, first_shard.shard_port, api_callback_addr
+                    )
             return response
 
         except Exception as e:
@@ -239,6 +256,13 @@ class HTTPServer:
             instance: props.model_dump() for instance, props in devices.items()
         }
         return JSONResponse(content={"devices": devices_dict})
+
+    async def get_settings(self) -> JSONResponse:
+        """Return current dnet settings (all settings dumped for easy deserialization)."""
+        from dnet.config import get_settings
+
+        settings = get_settings()
+        return JSONResponse(content=settings.model_dump())
 
     async def get_topology(self) -> TopologyInfo:
         topo = self.cluster_manager.current_topology
@@ -387,6 +411,7 @@ class HTTPServer:
                 model=req.model,
                 kv_bits=req.kv_bits,
                 num_layers=int(num_layers),
+                max_position_embeddings=req.max_position_embeddings,
                 devices=devices_props,
                 assignments=norm,
                 solution=None,

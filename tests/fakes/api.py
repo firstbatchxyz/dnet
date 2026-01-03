@@ -266,6 +266,7 @@ class FakeInferenceManager:
         self.connected: tuple[str, int, str] | None = None
         self.calls: list = []
         self.last: tuple | None = None
+        self.adapter = None  # Not CPApiAdapter, so http_api uses connect_to_ring
 
     def resolve_request(self, *a, **k):
         self.last = (a, k)

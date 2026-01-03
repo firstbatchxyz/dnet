@@ -111,4 +111,9 @@ class CPAttentionWrapper(nn.Module):
         return output
 
     def __getattr__(self, name: str):
+        if name == "base_attn":
+            # Prevent infinite recursion if base_attn is missing
+            raise AttributeError(
+                f"'{type(self).__name__}' object has no attribute 'base_attn'"
+            )
         return getattr(self.base_attn, name)

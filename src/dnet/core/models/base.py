@@ -42,6 +42,11 @@ class BaseRingModel(nn.Module, metaclass=ABCMeta):
         layers = getattr(self, "layers", []) or []
         for i, layer in enumerate(layers):
             if hasattr(layer, "self_attn"):
+                # Avoid double-wrapping
+                if isinstance(layer.self_attn, CPAttentionWrapper):
+                    logger.debug("Layer %d already has CP adapter, skipping wrap", i)
+                    continue
+
                 # Wrap existing attention module
                 layer.self_attn = CPAttentionWrapper(layer.self_attn, adapter)
 

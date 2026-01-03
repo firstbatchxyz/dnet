@@ -346,6 +346,8 @@ def test_invalid_kv_bits_fallback(monkeypatch):
             "kv_bits": "invalid",
             "api_callback_address": "cb",
             "max_position_embeddings": None,
+            "cp_rank_id": 0,
+            "cp_num_ranks": 1,
         },
     )()
     rt.load_model_core(req)

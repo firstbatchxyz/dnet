@@ -163,7 +163,7 @@ class InferenceManager:
                 top_logprobs=req.top_logprobs if req.top_logprobs else 0,
                 decoding_config=decoding_config,
             )
-            result = await self.adapter.await_token(nonce, timeout_s=300.0)
+            result = await self.adapter.await_token(nonce, timeout_s=3600.0)
             token = int(result.token_id)
 
             # Accumulate logprobs

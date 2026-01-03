@@ -373,10 +373,8 @@ class CPApiAdapter(ApiAdapterBase):
         top_logprobs: int,
         decoding_config: Optional[Any],
     ) -> None:
-        """Multi-rank send: split tokens and broadcast to all ranks."""
+        """Multi-rank send: broadcast full tokens to all ranks for Ring Attention."""
         import numpy as np
-        from dnet.core.cp.sharding import shard_for_mode
-        import mlx.core as mx
 
         # Deserialize full token sequence
         full_tokens = np.frombuffer(tokens, dtype=np.int32)
@@ -406,31 +404,21 @@ class CPApiAdapter(ApiAdapterBase):
             )
             return
 
-        async def send_to_rank(rank: int) -> None:
-            # Shard the sequence for this rank (prefill mode)
-            chunk_mx, indices = shard_for_mode(
-                mx.array(full_tokens), self.num_ranks, rank, "prefill"
-            )
-            chunk = np.array(chunk_mx, dtype=np.int32)
-            chunk_bytes = chunk.tobytes()
-
-            if len(chunk) == 0:
-                logger.debug("CP rank %d: skipping empty chunk", rank)
-                return
-
+        # For prefill: broadcast FULL tokens to ALL ranks
+        # Ring Attention needs each rank to see the full context to compute
+        # correct Q, K, V - actual savings come from sharded KV cache and ring reduction
+        async def send_full_to_rank(rank: int) -> None:
             logger.debug(
-                "CP rank %d: sending %d tokens (indices %d-%d)",
+                "CP rank %d: broadcasting full %d tokens",
                 rank,
-                len(chunk),
-                indices[0] if indices else 0,
-                indices[-1] if indices else 0,
+                num_tokens,
             )
 
             msg = ActivationMessage(
                 nonce=nonce,
                 pool_id=-1,
                 batch_size=1,
-                shape=(len(chunk),),
+                shape=(num_tokens,),
                 dtype="tokens",
                 layer_id=-1,
                 timestamp=utc_epoch_now(),
@@ -449,9 +437,10 @@ class CPApiAdapter(ApiAdapterBase):
                     decoding_config.min_tokens_to_keep if decoding_config else 1
                 ),
             )
-            req = msg.to_proto(chunk_bytes)
+            req = msg.to_proto(tokens)  # Send full tokens, not chunks
 
             stub = self.rank_stubs[rank]
+            assert stub is not None, f"rank_stub[{rank}] should be set"
             streams = self._streams_by_rank[rank]
             ctx = await streams.get_or_create_stream(
                 nonce,
@@ -468,8 +457,8 @@ class CPApiAdapter(ApiAdapterBase):
             )
             ctx.last_activity_t = asyncio.get_running_loop().time()
 
-        # Send to all ranks in parallel
-        await asyncio.gather(*[send_to_rank(r) for r in range(self.num_ranks)])
+        # Broadcast to all ranks in parallel
+        await asyncio.gather(*[send_full_to_rank(r) for r in range(self.num_ranks)])
 
     async def _send_chunk_to_rank(
         self,

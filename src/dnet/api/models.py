@@ -4,7 +4,8 @@ import base64
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Union, Literal
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
+
 
 from dnet.core.types.topology import LayerAssignment
 
@@ -107,13 +108,6 @@ class ChatParams(BaseModel):
         # FIXME: why do this?
         if isinstance(self.stop, str):
             self.stop = [self.stop]
-
-    @field_validator("logprobs")
-    def non_negative_tokens(cls, v: Any) -> Any:
-        """Validate logprobs parameter."""
-        if v != -1 and not (0 < v <= 10):
-            raise ValueError(f"logprobs must be between 1 and 10 but got {v:,}")
-        return v
 
 
 class ChatUsage(BaseModel):

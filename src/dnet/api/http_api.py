@@ -91,6 +91,7 @@ class HTTPServer:
             methods=["POST"],
         )
         self.app.add_api_route("/v1/devices", self.get_devices, methods=["GET"])
+        self.app.add_api_route("/v1/settings", self.get_settings, methods=["GET"])
 
     async def health(self) -> HealthResponse:
         return HealthResponse(
@@ -239,6 +240,13 @@ class HTTPServer:
             instance: props.model_dump() for instance, props in devices.items()
         }
         return JSONResponse(content={"devices": devices_dict})
+
+    async def get_settings(self) -> JSONResponse:
+        """Return current dnet settings (all settings dumped for easy deserialization)."""
+        from dnet.config import get_settings
+
+        settings = get_settings()
+        return JSONResponse(content=settings.model_dump())
 
     async def get_topology(self) -> TopologyInfo:
         topo = self.cluster_manager.current_topology

@@ -24,39 +24,11 @@ import sys
 from typing import Literal
 
 import requests
-from dnet_p2p import DnetDeviceProperties
 
 from dnet.api.models import ManualDevice, PrepareTopologyManualRequest
 from dnet.core.types.topology import LayerAssignment
 
-
-def get_default_kv_bits() -> Literal["4bit", "8bit", "fp16"]:
-    """Get default kv_bits from dnet settings (DNET_KV_MODE/DNET_KV_BITS)."""
-    try:
-        from dnet.config import get_settings
-
-        kv = get_settings().kv_cache
-        # Map mode to API kv_bits value
-        if kv.mode == "fp16":
-            return "fp16"
-        elif kv.mode == "4bit" or (kv.mode == "quant" and kv.bits == 4):
-            return "4bit"
-        else:
-            return "8bit"
-    except ImportError:
-        return "8bit"
-
-
-def get_devices(api_url: str) -> dict[str, DnetDeviceProperties]:
-    """Fetch available devices from API. Returns {instance: DnetDeviceProperties}."""
-    response = requests.get(f"{api_url}/v1/devices")
-    response.raise_for_status()
-    data = response.json()
-    devices_raw = data.get("devices", {})
-    return {
-        instance: DnetDeviceProperties(**props)
-        for instance, props in devices_raw.items()
-    }
+from scripts.cp_utils import get_kv_bits_from_server, get_devices
 
 
 def get_model_config(model: str) -> dict:
@@ -126,11 +98,10 @@ def load_model(api_url: str, model: str) -> dict:
 
 
 def main():
-    default_kv_bits = get_default_kv_bits()
-
     parser = argparse.ArgumentParser(
         description="Prepare and load model for Context Parallelism",
         epilog="""
+
 Examples:
     # Auto-discover all shards and use them for CP
     uv run scripts/prepare_cp_model.py Qwen/Qwen3-4B-MLX-4bit
@@ -161,13 +132,6 @@ Examples:
         help="Comma-separated shard instance names (default: all available)",
     )
     parser.add_argument(
-        "--kv-bits",
-        type=str,
-        choices=["4bit", "8bit", "fp16"],
-        default=default_kv_bits,
-        help=f"KV cache quantization (default: {default_kv_bits} from DNET_KV_MODE)",
-    )
-    parser.add_argument(
         "--seq-len",
         type=int,
         default=None,
@@ -176,7 +140,9 @@ Examples:
     args = parser.parse_args()
 
     api_url = args.api.rstrip("/")
-    kv_bits: Literal["4bit", "8bit", "fp16"] = args.kv_bits
+
+    # Get kv_bits from server settings
+    kv_bits = get_kv_bits_from_server(api_url)
 
     # Step 1: Discover devices
     print(f"[1/4] Fetching available devices from {api_url}...")

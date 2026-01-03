@@ -152,7 +152,13 @@ class FitInMemoryPolicy(ComputePolicy):
                             with self.runtime._mlx_lock:
                                 # We only need the last token's logits for next-token prediction
                                 # Slicing here drastically reduces memory usage (avoiding [B, S, V] projection)
-                                x_last = x_cast[:, -1:, :]
+                                # Handle both 3D [B, S, H] and 2D [S, H] tensors
+                                if len(x_cast.shape) >= 3:
+                                    x_last = x_cast[:, -1:, :]
+                                elif len(x_cast.shape) == 2:
+                                    x_last = x_cast[-1:, :]
+                                else:
+                                    x_last = x_cast  # 1D or scalar, use as-is
                                 y = self.runtime.model.normalize(x_last)
                                 y = self.runtime.model.lm_project(y)
 

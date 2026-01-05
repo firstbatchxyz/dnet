@@ -295,6 +295,7 @@ class CPApiAdapter(ApiAdapterBase):
         logprobs: bool = False,
         top_logprobs: int = 0,
         decoding_config: Optional[Any] = None,
+        start_pos: int = 0,
     ) -> None:
         """Send tokens to all CP ranks (split and broadcast).
 
@@ -305,7 +306,13 @@ class CPApiAdapter(ApiAdapterBase):
         if self.num_ranks > 1 and self.rank_stubs:
             # Multi-rank mode: split and broadcast
             await self._send_tokens_multi_rank(
-                nonce, tokens, callback_addr, logprobs, top_logprobs, decoding_config
+                nonce,
+                tokens,
+                callback_addr,
+                logprobs,
+                top_logprobs,
+                decoding_config,
+                start_pos,
             )
         elif self.primary_stub:
             # Single-rank fallback (legacy behavior)
@@ -373,6 +380,7 @@ class CPApiAdapter(ApiAdapterBase):
         logprobs: bool,
         top_logprobs: int,
         decoding_config: Optional[Any],
+        start_pos: int,
     ) -> None:
         """Multi-rank send: broadcast full tokens to all ranks for Ring Attention."""
         import numpy as np
@@ -388,21 +396,27 @@ class CPApiAdapter(ApiAdapterBase):
             self.num_ranks,
         )
 
-        # For decode (single token), send only to last rank
-        # This avoids empty chunks when splitting 1 token across multiple ranks
-        if num_tokens <= self.num_ranks:
-            # Decode mode: only last rank gets the token
-            last_rank = self.num_ranks - 1
-            await self._send_chunk_to_rank(
-                last_rank,
-                nonce,
-                tokens,
-                callback_addr,
-                logprobs,
-                top_logprobs,
-                decoding_config,
-                num_tokens,
-            )
+        # For decode (single token), send to ALL ranks (Broadcast).
+        # Each rank needs the full Q to attend to its local KV shard.
+        if num_tokens == 1:
+
+            async def send_broadcast(rank: int) -> None:
+                # Only the last rank should sample/generate tokens
+                is_last_rank = rank == self.num_ranks - 1
+
+                await self._send_chunk_to_rank(
+                    rank,
+                    nonce,
+                    tokens,  # Full tokens (broadcast)
+                    callback_addr,
+                    logprobs if is_last_rank else False,
+                    top_logprobs if is_last_rank else 0,
+                    decoding_config if is_last_rank else None,
+                    num_tokens,
+                    rope_offset=start_pos,
+                )
+
+            await asyncio.gather(*[send_broadcast(r) for r in range(self.num_ranks)])
             return
 
         # Phase 5: True Ring Attention (Sharded KV)
@@ -418,7 +432,7 @@ class CPApiAdapter(ApiAdapterBase):
             mx_tokens = mx.array(full_tokens)
 
             # Get shard for this rank (prefill mode)
-            sharded_chunk_mx, _ = shard_for_mode(
+            sharded_chunk_mx, indices = shard_for_mode(
                 mx_tokens, self.num_ranks, rank, "prefill"
             )
 
@@ -431,6 +445,9 @@ class CPApiAdapter(ApiAdapterBase):
             is_last_rank = rank == self.num_ranks - 1
 
             # Use existing send helper
+            # RoPE offset is globally determined by the start index of this shard
+            chunk_offset = start_pos + indices[0] if indices else start_pos
+
             await self._send_chunk_to_rank(
                 rank,
                 nonce,
@@ -440,6 +457,7 @@ class CPApiAdapter(ApiAdapterBase):
                 top_logprobs if is_last_rank else 0,
                 decoding_config if is_last_rank else None,
                 len(chunk_np),
+                rope_offset=chunk_offset,
             )
 
         # Send sharded chunks to all ranks in parallel
@@ -455,6 +473,7 @@ class CPApiAdapter(ApiAdapterBase):
         top_logprobs: int,
         decoding_config: Optional[Any],
         num_tokens: int,
+        rope_offset: int,
     ) -> None:
         """Send tokens directly to a specific rank (for decode phase)."""
         logger.debug(
@@ -485,6 +504,7 @@ class CPApiAdapter(ApiAdapterBase):
             min_tokens_to_keep=(
                 decoding_config.min_tokens_to_keep if decoding_config else 1
             ),
+            rope_offset=rope_offset,
         )
         req = msg.to_proto(tokens)
 

@@ -58,6 +58,9 @@ class ShardRuntime:
     Topology-agnostic shard runtime.
     """
 
+    # Back-reference to adapter (set by adapter on init)
+    adapter: Any = None
+
     def __init__(
         self,
         shard_id,
@@ -363,6 +366,9 @@ class ShardRuntime:
                 kv_bits=self.kv_cache_config.bits,
                 kv_group=self.kv_cache_config.group_size,
             )
+            # Notify adapter to reset its state (e.g., CPAdapter._local_k_start)
+            if self.adapter and hasattr(self.adapter, "reset_state"):
+                self.adapter.reset_state()
             logger.info("Node %s: Cache reset successfully", self.shard_id)
         except Exception as e:
             logger.error("Node %s: Error resetting cache: %s", self.shard_id, e)

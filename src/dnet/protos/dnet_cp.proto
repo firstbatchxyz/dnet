@@ -44,6 +44,7 @@ message KVBlock {
     repeated int32 key_shape = 3;
     repeated int32 value_shape = 4;
     string dtype = 5;           // "float16", "bfloat16", etc.
+    int32 k_start = 6;          // Global starting position of this KV block
 }
 
 // Query block for pass-Q algorithm

@@ -6,6 +6,7 @@ from dnet.core.cp.ring_comm import CPRingServiceServicer
 from grpc import aio as aio_grpc
 from typing import Optional, Any, cast
 from dnet.utils.logger import logger
+from dnet.utils.grpc_config import GRPC_AIO_OPTIONS
 
 
 class GrpcServer:
@@ -20,7 +21,7 @@ class GrpcServer:
         """
         Start gRPC server
         """
-        self.server = aio_grpc.server()
+        self.server = aio_grpc.server(options=GRPC_AIO_OPTIONS)
         add_DnetRingServiceServicer_to_server(self.servicer, self.server)
 
         # Register CP ring service (for context parallelism block transfer)

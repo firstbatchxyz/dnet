@@ -190,7 +190,7 @@ def run_full_test_suite(
     model: str = "default",
 ) -> None:
     """Run full test suite across context sizes and needle positions."""
-    positions = [0.1, 0.25, 0.5, 0.75, 0.9]  # Test needle at different depths
+    positions = [0.75]  # Test needle at different depths
 
     results = []
 

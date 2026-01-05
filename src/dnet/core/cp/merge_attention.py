@@ -52,7 +52,9 @@ def merge_partial_attention(
         raise ValueError("Cannot merge empty list of partials")
 
     if len(partials) == 1:
-        return partials[0].output
+        # Single partial: still need to normalize since output is unnormalized
+        sum_exp_expanded = mx.expand_dims(partials[0].log_sum_exp, axis=-1)
+        return partials[0].output / sum_exp_expanded
 
     # Start with first partial as running state
     running = partials[0]
@@ -68,52 +70,80 @@ def merge_two_partials(
     b: PartialAttentionOutput,
 ) -> PartialAttentionOutput:
     """
-    Merge two partial attention outputs using online softmax algorithm.
+    Merge two partial attention outputs using numerically stable sigmoid-based algorithm.
 
-    This is the core operation for ring reduction - allows progressive
-    merging without All2All.
+    This implements the merge formula from ring-flash-attention which uses sigmoid
+    and logsigmoid to keep values bounded and prevent numerical explosion:
+        out = out - sigmoid(block_lse - lse) * (out - block_out)
+        lse = lse - logsigmoid(lse - block_lse)
+
+    Reference: https://github.com/zhuzilin/ring-flash-attention/pull/34
 
     Args:
-        a: First partial output
-        b: Second partial output
+        a: First partial output (running state)
+        b: Second partial output (new block to merge)
 
     Returns:
-        Merged partial output (can be merged again with more partials)
+        Merged partial output
     """
-    # Find new max for numerical stability
-    m_new = mx.maximum(a.max_score, b.max_score)
+    import logging
 
-    # Compute scaling factors
-    # exp(m_old - m_new) to rescale old values
-    scale_a = mx.exp(a.max_score - m_new)
-    scale_b = mx.exp(b.max_score - m_new)
+    logger = logging.getLogger("dnet")
 
-    # Rescale log-sum-exp values
-    l_a_scaled = scale_a * a.log_sum_exp
-    l_b_scaled = scale_b * b.log_sum_exp
-    l_new = l_a_scaled + l_b_scaled
+    # Convert to float32 for numerical precision (matching reference)
+    out_a = a.output.astype(mx.float32)
+    out_b = b.output.astype(mx.float32)
+    lse_a = a.log_sum_exp.astype(mx.float32)
+    lse_b = b.log_sum_exp.astype(mx.float32)
 
-    # Avoid division by zero
-    l_new_safe = mx.where(l_new == 0, mx.ones_like(l_new), l_new)
+    # Debug: Log merge at first position/head
+    if lse_a.shape[0] == 1:  # Decode (single token)
+        import math
 
-    # Merge outputs with proper weighting
-    # Need to expand dims for broadcasting with output tensor
-    # output shape: [..., heads, dim], scales shape: [..., heads]
-    scale_a_expanded = mx.expand_dims(scale_a, axis=-1)
-    scale_b_expanded = mx.expand_dims(scale_b, axis=-1)
-    l_a_expanded = mx.expand_dims(l_a_scaled, axis=-1)
-    l_b_expanded = mx.expand_dims(l_b_scaled, axis=-1)
-    l_new_expanded = mx.expand_dims(l_new_safe, axis=-1)
+        lse_a_val = float(lse_a[0, 0])
+        lse_b_val = float(lse_b[0, 0])
+        # Sigmoid weight: sig(lse_b - lse_a) bounded [0,1]
+        try:
+            sig_val = 1.0 / (1.0 + math.exp(-(lse_b_val - lse_a_val)))
+        except OverflowError:
+            sig_val = 0.0 if (lse_b_val - lse_a_val) < 0 else 1.0
+        logger.debug(
+            f"merge: lse_a={lse_a_val:.2f}, lse_b={lse_b_val:.2f}, "
+            f"w_a={1 - sig_val:.4f}, w_b={sig_val:.4f}, w_tot=1.0000, "
+            f"ratio_a={1 - sig_val:.4f}"
+        )
 
-    output_new = (
-        scale_a_expanded * l_a_expanded * a.output
-        + scale_b_expanded * l_b_expanded * b.output
-    ) / l_new_expanded
+    # Sigmoid-based merge (bounded, numerically stable)
+    # sigmoid(x) = 1 / (1 + exp(-x))
+    # out = out_a - sigmoid(lse_b - lse_a) * (out_a - out_b)
+
+    # Expand lse for broadcasting with output [S_q, H, D]
+    lse_a_exp = mx.expand_dims(lse_a, axis=-1)
+    lse_b_exp = mx.expand_dims(lse_b, axis=-1)
+
+    # sigmoid(lse_b - lse_a) - bounded between 0 and 1
+    sig = mx.sigmoid(lse_b_exp - lse_a_exp)
+
+    # Merge outputs: out = out_a - sig * (out_a - out_b) = out_a * (1 - sig) + out_b * sig
+    output_new = out_a - sig * (out_a - out_b)
+
+    # Update LSE using logsigmoid
+    # lse = lse_a - logsigmoid(lse_a - lse_b)
+    # logsigmoid(x) = -log(1 + exp(-x)) = x - log(1 + exp(x)) for numerical stability
+    # lse_new = lse_a - logsigmoid(lse_a - lse_b)
+    #         = lse_a + log(1 + exp(lse_b - lse_a))  [using -logsigmoid(x) = log(1 + exp(-x))]
+    #         = lse_a + softplus(lse_b - lse_a)
+    # Or equivalently: max(lse_a, lse_b) + log(1 + exp(-|lse_a - lse_b|))
+    # Which is the stable log-sum-exp of two values
+    lse_max = mx.maximum(lse_a, lse_b)
+    lse_new = lse_max + mx.log(
+        mx.exp(lse_a - lse_max) + mx.exp(lse_b - lse_max) + 1e-10
+    )
 
     return PartialAttentionOutput(
         output=output_new,
-        max_score=m_new,
-        log_sum_exp=l_new,
+        max_score=lse_max,  # Keep for compatibility
+        log_sum_exp=lse_new,
     )
 
 
@@ -158,8 +188,11 @@ def compute_partial_attention_stats(
     max_score = mx.transpose(max_score, (0, 2, 1))
     sum_exp = mx.transpose(sum_exp, (0, 2, 1))
 
+    # Compute proper log-sum-exp: LSE = max + log(sum_exp)
+    lse = max_score + mx.log(sum_exp + 1e-10)
+
     return PartialAttentionOutput(
         output=output,
         max_score=max_score,
-        log_sum_exp=sum_exp,
+        log_sum_exp=lse,
     )

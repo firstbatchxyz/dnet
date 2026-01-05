@@ -64,35 +64,11 @@ def _shard_prefill(
     rank_id: int,
     seq_len: int,
 ) -> tuple[mx.array, list[int]]:
-    """Load-balanced 2N sharding for causal attention."""
-    # Partition into 2N chunks, assign complementary pairs
-    num_chunks = 2 * num_ranks
-    chunk_size = seq_len // num_chunks
-    remainder = seq_len % num_chunks
-
-    # Assign chunks (i, 2N-i-1) to rank i
-    chunk_a = rank_id
-    chunk_b = num_chunks - rank_id - 1
-
-    # Calculate start/end for chunk_a
-    start_a = chunk_a * chunk_size + min(chunk_a, remainder)
-    end_a = start_a + chunk_size + (1 if chunk_a < remainder else 0)
-
-    # Calculate start/end for chunk_b
-    start_b = chunk_b * chunk_size + min(chunk_b, remainder)
-    end_b = start_b + chunk_size + (1 if chunk_b < remainder else 0)
-
-    # Handle case where chunk_a == chunk_b (only possible when num_ranks=1)
-    if chunk_a == chunk_b:
-        sharded = tokens_or_kv[start_a:end_a]
-        indices = list(range(start_a, end_a))
-    else:
-        sharded = mx.concatenate(
-            [tokens_or_kv[start_a:end_a], tokens_or_kv[start_b:end_b]]
-        )
-        indices = list(range(start_a, end_a)) + list(range(start_b, end_b))
-
-    return sharded, indices
+    """
+    Linear sharding for prefill (temporarily replacing 2N for v1 simplicity).
+    Rank k gets [k*L, (k+1)*L]. This allows simple RoPE offset handling.
+    """
+    return _shard_linear(tokens_or_kv, num_ranks, rank_id, seq_len)
 
 
 def _shard_decode(
@@ -102,6 +78,16 @@ def _shard_decode(
     seq_len: int,
 ) -> tuple[mx.array, list[int]]:
     """Even N-way split for uniform decode compute."""
+    return _shard_linear(tokens_or_kv, num_ranks, rank_id, seq_len)
+
+
+def _shard_linear(
+    tokens_or_kv: mx.array,
+    num_ranks: int,
+    rank_id: int,
+    seq_len: int,
+) -> tuple[mx.array, list[int]]:
+    """Linear sharding implementation."""
     chunk_size = seq_len // num_ranks
     remainder = seq_len % num_ranks
 

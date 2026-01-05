@@ -179,6 +179,12 @@ class InferenceManager:
                 else 1,
             )
 
+            # RoPE offset: for prefill, start at 0. For decode, offset by prompt + generated tokens.
+            # During first iteration, we're processing the prompt from position 0.
+            # During subsequent iterations, we're adding tokens at position prompt_len + token_idx.
+            is_prefill = len(tokens) == 0
+            rope_start_pos = 0 if is_prefill else len(prompt_tokens) + len(tokens) - 1
+
             # Send tokens to first shard
             await self.adapter.send_tokens(
                 tokens=tok_bytes,
@@ -187,6 +193,7 @@ class InferenceManager:
                 logprobs=req.logprobs if req.logprobs else False,
                 top_logprobs=req.top_logprobs if req.top_logprobs else 0,
                 decoding_config=decoding_config,
+                start_pos=rope_start_pos,
             )
             result = await self.adapter.await_token(nonce, timeout_s=3600.0)
             token = int(result.token_id)

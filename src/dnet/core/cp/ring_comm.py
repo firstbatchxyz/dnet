@@ -66,6 +66,8 @@ class CPRingCommunicator:
 
         # Pending receives keyed by tag
         self._pending_recv: dict[str, asyncio.Future[bytes]] = {}
+        # Cache for data that arrived before _recv_from_prev was called
+        self._early_data: dict[str, bytes] = {}
 
         # Lock to ensure connect is called once
         self._connect_lock = asyncio.Lock()
@@ -111,6 +113,11 @@ class CPRingCommunicator:
                 await self._next_channel.close()
                 self._next_channel = None
             self._connected = False
+            self._early_data.clear()
+            for fut in self._pending_recv.values():
+                if not fut.done():
+                    fut.cancel()
+            self._pending_recv.clear()
 
     async def send_recv(
         self,
@@ -169,20 +176,64 @@ class CPRingCommunicator:
             partial_output=dnet_cp_pb2.PartialOutput(output_data=data),
         )
 
-        try:
-            ack = await stub.SendBlock(frame)
-            if not ack.accepted:
-                raise RuntimeError(f"Block rejected by next rank: {ack.error_message}")
-            logger.debug(
-                "Rank %d: sent %d bytes to rank %d (tag=%s)",
-                self.rank_id,
-                len(data),
-                self.next_rank,
-                tag,
-            )
-        except Exception as e:
-            logger.error("Rank %d: failed to send to next rank: %s", self.rank_id, e)
-            raise
+        # Retry parameters
+        max_retries = 20
+        base_delay = 0.05
+
+        current_try = 0
+        while True:
+            try:
+                ack = await stub.SendBlock(frame)
+                if ack.accepted:
+                    logger.debug(
+                        "Rank %d: sent %d bytes to rank %d (tag=%s)",
+                        self.rank_id,
+                        len(data),
+                        self.next_rank,
+                        tag,
+                    )
+                    return  # Success
+
+                # Check if rejection is "No communicator attached"
+                if "No communicator attached" in ack.error_message:
+                    raise RuntimeError(f"Peer not ready: {ack.error_message}")
+                else:
+                    # Other rejections are fatal
+                    raise RuntimeError(
+                        f"Block rejected by next rank: {ack.error_message}"
+                    )
+
+            except Exception as e:
+                is_peer_not_ready = "No communicator attached" in str(
+                    e
+                ) or "Peer not ready" in str(e)
+
+                current_try += 1
+                if current_try >= max_retries:
+                    logger.error(
+                        "Rank %d: failed to send to next rank after %d retries: %s",
+                        self.rank_id,
+                        max_retries,
+                        e,
+                    )
+                    raise
+
+                if is_peer_not_ready:
+                    delay = base_delay * (1.5 ** (current_try - 1))
+                    delay = min(delay, 2.0)
+                    if current_try % 5 == 0:
+                        logger.debug(
+                            "Rank %d: peer not ready (try %d/%d), retrying in %.2fs...",
+                            self.rank_id,
+                            current_try,
+                            max_retries,
+                            delay,
+                        )
+                    await asyncio.sleep(delay)
+                else:
+                    # Non-retryable error
+                    logger.error("Rank %d: fatal send error: %s", self.rank_id, e)
+                    raise
 
     async def _recv_from_prev(self, tag: str) -> bytes:
         """
@@ -194,11 +245,22 @@ class CPRingCommunicator:
         if not self._prev_channel:
             raise RuntimeError("Not connected to previous rank")
 
-        # Create a future for this tag if it doesn't exist
+        # 1. Check if data arrived early (before we called recv)
+        if tag in self._early_data:
+            data = self._early_data.pop(tag)
+            logger.debug(
+                "Rank %d: retrieved %d bytes from early cache (tag=%s)",
+                self.rank_id,
+                len(data),
+                tag,
+            )
+            return data
+
+        # 2. Create a future for this tag if it doesn't exist
         if tag not in self._pending_recv:
             self._pending_recv[tag] = asyncio.get_event_loop().create_future()
 
-        # Wait for the data to arrive (set by resolve_recv when server receives it)
+        # 3. Wait for the data to arrive (set by resolve_recv when server receives it)
         try:
             data = await asyncio.wait_for(self._pending_recv[tag], timeout=30.0)
             logger.debug(
@@ -221,8 +283,31 @@ class CPRingCommunicator:
         Called by the gRPC server when data arrives from prev rank.
         """
         if tag in self._pending_recv:
-            self._pending_recv[tag].set_result(data)
-            del self._pending_recv[tag]
+            # Future exists, resolve it
+            fut = self._pending_recv[tag]
+            if not fut.done():
+                fut.set_result(data)
+            else:
+                logger.warning(
+                    f"Rank {self.rank_id}: received data for tag {tag} but future already done (timeout?)"
+                )
+            if fut.done() and tag in self._pending_recv:
+                del self._pending_recv[tag]
+        else:
+            # Future does not exist yet (arrived early), store in cache
+            if tag in self._early_data:
+                logger.warning(
+                    "Rank %d: overwriting early data for tag %s (previous not consumed?)",
+                    self.rank_id,
+                    tag,
+                )
+            self._early_data[tag] = data
+            logger.debug(
+                "Rank %d: cached early data for tag %s (%d bytes)",
+                self.rank_id,
+                tag,
+                len(data),
+            )
 
 
 class CPRingServiceServicer:
@@ -311,7 +396,7 @@ async def start_cp_ring_server(
 
     from dnet.protos import dnet_cp_pb2_grpc
 
-    server = aio_grpc.server()
+    server = aio_grpc.server(options=GRPC_AIO_OPTIONS)
     servicer = CPRingServiceServicer()
     servicer.attach_communicator(communicator)
     # Cast to Any to satisfy mypy - our servicer implements the protocol

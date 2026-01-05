@@ -28,6 +28,7 @@ message Activation {
   repeated int32 shape = 3;
   string dtype = 4;
   int32 layer_id = 5;
+  int32 rope_offset = 6;
 }
 
 message ActivationRequest {

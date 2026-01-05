@@ -56,16 +56,42 @@ class Shard:
 
         # Wire CP ring_comm to gRPC servicer if using CPAdapter
         from dnet.shard.adapters.context_parallel import CPAdapter
+        from dnet.utils.logger import logger
 
-        if isinstance(self.adapter, CPAdapter) and self.grpc_server:
-            if (
-                hasattr(self.grpc_server, "cp_servicer")
-                and self.grpc_server.cp_servicer
-            ):
-                if self.adapter.ring_comm:
-                    self.grpc_server.cp_servicer.attach_communicator(
-                        self.adapter.ring_comm
+        if isinstance(self.adapter, CPAdapter):
+            logger.info(
+                "Shard.load_model: Adapter is CPAdapter. checking grpc_server..."
+            )
+            if self.grpc_server:
+                logger.info(
+                    "Shard.load_model: grpc_server is present. checking cp_servicer..."
+                )
+                if (
+                    hasattr(self.grpc_server, "cp_servicer")
+                    and self.grpc_server.cp_servicer
+                ):
+                    logger.info(
+                        "Shard.load_model: cp_servicer found. checking ring_comm..."
                     )
+                    if self.adapter.ring_comm:
+                        logger.info(
+                            "Shard.load_model: Attaching communicator to cp_servicer"
+                        )
+                        self.grpc_server.cp_servicer.attach_communicator(
+                            self.adapter.ring_comm
+                        )
+                    else:
+                        logger.warning("Shard.load_model: adapter.ring_comm is None!")
+                else:
+                    logger.warning(
+                        "Shard.load_model: cp_servicer missing on grpc_server!"
+                    )
+            else:
+                logger.warning("Shard.load_model: self.grpc_server is None!")
+        else:
+            logger.info(
+                f"Shard.load_model: Adapter is {type(self.adapter)}, not CPAdapter"
+            )
 
         return ShardLoadModelResponse(
             success=True,

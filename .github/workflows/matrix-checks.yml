@@ -5,9 +5,6 @@ on:
       python_version:
         required: false
         type: string
-    secrets:
-      CI_SSH_KEY:
-        required: true
 
 jobs:
   matrix-checks:

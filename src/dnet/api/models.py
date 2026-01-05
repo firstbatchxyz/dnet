@@ -32,9 +32,9 @@ class ChatCompletionReason(str, Enum):
 class StructuredOutputsParams(BaseModel):
     """Parameters for structured output generation."""
 
-    json: Optional[Dict[str, Any]] = Field(default=None)
+    json_schema: Optional[Dict[str, Any]] = Field(default=None)
 
-    @field_validator("json")
+    @field_validator("json_schema")
     @classmethod
     def validate_json_schema(cls, v):
         if v is None:

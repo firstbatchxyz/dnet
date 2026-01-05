@@ -330,9 +330,9 @@ def test_structured_outputs_valid_json_schema():
     req = ChatRequestModel(
         model="m",
         messages=[ChatMessage(role="user", content="test")],
-        structured_outputs=StructuredOutputsParams(json=valid_schema),
+        structured_outputs=StructuredOutputsParams(json_schema=valid_schema),
     )
-    assert req.structured_outputs.json == valid_schema
+    assert req.structured_outputs.json_schema == valid_schema
 
 
 def test_structured_outputs_invalid_json_schema():
@@ -340,16 +340,18 @@ def test_structured_outputs_invalid_json_schema():
 
     # Missing 'type' field
     with pytest.raises(ValidationError):
-        StructuredOutputsParams(json={"properties": {"name": {"type": "string"}}})
+        StructuredOutputsParams(
+            json_schema={"properties": {"name": {"type": "string"}}}
+        )
 
     # Not a dict
     with pytest.raises(ValidationError):
-        StructuredOutputsParams(json="not a dict")
+        StructuredOutputsParams(json_schema="not a dict")
 
     # Not JSON serializable
     with pytest.raises(ValidationError):
         StructuredOutputsParams(
-            json={"key": set([1, 2, 3])}
+            json_schema={"key": set([1, 2, 3])}
         )  # sets aren't JSON serializable
 
 
@@ -369,7 +371,7 @@ def test_structured_outputs_inference_integration():
             model="m",
             messages=[ChatMessage(role="user", content="hi")],
             max_tokens=5,
-            structured_outputs=StructuredOutputsParams(json=schema),
+            structured_outputs=StructuredOutputsParams(json_schema=schema),
         )
 
         agen = mgr.generate_stream(req)

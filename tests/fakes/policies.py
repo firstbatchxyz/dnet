@@ -71,7 +71,8 @@ class FakeComputeModel:
 
 
 class FakeSampler:
-    def sample(self, logits, config, req_logprobs, req_top_logprobs):
+    @staticmethod
+    def sample(logits, config, req_logprobs, req_top_logprobs, grammar_state=None):
         from .api import FakeTokenResult
 
         return FakeTokenResult(7, -0.1, {7: -0.1})

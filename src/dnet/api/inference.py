@@ -117,12 +117,12 @@ class InferenceManager:
         # Convert OpenAI response_format to internal structured_outputs format
         if req.response_format and req.response_format.get("type") == "json_schema":
             json_schema = req.response_format["json_schema"]["schema"]
-            req.structured_outputs = StructuredOutputsParams(json=json_schema)
+            req.structured_outputs = StructuredOutputsParams(json_schema=json_schema)
 
         # Get grammar JSON schema for structured output
         grammar_json_schema = None
-        if req.structured_outputs and req.structured_outputs.json:
-            grammar_json_schema = json.dumps(req.structured_outputs.json)
+        if req.structured_outputs and req.structured_outputs.json_schema:
+            grammar_json_schema = json.dumps(req.structured_outputs.json_schema)
 
         nonce = f"chatcmpl-{uuid.uuid4()}"
         t_start = time.perf_counter()
@@ -336,7 +336,7 @@ class InferenceManager:
                 usage = chunk.usage
 
         # Clean up structured output responses - remove end tokens
-        if req.structured_outputs and req.structured_outputs.json:
+        if req.structured_outputs and req.structured_outputs.json_schema:
             full_content = full_content.strip()
             for token in ["<|im_end|>", "<|endoftext|>", "</s>"]:
                 if token in full_content:

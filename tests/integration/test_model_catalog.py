@@ -6,8 +6,7 @@ Tests are parameterized directly from catalog.py and run serially.
 Usage (with servers running):
     uv run pytest tests/integration/test_model_catalog.py -v -x
 
-Usage (standalone - starts servers automatically):
-    uv run pytest tests/integration/test_model_catalog.py -v -x --start-servers
+Usage (standalone - starts servers automatically):o
 
 Usage (in CI - expects servers started externally):
     # Servers started by workflow steps

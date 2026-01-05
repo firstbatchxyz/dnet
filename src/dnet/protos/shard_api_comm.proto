@@ -37,6 +37,7 @@ message TokenRequest {
     int64 timestamp = 3;
     float logprob = 4;
     map<int32, float> top_logprobs = 5;
+    bool grammar_terminated = 6;
 }
 
 // Response for token reception

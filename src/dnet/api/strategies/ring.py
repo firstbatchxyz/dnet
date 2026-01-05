@@ -175,6 +175,9 @@ class RingApiAdapter(ApiAdapterBase):
             min_tokens_to_keep=decoding_config.min_tokens_to_keep
             if decoding_config
             else 1,
+            grammar_json_schema=decoding_config.grammar_json_schema
+            if decoding_config and hasattr(decoding_config, "grammar_json_schema")
+            else None,
         )
         req = msg.to_proto(tokens)
 

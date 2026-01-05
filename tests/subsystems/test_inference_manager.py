@@ -7,7 +7,7 @@ from pydantic import ValidationError
 pytest.importorskip("mlx.core")
 
 from dnet.api.inference import InferenceManager  # noqa: E402
-from dnet.api.models import ChatRequestModel, ChatMessage  # noqa: E402
+from dnet.api.models import ChatRequestModel, ChatMessage, StructuredOutputsParams  # noqa: E402
 from tests.fakes import (  # noqa: E402
     FakeTokenizer,
     FakeTokenizerWithTemplate,
@@ -320,3 +320,73 @@ def test_invalid_request_params_min_tokens_to_keep():
             min_tokens_to_keep=0,
             logprobs=True,
         )
+
+
+def test_structured_outputs_valid_json_schema():
+    """Test valid JSON schema in structured outputs."""
+    valid_schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+
+    # Test direct structured_outputs usage
+    req = ChatRequestModel(
+        model="m",
+        messages=[ChatMessage(role="user", content="test")],
+        structured_outputs=StructuredOutputsParams(json_schema=valid_schema),
+    )
+    assert req.structured_outputs.json_schema == valid_schema
+
+
+def test_structured_outputs_invalid_json_schema():
+    """Test invalid JSON schema validation."""
+
+    # Missing 'type' field
+    with pytest.raises(ValidationError):
+        StructuredOutputsParams(
+            json_schema={"properties": {"name": {"type": "string"}}}
+        )
+
+    # Not a dict
+    with pytest.raises(ValidationError):
+        StructuredOutputsParams(json_schema="not a dict")
+
+    # Not JSON serializable
+    with pytest.raises(ValidationError):
+        StructuredOutputsParams(
+            json_schema={"key": set([1, 2, 3])}
+        )  # sets aren't JSON serializable
+
+
+def test_structured_outputs_inference_integration():
+    """Test that structured outputs work in the inference flow."""
+
+    async def main():
+        tok = FakeTokenizer()
+        mm = FakeModelManager(tok)
+        ad = FakeStrategyAdapter()
+        cm = FakeClusterManager()
+        mgr = InferenceManager(cm, mm, grpc_port=50500, adapter=ad)
+        await mgr.connect_to_ring("1.2.3.4", 9000, "9.9.9.9:50500")
+
+        schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
+        req = ChatRequestModel(
+            model="m",
+            messages=[ChatMessage(role="user", content="hi")],
+            max_tokens=5,
+            structured_outputs=StructuredOutputsParams(json_schema=schema),
+        )
+
+        agen = mgr.generate_stream(req)
+        c0 = await agen.__anext__()
+        assert c0.choices[0].delta.role == "assistant"
+        assert ad.reset is True
+
+        nonce = c0.id
+        ad.queue_token(nonce, FakeTokenResult(1))
+        ad.queue_token(nonce, FakeTokenResult(tok.eos_token_id))
+        c1 = await agen.__anext__()
+        assert c1.choices[0].delta.content == "t1"
+        assert (
+            ad.sent[0]["decoding_config"].grammar_json_schema
+            == '{"type": "object", "properties": {"answer": {"type": "string"}}}'
+        )
+
+    asyncio.run(main())

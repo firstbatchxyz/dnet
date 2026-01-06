@@ -86,33 +86,11 @@ def merge_two_partials(
     Returns:
         Merged partial output
     """
-    import logging
-
-    logger = logging.getLogger("dnet")
-
     # Convert to float32 for numerical precision (matching reference)
     out_a = a.output.astype(mx.float32)
     out_b = b.output.astype(mx.float32)
     lse_a = a.log_sum_exp.astype(mx.float32)
     lse_b = b.log_sum_exp.astype(mx.float32)
-
-    # Debug: Log merge at first position/head
-    if lse_a.shape[0] == 1:  # Decode (single token)
-        import math
-
-        lse_a_val = float(lse_a[0, 0])
-        lse_b_val = float(lse_b[0, 0])
-        # Sigmoid weight: sig(lse_b - lse_a) bounded [0,1]
-        try:
-            sig_val = 1.0 / (1.0 + math.exp(-(lse_b_val - lse_a_val)))
-        except OverflowError:
-            sig_val = 0.0 if (lse_b_val - lse_a_val) < 0 else 1.0
-        logger.debug(
-            f"merge: lse_a={lse_a_val:.2f}, lse_b={lse_b_val:.2f}, "
-            f"w_a={1 - sig_val:.4f}, w_b={sig_val:.4f}, w_tot=1.0000, "
-            f"ratio_a={1 - sig_val:.4f}"
-        )
-
     # Sigmoid-based merge (bounded, numerically stable)
     # sigmoid(x) = 1 / (1 + exp(-x))
     # out = out_a - sigmoid(lse_b - lse_a) * (out_a - out_b)

@@ -38,7 +38,7 @@ def get_grpc_options() -> list[tuple[str, int]]:
         ("grpc.keepalive_time_ms", s.keepalive_time_ms),
         ("grpc.keepalive_timeout_ms", s.keepalive_timeout_ms),
         ("grpc.keepalive_permit_without_calls", 0),
-        ("grpc.http2.min_time_between_pings_ms", 120000),
+        ("grpc.http2.min_time_between_pings_ms", 1200000),
         ("grpc.http2.max_pings_without_data", 0),
         ("grpc.http2.bdp_probe", 0),  # disable BDP probe to reduce pinging
         # Avoid any interference from HTTP proxies for direct ring links

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import queue
-import time
 from typing import Optional, Callable, Awaitable, Dict
 from contextvars import ContextVar
 from urllib.parse import urlparse
@@ -487,7 +486,6 @@ class CPAdapter(TopologyAdapter):
             return
 
         # send token
-        t_rpc = time.perf_counter()
         try:
             token_id = int(getattr(msg, "token_id", -1))
             logprob = float(getattr(msg, "logprob", 0.0))
@@ -511,7 +509,6 @@ class CPAdapter(TopologyAdapter):
                 return
 
             resp = await self.api_stub.SendToken(req, timeout=3.0)
-            rpc_ms = (time.perf_counter() - t_rpc) * 1000.0
 
             if resp is None or not resp.success:
                 logger.error(
@@ -519,15 +516,7 @@ class CPAdapter(TopologyAdapter):
                     self.runtime.shard_id,
                     msg.nonce,
                     token_id,
-                    resp.message,
-                )
-            else:
-                logger.debug(
-                    "[TX-TOKEN] shard=%s nonce=%s token=%s rpc_ms=%.2f",
-                    self.runtime.shard_id,
-                    msg.nonce,
-                    token_id,
-                    rpc_ms,
+                    resp.message if resp else "no response",
                 )
         except Exception as e:
             logger.exception(
@@ -627,17 +616,6 @@ class CPAdapter(TopologyAdapter):
             query, key, value, q_start=q_start, k_start=current_k_start
         )
 
-        # Debug: Log local attention stats at layer 0
-        if layer_id == 0:
-            local_lse_min = float(mx.min(running.log_sum_exp))
-            local_lse_max = float(mx.max(running.log_sum_exp))
-            local_out_norm = float(mx.sqrt(mx.sum(running.output**2)))
-            logger.debug(
-                f"ring_pass[rank{self.rank_id}]: L0 local_attn out_norm={local_out_norm:.4f}, "
-                f"lse_range=[{local_lse_min:.2f}, {local_lse_max:.2f}], "
-                f"q_start={q_start}, k_start={current_k_start}"
-            )
-
         current_k, current_v = key, value
 
         self._attn_op_counter += 1
@@ -669,39 +647,14 @@ class CPAdapter(TopologyAdapter):
             if q_end < k_start_pos:
                 # All queries are before all keys - causal mask would block everything
                 # Skip this KV block to avoid numerical issues (LSE would be -inf)
-                if layer_id == 0:
-                    logger.debug(
-                        f"ring_pass[rank{self.rank_id}]: L0 recv step{step} SKIPPED "
-                        f"(q_end={q_end} < k_start={k_start_pos}, fully masked)"
-                    )
                 continue
 
             partial = self._compute_partial_attention(
                 query, current_k, current_v, q_start=q_start, k_start=current_k_start
             )
 
-            # Debug: Log received KV attention stats at layer 0
-            if layer_id == 0:
-                recv_lse_min = float(mx.min(partial.log_sum_exp))
-                recv_lse_max = float(mx.max(partial.log_sum_exp))
-                recv_out_norm = float(mx.sqrt(mx.sum(partial.output**2)))
-                logger.debug(
-                    f"ring_pass[rank{self.rank_id}]: L0 recv step{step} out_norm={recv_out_norm:.4f}, "
-                    f"lse_range=[{recv_lse_min:.2f}, {recv_lse_max:.2f}], k_start={current_k_start}"
-                )
-
             # Online merge: accumulate into running state immediately
             running = merge_two_partials(running, partial)
-
-            logger.debug(f"CPAdapter: Ring step {step} complete.")
-
-        # Debug: log final prefill merged output stats
-        # Use float32 to avoid overflow in sum(sq)
-        out_f32 = running.output.astype(mx.float32)
-        output_norm = float(mx.sqrt(mx.sum(out_f32**2)))
-        logger.debug(
-            f"ring_pass[rank{self.rank_id}]: final prefill output_norm={output_norm:.4f}, layer={layer_id}"
-        )
 
         # Return merged normalized output directly
         return running.output
@@ -744,19 +697,6 @@ class CPAdapter(TopologyAdapter):
         # prefill portion for attention. Last rank uses full KV (prefill + decode).
         is_last_rank = self.rank_id == self.num_ranks - 1
 
-        # Debug: Log Q norm at layer 0 to verify both ranks have same input
-        if layer_id == 0:
-            q_norm = float(mx.sqrt(mx.sum(query**2)))
-            k_norm = float(mx.sqrt(mx.sum(key**2)))
-            v_norm = float(mx.sqrt(mx.sum(value**2)))
-            k_mean = float(mx.mean(key))
-            v_mean = float(mx.mean(value))
-            logger.debug(
-                f"ring_reduce[rank{self.rank_id}]: L0 q_norm={q_norm:.6f}, "
-                f"k_norm={k_norm:.4f}, v_norm={v_norm:.4f}, "
-                f"k_mean={k_mean:.6f}, v_mean={v_mean:.6f}, kv_shape={key.shape}"
-            )
-
         k_for_attn = key
         v_for_attn = value
 
@@ -766,13 +706,6 @@ class CPAdapter(TopologyAdapter):
             if key.shape[0] > prefill_size:
                 k_for_attn = key[:prefill_size]
                 v_for_attn = value[:prefill_size]
-                logger.debug(
-                    f"ring_reduce[rank{self.rank_id}]: sliced KV from {key.shape[0]} to {prefill_size}"
-                )
-
-        logger.debug(
-            f"ring_reduce[rank{self.rank_id}]: k_for_attn={k_for_attn.shape}, is_last_rank={is_last_rank}"
-        )
 
         # Compute local partial with no causal mask (decode Q > all K)
         # Note: RoPE is already applied by CPAttentionWrapper before calling this function
@@ -781,11 +714,6 @@ class CPAdapter(TopologyAdapter):
             k_for_attn,
             v_for_attn,
             skip_causal_mask=True,  # Decode: Q always after K
-        )
-
-        # Debug: log partial stats
-        logger.debug(
-            f"ring_reduce[rank{self.rank_id}]: local partial lse_range=[{float(mx.min(running_output.log_sum_exp)):.2f}, {float(mx.max(running_output.log_sum_exp)):.2f}]"
         )
 
         for step in range(1, self.num_ranks):
@@ -814,12 +742,6 @@ class CPAdapter(TopologyAdapter):
             # Deserialize and merge
             received_partial = self._deserialize_partial(recv_bytes)
             running_output = merge_two_partials(running_output, received_partial)
-
-        # Debug: log final merged output stats
-        output_norm = float(mx.sqrt(mx.sum(running_output.output**2)))
-        logger.debug(
-            f"ring_reduce[rank{self.rank_id}]: final output_norm={output_norm:.4f}, lse_range=[{float(mx.min(running_output.log_sum_exp)):.2f}, {float(mx.max(running_output.log_sum_exp)):.2f}]"
-        )
 
         # Return merged normalized output directly
         return running_output.output

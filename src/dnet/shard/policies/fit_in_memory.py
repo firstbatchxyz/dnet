@@ -56,9 +56,6 @@ class FitInMemoryPolicy(ComputePolicy):
 
                 if hasattr(self.runtime.adapter, "set_current_rope_offset"):
                     self.runtime.adapter.set_current_rope_offset(msg.rope_offset)
-                    logger.debug(
-                        f"CP fit_in_memory: tokens={msg.shape}, rope_offset={msg.rope_offset}"
-                    )
 
                 # 2) get input tensor from pool
                 input_buffer = self.runtime.input_pool.get_buffer(msg.pool_id)
@@ -122,23 +119,6 @@ class FitInMemoryPolicy(ComputePolicy):
                             except Exception:
                                 pass
 
-                            # Debug: Log layer output for decode (single token) at layer 0
-                            try:
-                                L = (
-                                    int(x.shape[1])
-                                    if len(x.shape) > 1
-                                    else int(x.shape[0])
-                                )
-                                if L == 1 and lyr == 0:  # Decode, layer 0
-                                    x_norm = float(mx.sqrt(mx.sum(x**2)))
-                                    x_mean = float(mx.mean(x))
-                                    cp_rank = getattr(self.runtime, "cp_rank_id", 0)
-                                    logger.debug(
-                                        f"CP layer_out[rank{cp_rank}, L{lyr}]: x_norm={x_norm:.4f}, x_mean={x_mean:.6f}"
-                                    )
-                            except Exception:
-                                pass
-
                     last_layer = window_layers[-1]
                     try:
                         mx.eval(x)
@@ -172,11 +152,6 @@ class FitInMemoryPolicy(ComputePolicy):
                         if cp_num_ranks > 1 and cp_rank_id != cp_num_ranks - 1:
                             # Not the last rank in CP - release resources and return
                             self.runtime.input_pool.release(msg.pool_id)
-                            logger.debug(
-                                "CP rank %d/%d: finished chunk, not sampling (last rank only)",
-                                cp_rank_id,
-                                cp_num_ranks,
-                            )
                             return
 
                         try:
@@ -191,23 +166,8 @@ class FitInMemoryPolicy(ComputePolicy):
                                 else:
                                     x_last = x_cast  # 1D or scalar, use as-is
 
-                                # Debug: Log final hidden state before sampling
-                                x_last_norm = float(mx.sqrt(mx.sum(x_last**2)))
-                                x_last_mean = float(mx.mean(x_last))
-                                logger.debug(
-                                    f"CP sampling: x_last_norm={x_last_norm:.4f}, x_last_mean={x_last_mean:.6f}, shape={x_last.shape}"
-                                )
-
                                 y = self.runtime.model.normalize(x_last)
                                 y = self.runtime.model.lm_project(y)
-
-                                # Debug: Log logits stats
-                                y_max = float(mx.max(y))
-                                y_min = float(mx.min(y))
-                                y_argmax = int(mx.argmax(y.reshape(-1)))
-                                logger.debug(
-                                    f"CP sampling: logits max={y_max:.2f}, min={y_min:.2f}, argmax={y_argmax}"
-                                )
 
                             # Sampling
                             decoding_config = DecodingConfig(
@@ -230,11 +190,6 @@ class FitInMemoryPolicy(ComputePolicy):
                             token_id = result.token_id
                             token_logprob = result.logprob
                             top_logprobs = result.top_logprobs
-
-                            # Debug: Log sampled token
-                            logger.debug(
-                                f"CP sampling: sampled token_id={token_id}, logprob={token_logprob:.4f}"
-                            )
 
                         except Exception as e:
                             logger.error("End-shard sampling failed: %s", e)

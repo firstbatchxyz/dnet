@@ -476,11 +476,6 @@ class CPApiAdapter(ApiAdapterBase):
         rope_offset: int,
     ) -> None:
         """Send tokens directly to a specific rank (for decode phase)."""
-        logger.debug(
-            "CP decode: sending %d tokens directly to rank %d (last rank)",
-            num_tokens,
-            rank,
-        )
 
         msg = ActivationMessage(
             nonce=nonce,

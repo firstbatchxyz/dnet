@@ -45,29 +45,7 @@ class CPAttentionWrapper(nn.Module):
         """
         B, L, D = x.shape
 
-        # Debug: Log input x norm for decode (L==1) at layer 0
         is_decode = L == 1
-        if is_decode and hasattr(self.adapter, "current_layer_id"):
-            if self.adapter.current_layer_id == 0:
-                x_norm = float(mx.sqrt(mx.sum(x**2)))
-                x_mean = float(mx.mean(x))
-                logger.debug(
-                    f"CPAttentionWrapper[L0]: input x_norm={x_norm:.6f}, x_mean={x_mean:.8f}"
-                )
-
-                # One-time logging of o_proj weight norm to verify model consistency
-                if not self._weight_logged:
-                    self._weight_logged = True
-                    try:
-                        o_proj_w = self.base_attn.o_proj.weight
-                        w_norm = float(mx.sqrt(mx.sum(o_proj_w**2)))
-                        w_mean = float(mx.mean(o_proj_w))
-                        cp_rank = getattr(self.adapter, "rank_id", -1)
-                        logger.warning(
-                            f"[WEIGHT CHECK] rank={cp_rank} o_proj weight norm={w_norm:.6f}, mean={w_mean:.8f}"
-                        )
-                    except Exception as e:
-                        logger.warning(f"[WEIGHT CHECK] failed: {e}")
 
         # 1. Local Projections using original weights
         queries = self.base_attn.q_proj(x)
@@ -148,10 +126,6 @@ class CPAttentionWrapper(nn.Module):
                     group_size = getattr(cache, "group_size", 64)
                     bits = getattr(cache, "bits", 4)
 
-                    logger.debug(
-                        f"CPAttentionWrapper: k_out[0]={k_out[0].shape}, bits={bits}"
-                    )
-
                     k_full = mx.dequantize(
                         k_out[0], k_out[1], k_out[2], group_size, bits
                     )
@@ -171,8 +145,6 @@ class CPAttentionWrapper(nn.Module):
                 # Note: For decode on non-last rank, we do NOT include the new token
                 # in k_all/v_all. The new token should only contribute to attention
                 # from one shard (last rank) to avoid double-counting during merge.
-
-                logger.debug(f"CPAttentionWrapper: after transpose k_all={k_all.shape}")
 
             # 2. Handle Simple List Cache (e.g. [K, V])
             elif isinstance(cache, list):
@@ -206,9 +178,7 @@ class CPAttentionWrapper(nn.Module):
         if is_decode:
             # Ring Reduce (Pass-Q/Partial)
             # Efficient for decode where Q is small and KV is distributed
-            logger.debug(
-                f"CPAttentionWrapper[decode]: q_s={q_s.shape}, k_all={k_all.shape}, v_all={v_all.shape}"
-            )
+
             context_out = self.adapter.ring_reduce_attention_sync(
                 q_s,
                 k_all,
@@ -233,15 +203,6 @@ class CPAttentionWrapper(nn.Module):
         # 5. Output Projection
         context_out = context_out[None, ...]  # Restore B
         output = self.base_attn.o_proj(context_out.reshape(B, L, -1))
-
-        # Debug: Log final attention output for decode at layer 0
-        if is_decode and hasattr(self.adapter, "current_layer_id"):
-            if self.adapter.current_layer_id == 0:
-                out_norm = float(mx.sqrt(mx.sum(output**2)))
-                out_mean = float(mx.mean(output))
-                logger.debug(
-                    f"CPAttentionWrapper[L0]: OUTPUT norm={out_norm:.6f}, mean={out_mean:.8f}"
-                )
 
         return output
 

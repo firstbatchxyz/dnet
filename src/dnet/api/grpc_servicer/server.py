@@ -4,6 +4,7 @@ from typing import Optional
 from grpc import aio as aio_grpc
 
 from dnet.utils.logger import logger
+from dnet.utils.grpc_config import GRPC_AIO_OPTIONS
 from .servicer import ShardApiServicer
 from ..inference import InferenceManager
 from dnet.protos.shard_api_comm_pb2_grpc import add_ShardApiServiceServicer_to_server
@@ -17,7 +18,7 @@ class GrpcServer:
         self.servicer = ShardApiServicer(self.inference_manager)
 
     async def start(self) -> None:
-        self.server = aio_grpc.server()
+        self.server = aio_grpc.server(options=GRPC_AIO_OPTIONS)
         add_ShardApiServiceServicer_to_server(self.servicer, self.server)
         listen_addr = f"[::]:{self.grpc_port}"
         self.server.add_insecure_port(listen_addr)

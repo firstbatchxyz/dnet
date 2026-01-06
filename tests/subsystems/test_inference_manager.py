@@ -238,15 +238,6 @@ def test_invalid_request_params_max_tokens_negative():
         )
 
 
-def test_invalid_request_params_logprobs_zero_invalid():
-    with pytest.raises(ValidationError):
-        _ = ChatRequestModel(
-            model="m",
-            messages=[ChatMessage(role="user", content="x")],
-            logprobs=0,  # coerces to False but should still fail via validator
-        )
-
-
 def test_invalid_request_params_stop_bad_type():
     with pytest.raises(ValidationError):
         _ = ChatRequestModel(

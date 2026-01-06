@@ -16,6 +16,7 @@ class TopologyAdapter(ABC):
 
     def __init__(self, runtime, discovery):
         self.runtime = runtime
+        self.runtime.adapter = self  # Back-reference for policies to access adapter
         self.discovery = discovery
         self.running = False
 

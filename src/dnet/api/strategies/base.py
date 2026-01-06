@@ -31,6 +31,7 @@ class ApiAdapterBase(ABC):
         logprobs: bool = False,
         top_logprobs: int = 0,
         decoding_config: Any = None,  # DecodingConfig
+        start_pos: int = 0,
     ) -> None: ...
 
     @abstractmethod

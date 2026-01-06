@@ -50,6 +50,13 @@ class FitInMemoryPolicy(ComputePolicy):
                 # 1) per-nonce KV
                 kv = self.runtime.get_or_make_kv(msg.nonce)
 
+                # Set CP/Ring context for unique tag generation
+                if hasattr(self.runtime.adapter, "set_active_context"):
+                    self.runtime.adapter.set_active_context(msg.nonce)
+
+                if hasattr(self.runtime.adapter, "set_current_rope_offset"):
+                    self.runtime.adapter.set_current_rope_offset(msg.rope_offset)
+
                 # 2) get input tensor from pool
                 input_buffer = self.runtime.input_pool.get_buffer(msg.pool_id)
                 if input_buffer is None:
@@ -100,6 +107,10 @@ class FitInMemoryPolicy(ComputePolicy):
                     except Exception:
                         pass
                     for lyr in window_layers:
+                        # Set current layer on adapter for ring tags
+                        if hasattr(self.runtime.adapter, "set_current_layer"):
+                            self.runtime.adapter.set_current_layer(lyr)
+
                         with self.runtime._mlx_lock:
                             x = self.runtime.model.apply_single_layer(lyr, x, cache=kv)
                             try:
@@ -133,9 +144,29 @@ class FitInMemoryPolicy(ComputePolicy):
                     # build output ActivationMessage
                     if nxt >= self.runtime.model_metadata.num_layers:
                         # end-shard sampling
+
+                        # CP multi-rank: Only the last rank holds the final token
+                        # of the distributed sequence. Other ranks finish silently.
+                        cp_num_ranks = getattr(self.runtime, "cp_num_ranks", 1)
+                        cp_rank_id = getattr(self.runtime, "cp_rank_id", 0)
+                        if cp_num_ranks > 1 and cp_rank_id != cp_num_ranks - 1:
+                            # Not the last rank in CP - release resources and return
+                            self.runtime.input_pool.release(msg.pool_id)
+                            return
+
                         try:
                             with self.runtime._mlx_lock:
-                                y = self.runtime.model.normalize(x_cast)
+                                # We only need the last token's logits for next-token prediction
+                                # Slicing here drastically reduces memory usage (avoiding [B, S, V] projection)
+                                # Handle both 3D [B, S, H] and 2D [S, H] tensors
+                                if len(x_cast.shape) >= 3:
+                                    x_last = x_cast[:, -1:, :]
+                                elif len(x_cast.shape) == 2:
+                                    x_last = x_cast[-1:, :]
+                                else:
+                                    x_last = x_cast  # 1D or scalar, use as-is
+
+                                y = self.runtime.model.normalize(x_last)
                                 y = self.runtime.model.lm_project(y)
 
                             # Sampling

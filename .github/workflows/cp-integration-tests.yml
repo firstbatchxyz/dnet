@@ -1,0 +1,109 @@
+name: CP Integration Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_filter:
+        description: 'Model filter for tests (e.g. "qwen")'
+        required: false
+        default: ''
+  pull_request:
+    paths:
+      - 'src/dnet/core/cp/**'
+      - 'src/dnet/shard/adapters/context_parallel.py'
+      - 'src/dnet/api/strategies/context_parallel.py'
+      - 'tests/integration/test_cp_*.py'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cp-integration-tests:
+    runs-on: mac2.metal
+    timeout-minutes: 60
+    env:
+      PROJECT_ROOT: ${{ github.workspace }}
+      PYTHONPATH: src
+      DNET_CP_ENABLED: 'true'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Environment
+        uses: ./.github/actions/setup-env
+        with:
+          python_version: '3.12'
+
+      - name: Enable CP in .env
+        run: |
+          # Force DNET_CP_ENABLED=true in .env file (overrides default)
+          # Note: macOS sed requires -i '' for in-place edit
+          if grep -q "^DNET_CP_ENABLED=" .env 2>/dev/null; then
+            sed -i '' 's/^DNET_CP_ENABLED=.*/DNET_CP_ENABLED=true/' .env
+          else
+            echo "DNET_CP_ENABLED=true" >> .env
+          fi
+          echo "Updated .env:"
+          grep DNET_CP_ .env || echo "No DNET_CP_ settings found"
+
+      - name: Ensure compatible gRPC/protobuf versions
+        run: |
+          uv pip install --upgrade "grpcio>=1.75.1" "protobuf>=6.31.1"
+
+      - name: Run CP unit tests
+        run: |
+          uv run pytest tests/subsystems/test_cp_*.py -v --tb=short
+
+      - name: Kill processes on required ports
+        run: |
+          for port in 8080 8081 58080 58081; do
+            lsof -ti:$port | xargs kill -9 2>/dev/null || true
+          done
+          sleep 2
+
+      - name: Verify CP environment
+        run: |
+          echo "DNET_CP_ENABLED=${DNET_CP_ENABLED}"
+          if [ "$DNET_CP_ENABLED" != "true" ]; then
+            echo "::error::DNET_CP_ENABLED is not set to true"
+            exit 1
+          fi
+
+      - name: Start shard server
+        uses: ./.github/actions/start-shard
+        with:
+          http_port: '8081'
+          grpc_port: '58081'
+
+      - name: Start API server
+        uses: ./.github/actions/start-api
+        with:
+          http_port: '8080'
+          grpc_port: '58080'
+
+      - name: Run integration tests
+        run: |
+          sleep 10  # Wait for servers to initialize
+          echo "Running tests with DNET_CP_ENABLED=${DNET_CP_ENABLED}"
+          if [ -n "${{ github.event.inputs.model_filter }}" ]; then
+            uv run pytest tests/integration/test_model_catalog.py -v -x -k "${{ github.event.inputs.model_filter }}" --tb=short
+          else
+            uv run pytest tests/integration/test_model_catalog.py -v -x --tb=short
+          fi
+
+      - name: Cleanup servers
+        if: always()
+        uses: ./.github/actions/cleanup-servers
+
+      - name: Show logs on failure
+        if: failure()
+        run: |
+          echo "=== Shard logs ==="
+          cat shard.log 2>/dev/null || echo "(no shard log)"
+          echo ""
+          echo "=== API logs ==="
+          cat api.log 2>/dev/null || echo "(no API log)"

@@ -1,0 +1,73 @@
+syntax = "proto3";
+
+package dnetcp;
+
+// Context Parallelism ring communication service
+// Handles KV/Q block transfers and partial attention output merging
+service CPRingService {
+    // Bidirectional stream for efficient block transfer during ring attention
+    rpc StreamBlocks(stream CPBlockFrame) returns (stream CPBlockAck);
+
+    // Unary RPC for single-shot block transfer (fallback/debug)
+    rpc SendBlock(CPBlockFrame) returns (CPBlockAck);
+}
+
+// Configuration for CP distributed attention
+message CPConfig {
+    int32 rank_id = 1;
+    int32 num_ranks = 2;
+    repeated string rank_addresses = 3;  // Ordered ring: [rank0_addr, rank1_addr, ...]
+    string algorithm = 4;                // "pass_kv", "pass_q", "ring_reduce"
+}
+
+// Frame for streaming KV or Q blocks between CP ranks
+message CPBlockFrame {
+    string nonce = 1;           // Request identifier
+    int32 source_rank = 2;      // Sender rank ID
+    int32 layer_id = 3;         // Transformer layer index
+    int32 step = 4;             // Ring rotation step (0 to N-1)
+
+    oneof payload {
+        KVBlock kv_block = 5;
+        QBlock q_block = 6;
+        PartialOutput partial_output = 7;  // For ring reduction
+    }
+
+    uint64 seq = 8;             // Sequence number for ordering
+    int64 timestamp = 9;        // Unix timestamp ms
+}
+
+// Key-Value block for pass-KV algorithm
+message KVBlock {
+    bytes key_data = 1;         // Serialized key tensor
+    bytes value_data = 2;       // Serialized value tensor
+    repeated int32 key_shape = 3;
+    repeated int32 value_shape = 4;
+    string dtype = 5;           // "float16", "bfloat16", etc.
+    int32 k_start = 6;          // Global starting position of this KV block
+}
+
+// Query block for pass-Q algorithm
+message QBlock {
+    bytes query_data = 1;       // Serialized query tensor
+    repeated int32 shape = 2;
+    string dtype = 3;
+    repeated int32 token_indices = 4;  // Original indices for unsharding
+}
+
+// Partial attention output with merge statistics (for ring reduction)
+message PartialOutput {
+    bytes output_data = 1;      // Partial attention output
+    bytes max_scores = 2;       // Max attention scores per position
+    bytes log_sum_exp = 3;      // Log-sum-exp for stable merging
+    repeated int32 shape = 4;
+    string dtype = 5;
+}
+
+// Acknowledgment for block transfer
+message CPBlockAck {
+    string nonce = 1;
+    uint64 seq = 2;
+    bool accepted = 3;
+    string error_message = 4;   // Non-empty if accepted=false
+}

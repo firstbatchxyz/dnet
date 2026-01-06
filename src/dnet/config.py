@@ -242,6 +242,37 @@ class TopologySettings(BaseSettings):
     )
 
 
+class ContextParallelSettings(BaseSettings):
+    """Context parallelism configuration.
+
+    Context parallelism distributes the sequence dimension across multiple
+    devices for long-context inference (128K+ tokens).
+    """
+
+    model_config = SettingsConfigDict(env_prefix="DNET_CP_")
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable context parallelism mode",
+    )
+    algorithm: Literal["auto", "pass_kv", "pass_q", "ring_reduce"] = Field(
+        default="auto",
+        description="Ring attention algorithm (auto, pass_kv, pass_q, ring_reduce)",
+    )
+    min_context_for_cp: int = Field(
+        default=32768,
+        description="Minimum context length to enable CP (below this, single-device)",
+    )
+    min_tokens_for_pass_kv: int = Field(
+        default=256,
+        description="Minimum new tokens to prefer pass_kv over pass_q",
+    )
+    chunk_overlap: int = Field(
+        default=0,
+        description="Overlap between chunks for sliding window attention",
+    )
+
+
 class DnetSettings(BaseSettings):
     """Main dnet settings, loads from .env file."""
 
@@ -262,6 +293,9 @@ class DnetSettings(BaseSettings):
     grpc: GrpcSettings = Field(default_factory=GrpcSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     topology: TopologySettings = Field(default_factory=TopologySettings)
+    context_parallel: ContextParallelSettings = Field(
+        default_factory=ContextParallelSettings
+    )
 
 
 @lru_cache
@@ -284,4 +318,5 @@ __all__ = [
     "GrpcSettings",
     "StorageSettings",
     "TopologySettings",
+    "ContextParallelSettings",
 ]

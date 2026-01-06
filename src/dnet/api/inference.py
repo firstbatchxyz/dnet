@@ -19,6 +19,7 @@ from .cluster import ClusterManager
 from .model_manager import ModelManager
 from .strategies.base import ApiAdapterBase
 from dnet.core.decoding.config import DecodingConfig
+from dnet.utils.logger import logger
 
 
 async def arange(count: int):
@@ -61,6 +62,30 @@ class InferenceManager:
         For internet setups, this should be a public IP/DNS or overlay VPN IP.
         """
         await self.adapter.connect_first_shard(first_shard_ip, first_shard_port)
+        self._api_callback_addr = api_callback_addr
+
+    async def connect_to_cp_ranks(
+        self, rank_addresses: list[str], api_callback_addr: str
+    ) -> None:
+        """
+        Connect to all CP ranks for multi-rank broadcasting.
+
+        Args:
+            rank_addresses: List of "host:port" strings for each rank.
+            api_callback_addr: Callback address for shards to send tokens.
+        """
+        from dnet.api.strategies.context_parallel import CPApiAdapter
+
+        if isinstance(self.adapter, CPApiAdapter) and len(rank_addresses) > 1:
+            await self.adapter.connect_all_ranks(rank_addresses)
+            logger.info("Connected to %d CP ranks", len(rank_addresses))
+        else:
+            # Fallback to single shard connection
+            if rank_addresses:
+                parts = rank_addresses[0].split(":")
+                ip, port = parts[0], int(parts[1])
+                await self.adapter.connect_first_shard(ip, port)
+
         self._api_callback_addr = api_callback_addr
 
     async def generate_stream(self, req: ChatRequestModel):
@@ -154,6 +179,12 @@ class InferenceManager:
                 else 1,
             )
 
+            # RoPE offset: for prefill, start at 0. For decode, offset by prompt + generated tokens.
+            # During first iteration, we're processing the prompt from position 0.
+            # During subsequent iterations, we're adding tokens at position prompt_len + token_idx.
+            is_prefill = len(tokens) == 0
+            rope_start_pos = 0 if is_prefill else len(prompt_tokens) + len(tokens) - 1
+
             # Send tokens to first shard
             await self.adapter.send_tokens(
                 tokens=tok_bytes,
@@ -162,8 +193,9 @@ class InferenceManager:
                 logprobs=req.logprobs if req.logprobs else False,
                 top_logprobs=req.top_logprobs if req.top_logprobs else 0,
                 decoding_config=decoding_config,
+                start_pos=rope_start_pos,
             )
-            result = await self.adapter.await_token(nonce, timeout_s=300.0)
+            result = await self.adapter.await_token(nonce, timeout_s=3600.0)
             token = int(result.token_id)
 
             # Accumulate logprobs

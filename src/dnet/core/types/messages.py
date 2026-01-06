@@ -46,6 +46,8 @@ class ActivationMessage:
     repetition_penalty: float = 1.0
     min_p: float = 0.0
     min_tokens_to_keep: int = 1
+    # CP RoPE offset
+    rope_offset: int = 0
 
     @classmethod
     def from_proto(cls, proto_msg: ActivationRequest, pool_id: int = 0):
@@ -74,6 +76,7 @@ class ActivationMessage:
             min_tokens_to_keep=proto_msg.min_tokens_to_keep
             if proto_msg.HasField("min_tokens_to_keep")
             else 1,
+            rope_offset=proto_msg.activation.rope_offset,
         )
 
     def to_proto(self, data: bytes) -> ActivationRequest:
@@ -86,6 +89,7 @@ class ActivationMessage:
                 shape=list(self.shape),
                 layer_id=self.layer_id,
                 dtype=self.dtype,
+                rope_offset=self.rope_offset,
             ),
             timestamp=self.timestamp,
             node_origin=self.node_origin,

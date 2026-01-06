@@ -58,6 +58,9 @@ class ShardRuntime:
     Topology-agnostic shard runtime.
     """
 
+    # Back-reference to adapter (set by adapter on init)
+    adapter: Any = None
+
     def __init__(
         self,
         shard_id,
@@ -176,6 +179,19 @@ class ShardRuntime:
         self._assigned_sorted = sorted(self.assigned_layers)
         self._assigned_set = set(self._assigned_sorted)
         self.model_path = req.model_path
+        self.cp_rank_id = req.cp_rank_id
+        self.cp_num_ranks = req.cp_num_ranks
+
+        if req.max_position_embeddings:
+            logger.info(
+                "Overriding max_position_embeddings to %s", req.max_position_embeddings
+            )
+            # Override common config keys for context limit
+            self.model_metadata.model_config["max_position_embeddings"] = (
+                req.max_position_embeddings
+            )
+            self.model_metadata.model_config["seq_length"] = req.max_position_embeddings
+            self.model_metadata.model_config["n_ctx"] = req.max_position_embeddings
 
         local_count = max(1, len(self.assigned_layers))
         requested_w = max(1, int(req.window_size))
@@ -350,6 +366,9 @@ class ShardRuntime:
                 kv_bits=self.kv_cache_config.bits,
                 kv_group=self.kv_cache_config.group_size,
             )
+            # Notify adapter to reset its state (e.g., CPAdapter._local_k_start)
+            if self.adapter and hasattr(self.adapter, "reset_state"):
+                self.adapter.reset_state()
             logger.info("Node %s: Cache reset successfully", self.shard_id)
         except Exception as e:
             logger.error("Node %s: Error resetting cache: %s", self.shard_id, e)

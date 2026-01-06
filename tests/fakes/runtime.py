@@ -111,6 +111,8 @@ class FakeRuntimeForPolicy:
         self._emitted: list = []
         self._compute_busy = threading.Event()
         self._loop = None
+        self.cp_rank_id = 0
+        self.cp_num_ranks = 1
 
     def attach_loop(self, loop):
         self._loop = loop
